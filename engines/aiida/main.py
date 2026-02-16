@@ -52,14 +52,16 @@ def main():
     # --- 绑定发送逻辑 ---
     async def handle_send():
         text = components['input'].value
+        # 获取当前选择的路径（如果是通过 Browse 按钮选择的，它也会在 archive_select 的 value 中）
         selected_arch = components['archive_select'].value
+        
         if not text: return
         
+        # 1. 立即清空输入，防止卡顿
         components['input'].value = ""
         
-        # UI 交互
+        # 2. UI 交互：立即显示用户消息
         with components['chat_area']:
-            # 🆕 用户气泡：使用 fit-content 逻辑
             ui.chat_message(text, name='You', sent=True) \
                 .classes('self-end font-medium text-white') \
                 .props('bg-color=primary text-color=white')
@@ -72,11 +74,20 @@ def main():
         ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
         
         try:
-            final_intent = f"Using {selected_arch}: {text}" if selected_arch != '(None)' else text
+            # 3. 【关键修改】：构造符合感知器正则匹配的意图字符串
+            # 必须包含 "archive" 关键字并将路径用单引号包裹
+            if selected_arch and selected_arch != '(None)':
+                final_intent = f"Inspect archive '{selected_arch}'. User task: {text}"
+            else:
+                final_intent = text
+            
+            # 4. 调用异步 Engine
             await engine.run_once(intent=final_intent)
+            
         except Exception as e:
             ui.notify(f"System Error: {str(e)}", type='negative')
         finally:
+            # 5. 移除加载动画
             thinking_container.delete()
 
     components['send_btn'].on('click', handle_send)

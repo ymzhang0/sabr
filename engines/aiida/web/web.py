@@ -1,7 +1,7 @@
-from nicegui import ui
+from nicegui import ui, run
 import os
 from engines.aiida.tools.profile import list_local_archives
-
+from tkinter import filedialog, Tk
 def create_layout():
     # 🎨 注入全局 CSS 魔法：解决气泡自适应、滚动条和布局间距
     ui.add_head_html('''
@@ -27,59 +27,72 @@ def create_layout():
             ui.badge('AiiDA v2.6', color='blue-1 text-blue-8').props('outline').classes('ml-2')
 
     # --- 2. 侧边栏 (配色与右侧统一) ---
-    with ui.left_drawer(value=True, fixed=True).classes('q-pa-lg border-r') as drawer:
+    with ui.left_drawer(value=True, fixed=True).classes('q-pa-lg border-r'):
         with ui.column().classes('w-full gap-6'):
-            # 标题部分
-            with ui.column().classes('gap-1'):
-                ui.label('Data Resources').classes('text-xs font-bold text-blue-5 tracking-widest uppercase')
-                ui.label('Select your provenance source').classes('text-xs text-grey-5')
+            ui.label('Data Resources').classes('text-xs font-bold text-blue-5 tracking-widest uppercase')
             
-            # 选择器优化
+            # 选择器：显示已选路径
             archive_select = ui.select(
                 options=['(None)'] + list_local_archives(),
-                label='Target Archive',
+                label='Selected Resource',
                 value='(None)'
-            ).classes('w-full').props('outlined rounded bg-white color=primary')
+            ).classes('w-full').props('outlined rounded bg-white dense')
 
-            # 上传区改为更高级的按钮组样式
-            def handle_upload(e):
-                with open(e.name, 'wb') as f: f.write(e.content.read())
-                ui.notify(f'Successfully imported {e.name}', color='positive')
-                archive_select.set_options(['(None)'] + list_local_archives())
-                archive_select.value = e.name
+            # 🆕 本地浏览按钮：核心功能
+            async def pick_local_file():
+                # 在 io_bound 中运行，防止阻塞 NiceGUI 事件循环
+                def get_path():
+                    root = Tk()
+                    root.withdraw()
+                    root.attributes('-topmost', True) # 确保窗口在最前面
+                    file_path = filedialog.askopenfilename(filetypes=[("AiiDA Archives", "*.aiida *.zip")])
+                    root.destroy()
+                    return file_path
 
-            with ui.card().classes('w-full bg-blue-50/30 border-dashed border-blue-200 shadow-none p-4 items-center'):
-                ui.icon('cloud_upload', size='md', color='blue-4')
-                ui.upload(on_upload=handle_upload, auto_upload=True) \
-                    .props('flat color=primary dense').classes('w-full')
-                ui.label('Drag & drop .aiida files').classes('text-[10px] text-blue-4 mt-1')
+                selected_path = await run.io_bound(get_path)
+                if selected_path:
+                    # 将绝对路径加入选项并选中，这样 Perceptor 就能拿到完整路径
+                    if selected_path not in archive_select.options:
+                        archive_select.options.append(selected_path)
+                    archive_select.value = selected_path
+                    ui.notify(f'Selected: {os.path.basename(selected_path)}')
+
+            ui.button('Browse Computer', icon='folder', on_click=pick_local_file) \
+                .props('unelevated rounded color=primary').classes('w-full py-2')
 
             ui.separator().classes('q-my-sm')
 
-            # 内部日志 (隐藏得更深)
-            with ui.row().classes('w-full items-center justify-between pr-2'):
-                with ui.expansion('Insight', icon='psychology').classes('w-full text-grey-6 text-sm'):
-                    debug_log = ui.markdown('System standby.').classes('text-[11px] p-3 bg-white rounded-xl border leading-relaxed')
-                    thought_log = ui.log().classes('w-full h-48 bg-slate-900 text-slate-300 text-[10px] mt-2 rounded-xl shadow-inner')
-                # 复制按钮：点击后将 debug_log 的内容复制到剪贴板
-                ui.button(icon='content_copy', on_click=lambda: ui.run_javascript(f'navigator.clipboard.writeText(`{debug_log.content}`)')) \
+            # 🆕 增加复制按钮的 Insight 区域
+            with ui.row().classes('w-full items-center no-wrap'):
+                with ui.expansion('Engine Insight', icon='psychology').classes('flex-grow text-grey-6 text-sm'):
+                    debug_log = ui.markdown('System standby.').classes('text-[11px] p-3 bg-white rounded-xl border')
+                    thought_log = ui.log().classes('w-full h-48 bg-slate-900 text-slate-300 text-[10px] mt-2 rounded-xl')
+                
+                # 点击复制按钮：将 markdown 内容写进剪贴板
+                ui.button(icon='content_copy', 
+                          on_click=lambda: ui.run_javascript(f'navigator.clipboard.writeText({repr(debug_log.content)})')) \
                     .props('flat round dense color=grey-4') \
                     .tooltip('Copy insights')
-    # --- 3. 底部输入框 (更高、更长) ---
-    with ui.footer(fixed=True).classes('bg-transparent border-none flex justify-center pb-10'):
-        # 增加 max-w-5xl 使其在右侧扩展更多空间
-        with ui.row().classes('w-full max-w-5xl bg-white shadow-2xl rounded-[32px] px-8 py-4 border-2 border-blue-50 items-center no-wrap'):
-            input_field = ui.textarea(placeholder='Describe the analysis you want to perform...').classes('flex-grow custom-input').props('borderless autogrow')
+
+    # --- 3. 底部输入框 (修正间距与宽度) ---
+    with ui.footer(fixed=True).classes('bg-transparent border-none flex justify-start pb-10'):
+        # 🚀 关键修改：
+        # ml-[340px]: 彻底避开 300px 宽的侧边栏，并留出 40px 的空隙
+        # mr-12: 确保右侧也有一定的空隙，不贴边
+        # w-full: 在剩余空间内占满
+        # max-w-none: 移除之前的 vw 限制，允许无限向右扩展
+        with ui.row().classes('w-full max-w-none ml-[340px] mr-12 bg-white shadow-2xl rounded-[32px] px-8 py-4 border-2 border-blue-50 items-center no-wrap'):
+            input_field = ui.textarea(placeholder='Describe the analysis...').classes('flex-grow custom-input').props('borderless autogrow')
             
             with ui.row().classes('items-center gap-2'):
                 ui.button(icon='attach_file').props('flat round color=grey-4')
                 send_btn = ui.button(icon='auto_awesome', color='primary').props('round elevated size=lg')
 
-    # --- 4. 主对话区 (扩展宽度) ---
-    # 改为 max-w-5xl 并调整对齐
-    with ui.column().classes('w-full max-w-5xl mx-auto q-pa-xl mb-40'):
-        chat_area = ui.column().classes('w-full gap-8 items-start') # 确保 items-start 防止强制拉伸
-    
+    # --- 4. 主对话区 (同步修正间距) ---
+    # 🚀 关键修改：ml-[340px] 确保与输入框对齐，且不被侧边栏遮挡
+    with ui.column().classes('w-full max-w-none ml-[340px] mr-12 q-pa-lg mb-40'):
+        chat_area = ui.column().classes('w-full gap-8 items-start') 
+
     return {
         'chat_area': chat_area, 
         'input': input_field, 

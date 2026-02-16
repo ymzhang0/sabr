@@ -24,7 +24,7 @@ class GeminiBrain:
         contents = [f"Observation Source: {observation.source}\nContent: {observation.raw}"]
         
         try:
-            response = await self._client.models.generate_content(
+            response = await self._client.aio.models.generate_content(
                 model=self._model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(
