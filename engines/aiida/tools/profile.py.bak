@@ -1,0 +1,195 @@
+"""
+Tools for inspecting the AiiDA profile (database statistics, groups).
+"""
+
+import io
+from aiida import load_profile
+from aiida.orm import Group, Node, QueryBuilder
+
+def get_group(group_name: str):
+    """
+    Get a specific group object by name.
+    Useful for checking if a group exists before inspecting it.
+    Args:
+        group_name (str): The name/label of the group.
+    """
+    qb_group = QueryBuilder().append(
+        Group, 
+        filters={"label": group_name}, 
+        project=["*"]
+        )
+    return qb_group.first()
+    
+def count_nodes(node_type: str, process_type: str = None):
+    """
+    Count the number of nodes of a specific type in the database.
+    Args:
+        node_type (str): The AiiDA node type path/string.
+        process_type (str): Optional process type string.
+    """
+
+    filters = {"node_type": node_type}
+    if process_type:
+        filters["process_type"] = process_type
+
+    qb = QueryBuilder().append(Node, filters=filters)
+    return qb.count()
+
+def list_groups(profile_name: str = None):
+    """
+    Check the Profile Overview. List all user groups available in the AiiDA profile.
+    Use this tool when asked to "look at my profile", "show my data", or "what groups do I have?".
+    
+    Args:
+        profile_name (str): Optional. If specified, switch to this profile before listing groups.
+                            Use this when the user says "in profile X" or "switch to profile X".
+                            
+    Returns a formatted string report with Group IDs (PK), Labels, and Count.
+    """
+    if profile_name:
+        try:
+            load_profile(profile_name, allow_switch=True)
+        except Exception as e:
+            return f"Error loading profile '{profile_name}': {e}"
+
+    output = io.StringIO()
+    output.write(f"{'pk':<6} {'label':<60} {'count':<10}\n")
+    output.write("-" * 76 + "\n")
+    
+    qb_group = QueryBuilder().append(Group, project=["label", "id", "*"])
+    for [label, pk, group] in qb_group.all():
+        type_string = group.type_string
+        if type_string == "core.import":
+            continue
+        count = len(group.nodes)
+
+        output.write(f"{pk:<6} {label:<60} {count:<10}\n")
+    
+    return output.getvalue()
+
+def get_statistics(profile_name: str = None):
+    """
+    Get general database statistics.
+    Use this to get a high-level summary of all data types stored in the profile.
+    
+    Args:
+        profile_name (str): Optional. Switch to this profile before getting statistics.
+        
+    Returns a formatted string report.
+    """
+    if profile_name:
+        try:
+            load_profile(profile_name, allow_switch=True)
+        except Exception as e:
+            return f"Error loading profile '{profile_name}': {e}"
+
+    output = io.StringIO()
+    qb = QueryBuilder().append(Node, project=["node_type", "process_type"]).distinct()
+    
+    output.write(f"{'count':<10} {'node_type':<60} {'process_type':<60}\n")
+    output.write("-" * 132 + "\n")
+    
+    for [node_type, process_type] in qb.all():
+        if process_type:
+            count = count_nodes(node_type, process_type)
+            output.write(f"{count:<10} {node_type:<60} {process_type:<60}\n")
+        else:
+            count = count_nodes(node_type, None)
+            output.write(f"{count:<10} {node_type:<60} {'None':<60}\n")
+            
+    return output.getvalue()
+
+
+def fetch_groups_data(profile_name: str = None):
+    """
+    Fetch raw list of groups for UI (not for Agent).
+    Returns: List[Dict] with keys 'pk', 'label', 'count'.
+    """
+    if profile_name:
+        try:
+            load_profile(profile_name, allow_switch=True)
+        except Exception:
+            return []
+
+    groups_data = []
+    # If no profile loaded, QueryBuilder will fail. We let it fail so app catches it 
+    # OR we try to handle it. app.py catches generic Exception.
+    qb_group = QueryBuilder().append(Group, project=["label", "id", "*"])
+    for [label, pk, group] in qb_group.all():
+        type_string = group.type_string
+        if type_string == "core.import":
+            continue
+        count = len(group.nodes)
+        groups_data.append({
+            "pk": pk,
+            "label": label,
+            "count": count
+        })
+    return groups_data
+
+def search_nodes(label_pattern: str = None, node_type: str = None, limit: int = 10, profile_name: str = None):
+    """
+    Search for nodes in the database by label or type.
+    Use this to find specific calculations or data when you don't know the PK.
+    
+    Args:
+        label_pattern (str): Search pattern for the node label (e.g., "Results%"). uses SQL LIKE syntax usually, or simple string match.
+        node_type (str): Filter by node type string (e.g., "data.core.structure.StructureData").
+        limit (int): Max results.
+        profile_name (str): Switch profile if needed.
+    """
+    if profile_name:
+        try:
+            load_profile(profile_name, allow_switch=True)
+        except Exception:
+            pass
+    if not results:
+        return "No nodes found matching criteria."
+        
+    return "\n".join(results)
+
+def load_archive_profile(file_path: str):
+    """
+    Load an AiiDA archive (sqlite zip) as the current profile.
+    
+    Args:
+        file_path (str): Absolute path to the .aiida file.
+        
+    Returns:
+        str: Success message or Error.
+    """
+    import os
+    if not os.path.exists(file_path):
+        return f"Error: File '{file_path}' does not exist."
+        
+    try:
+        from aiida.storage.sqlite_zip.backend import SqliteZipBackend
+        from aiida import load_profile
+        
+        # Create a read-only profile from the archive
+        profile = SqliteZipBackend.create_profile(file_path)
+        
+        # Switch to this profile
+        load_profile(profile, allow_switch=True)
+        return f"Successfully loaded archive: {os.path.basename(file_path)}"
+    except Exception as e:
+        return f"Error loading archive: {e}"
+
+    qb = QueryBuilder().append(Node, project=["*"])
+    
+    if label_pattern:
+        qb.add_filter(Node, {"label": {"like": label_pattern}})
+    if node_type:
+        qb.add_filter(Node, {"node_type": {"like": f"%{node_type}%"}})
+        
+    qb.limit(limit)
+    qb.order_by({Node: {"ctime": "desc"}})
+    
+    results = []
+    for [node] in qb.all():
+        results.append(f"PK={node.pk} | Label={node.label} | Type={node.node_type} | Created={node.ctime}")
+        
+    if not results:
+        return "No nodes found matching criteria."
+        
+    return "\n".join(results)

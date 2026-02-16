@@ -1,0 +1,47 @@
+# --- Python 基础 ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+build/
+dist/
+
+# --- AiiDA 相关 ---
+# 隐藏的本地配置目录，千万不要上传，里面有你的数据库路径和密码
+.aiida/
+# AiiDA 的导出文件（通常很大且包含科研私密数据，建议不进 Git）
+*.aiida
+*.zip
+# 如果你想保留一些示例数据，可以放进 examples/data 并不加 ignore
+
+# --- 密钥与配置 ---
+# 包含你的 GEMINI_API_KEY
+.env
+# 包含 AiiDA 的敏感配置
+config.json
+
+# --- 运行日志与临时文件 ---
+*.log
+.nicegui/
+temp_script_*.py
+
+# --- IDE 相关 ---
+.vscode/
+.idea/
+.DS_Store
+
+# 框架测试生成的临时文件
+tests/temp_*
+*.output
+
+# 环境变量（保护你的 API 密钥）
+.env
+.env.local
+
+# 虚拟环境
+.venv/
+__pycache__/
+
+# 如果有自动生成的文档
+site/
