@@ -1,6 +1,7 @@
 # engines/aiida/brain_factory.py
 from sab_core.brain.gemini import GeminiBrain
-from engines.aiida.tools.process import inspect_process, run_aiida_code
+from engines.aiida.tools.process import inspect_process
+from engines.aiida.tools.interpreter import run_aiida_code
 from engines.aiida.tools.profile import list_groups, get_statistics
 
 EVOLUTION_PROMPT = """

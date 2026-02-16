@@ -1,32 +1,30 @@
-# examples/aiida/web/reporter.py
 from sab_core.reporters.base import BaseReporter
-from sab_core.schema.observation import Observation
-from sab_core.schema.action import Action
+from nicegui import ui
 
 class NiceGUIReporter(BaseReporter):
     def __init__(self, components):
-        """
-        传入我们在 web.py 中创建的 UI 组件字典
-        """
         self.comp = components
 
-    def emit(self, observation: Observation, action: Action) -> None:
-        # 1. 更新右侧的 Schema 地图
-        # 如果是 AiiDA 相关的扫描结果，更新到 debug 框
+    def emit(self, observation, action):
+        # 更新 Schema 地图 (侧边栏)
         if "aiida" in observation.source:
-            self.comp['debug_log'].set_content(observation.raw)
-        
-        # 2. 在思考日志中打印当前的动作
-        self.comp['thought_log'].push(f"👀 [Observed] {observation.source}")
-        self.comp['thought_log'].push(f"🧠 [Decision] {action.name}: {action.payload}")
-        
-        # 3. 如果有 AI 的回复内容，可以在这里处理气泡更新
-        # (假设 Action 的 payload 里包含要说的话)
-        if action.name == "say":
-            with self.comp['chat_area']:
-                import nicegui.ui as ui
-                ui.chat_message(action.payload, name='Agent', avatar='...')
+            # 使用更清爽的渲染方式
+            self.comp['debug_log'].set_content(f"```yaml\n{observation.raw}\n```")
 
-    def report_thought(self, thought: str) -> None:
-        # 专门用来显示 Gemini 的思考链 (Chain of Thought)
-        self.comp['thought_log'].push(f"💭 {thought}")
+        # 记录内部思考 (Console 风格)
+        self.comp['thought_log'].push(f"Decision: {action.name}")
+
+        # 渲染 AI 回复
+        if action.name == "say":
+            content = action.payload.get("content", "")
+            with self.comp['chat_area']:
+                with ui.row().classes('w-full items-start gap-2 mb-4'):
+                    ui.avatar(icon='auto_awesome', color='primary').props('size=sm')
+                    with ui.column().classes('max-w-2xl'):
+                        # 气泡容器
+                        with ui.card().classes('bg-white shadow-sm border-none p-4 rounded-2xl'):
+                            ui.markdown(content).classes('text-md text-grey-9')
+        
+        # 如果是工具调用，也给个视觉反馈
+        elif action.name != "no_op":
+            self.comp['thought_log'].push(f"🛠️ Tool Call: {action.name}({action.payload})")

@@ -1948,6 +1948,7 @@ dependencies = [
     { name = "nicegui" },
     { name = "psutil" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
     { name = "tenacity" },
 ]
 
@@ -1976,6 +1977,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "tenacity", specifier = ">=8.0" },
 ]
 provides-extras = ["dev", "aiida"]

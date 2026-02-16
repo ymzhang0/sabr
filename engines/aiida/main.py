@@ -6,9 +6,23 @@ from engines.aiida.perceptors.human import HumanPerceptor
 from engines.aiida.brain_factory import create_aiida_brain
 from engines.aiida.web.web import create_layout
 from engines.aiida.reporters.nicegui import NiceGUIReporter
-from engines.aiida.executor import AiiDAExecutor 
+from engines.aiida.executors.executor import AiiDAExecutor 
 
 def main():
+
+    ui.add_head_html('''
+        <style>
+            .nicegui-chat-message { margin-bottom: 20px; }
+            .q-message-text { border-radius: 18px !important; }
+            /* 模仿 Gemini 的输入框阴影 */
+            .q-field--outlined .q-field__control {
+                border-radius: 28px !important;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
+                border: 1px solid #eee !important;
+            }
+        </style>
+    ''')
+
     # --- 初始化 UI ---
     components = create_layout()
     
@@ -41,34 +55,39 @@ def main():
         selected_arch = components['archive_select'].value
         if not text: return
         
-        # 1. 立即清空输入，防止卡顿
         components['input'].value = ""
         
-        # 构造增强意图
-        # 如果选了 archive，就把路径和你的问题揉在一起发给感知器
-        final_intent = text
-        if selected_arch and selected_arch != '(None)':
-            final_intent = f"Analyze archive '{selected_arch}'. USER REQUEST: {text}"
-        else:
-            final_intent = f"USER REQUEST: {text}"
-
-        # 3. UI 交互
+        # UI 交互
         with components['chat_area']:
-            ui.chat_message(text, name='You', sent=True)
-            spinner = ui.spinner(size='sm')
+            # 🆕 用户气泡：使用 fit-content 逻辑
+            ui.chat_message(text, name='You', sent=True) \
+                .classes('self-end font-medium text-white') \
+                .props('bg-color=primary text-color=white')
+            
+            thinking_container = ui.row().classes('w-full items-center gap-3')
+            with thinking_container:
+                ui.spinner(size='sm', color='primary', thickness=3)
+                ui.label('SABR is processing your request...').classes('text-sm text-grey-4 animate-pulse')
+
+        ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
         
         try:
-            # 【关键】engine.run_once 会把 final_intent 传给 s_pcp.perceive
-            # s_pcp 会返回：最新的资源地图 + 你的原始问题
+            final_intent = f"Using {selected_arch}: {text}" if selected_arch != '(None)' else text
             await engine.run_once(intent=final_intent)
         except Exception as e:
             ui.notify(f"System Error: {str(e)}", type='negative')
-            components['thought_log'].push(f"❌ ERROR: {e}")
         finally:
-            spinner.delete()
+            thinking_container.delete()
 
     components['send_btn'].on('click', handle_send)
 
+    ui.run(
+        port=8080, 
+        title="SABR-AiiDA Explorer", 
+        reload=False,   # 🚩 Windows 下 reload=True 极易导致进程卡死，建议关闭
+        dark=False, 
+        show=True       # 自动打开浏览器，省得你手动点
+    )
+
 if __name__ in {"__main__", "__mp_main__"}:
     main()
-    ui.run(port=8080, title="AiiDA Explorer", reload=True)

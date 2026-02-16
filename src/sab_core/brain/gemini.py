@@ -49,4 +49,10 @@ class GeminiBrain:
             return Action(name="say", payload={"content": text})
 
         except Exception as e:
+            # 针对 400 错误的特殊友好提示
+            if "INVALID_ARGUMENT" in str(e):
+                return Action(
+                    name="say", 
+                    payload={"content": "⚠️ I had trouble understanding the tool parameters. I'll try to simplify my request."}
+                )
             return Action(name="error_reported", payload={"message": str(e)})

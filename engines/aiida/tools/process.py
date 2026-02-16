@@ -46,13 +46,16 @@ class ProcessTree:
 
 # --- AI 核心接口 (The Hub) ---
 
-def inspect_process(identifier: Union[str, int]) -> str:
+def inspect_process(identifier: str) -> str: # 🚩 将 Union[str, int] 改为 str
     """
-    【最常用工具】深入检查任何 AiiDA 进程（WorkChain 或 Calculation）。
-    返回包括：状态、完整的调用树、输入输出摘要、以及详细日志。
+    Inspect an AiiDA process (WorkChain or Calculation).
+    Args:
+        identifier (str): The PK (as string) or UUID of the process.
     """
     try:
+        # load_node 能够自动处理字符串格式的数字 PK
         node = orm.load_node(identifier)
+
         if not isinstance(node, ProcessNode):
             return f"Error: Node {identifier} is a {type(node)}, not a ProcessNode."
 
