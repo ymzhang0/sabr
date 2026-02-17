@@ -1,38 +1,56 @@
+# engines/aiida/executors/executor.py
+
+import asyncio
 from typing import Any
-from engines.aiida.tools import process, profile, interpreter
+from loguru import logger
 from sab_core.schema.action import Action
 
+# 批量导入你的工具库
+from engines.aiida.tools import (
+    profile, calculation, process, group, 
+    submission, remote, repository, bands, interpreter
+)
+
 class AiiDAExecutor:
-    """
-    通用执行器：将 Action 路由到对应的 Tool 函数。
-    """
     def __init__(self):
-        # 建立 动作名 -> 函数 的映射表
-        self._tool_map = {
-            "inspect_process": process.inspect_process,
-            "list_groups": profile.list_groups,
+        # 建立一个完整的工具清单
+        self.tool_map = {
+            # 1. 环境与统计 (Profile/Group)
             "get_statistics": profile.get_statistics,
-            "switch_profile": profile.switch_profile,
-            "run_aiida_code": interpreter.run_aiida_code, # 联动你的解释器
+            "list_groups": profile.list_groups,
+            "inspect_group": group.inspect_group,
+            
+            # 2. 深度诊断 (Process/Calculation)
+            "inspect_process": process.inspect_process,
+            "get_calculation_io": calculation.get_calculation_io,
+            "get_process_log": process.get_process_log,
+            
+            # 3. 数据提取 (Bands/Remote/Repo)
+            "get_bands_plot_data": bands.get_bands_plot_data,
+            "list_remote_files": remote.list_remote_files,
+            "get_node_file_content": repository.get_node_file_content,
+            
+            # 4. 任务提交 (Submission)
+            "inspect_workchain": submission.inspect_workchain,
+            "submit_draft": submission.submit_draft,
+            
+            # 5. 兜底方案：动态执行
+            "run_python_code": interpreter.run_python_code,
         }
 
     async def execute(self, action: Action) -> Any:
-        """
-        根据 Brain 给出的 Action，寻找对应的工具并执行。
-        """
-        if action.name == "say":
-            # 如果是说话，直接返回内容
-            return action.payload.get("content")
+        if action.name == "say": return None
 
-        if action.name in self._tool_map:
-            tool_func = self._tool_map[action.name]
-            # 执行工具（注意：如果工具是同步的，这里直接调用；如果是异步，加 await）
-            try:
-                # 这里的 **action.payload 会自动把 AI 给出的参数对号入座
-                # 例如 AI 给出了 {"script": "print(1)"}, 则等同于 run_aiida_code(script="print(1)")
-                result = tool_func(**action.payload)
-                return result
-            except Exception as e:
-                return f"Execution Error in {action.name}: {str(e)}"
+        tool_func = self.tool_map.get(action.name)
+        if not tool_func:
+            logger.warning(f"⚠️ Action '{action.name}' is not registered in Executor.")
+            return f"Error: Tool {action.name} not found."
 
-        return f"Unknown action: {action.name}"
+        logger.info(f"🛠️ Tool Calling: {action.name}")
+        
+        try:
+            # 建议使用 asyncio.to_thread 运行同步的 AiiDA 查询，避免阻塞 UI
+            result = await asyncio.to_thread(tool_func, **action.payload)
+            return result
+        except Exception as e:
+            return f"Execution Error: {str(e)}"

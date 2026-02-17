@@ -49,6 +49,14 @@ def main():
         reporters=[console_rep, web_rep]
     )
 
+    # 绑定模型选择事件
+    def handle_model_change(e):
+        # 直接修改 GeminiBrain 内部的私有变量
+        engine._brain._model_name = e.value
+        ui.notify(f"Active Model: {e.value}", color='primary', position='top')
+
+    components['model_select'].on_value_change(handle_model_change)
+    
     # --- 绑定发送逻辑 ---
     async def handle_send():
         text = components['input'].value
