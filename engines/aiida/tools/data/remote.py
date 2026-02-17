@@ -2,7 +2,7 @@ from aiida import orm
 import tempfile
 import os
 
-def list_remote_files(pk):
+def list_remote_files(pk: str):
     """
     List files in a RemoteData node's remote directory.
     Returns a list of filenames or an error message string.
@@ -13,7 +13,7 @@ def list_remote_files(pk):
     except Exception as e:
         return f"Error listing files: {e}"
 
-def get_remote_file_content(pk, filename):
+def get_remote_file_content(pk: str, filename: str):
     """
     Retrieve content of a file from a RemoteData node.
     Downloads to a temp file and reads it.

@@ -1,38 +1,29 @@
 import os
 import re
 from sab_core.schema.observation import Observation
-from engines.aiida.tools.profile import (
+from engines.aiida.tools import (
     get_unified_source_map, 
     list_system_profiles, 
     list_local_archives
 )
 
 class AIIDASchemaPerceptor:
-    """AiiDA Resource Perceptor: Switches between Profile and Archive based on intent."""
     def perceive(self, intent: str = None) -> Observation:
         target = None
-        is_archive = False
-
-        # 1. 路径解析优化：从意图中提取被引号包裹的路径
-        # 匹配格式: archive 'C:\Users\...' 
-        match = re.search(r"archive '(.+?)'", intent or "")
         
+        # 1. 路径解析逻辑 (保持原有的深度解析 🚀)
+        match = re.search(r"archive '(.+?)'", intent or "")
         if match:
             path_val = match.group(1)
-            # 如果路径在本地真实存在，则直接作为目标，无需拷贝
-            if path_val != "(None)" and os.environ.get('PATH_EXISTS', os.path.exists(path_val)):
+            if path_val != "(None)" and os.path.exists(path_val):
                 target = path_val
-                is_archive = target.lower().endswith(('.aiida', '.zip'))
             else:
-                # 兼容逻辑：尝试在当前目录下找文件名
                 basename = os.path.basename(path_val)
                 if os.path.exists(basename):
                     target = basename
-                    is_archive = target.lower().endswith(('.aiida', '.zip'))
 
-        # 2. 如果没有路径，则尝试匹配 Profile 名称
+        # 2. Profile 名称匹配 (保持原有逻辑 🚀)
         if not target and intent:
-            # 这里调用的是文件开头导入的全局函数
             profiles = list_system_profiles() 
             for p in profiles:
                 if p in intent:
@@ -43,11 +34,10 @@ class AIIDASchemaPerceptor:
         user_msg = f"MESSAGE FROM USER: {intent}\n\n" if intent else ""
         
         if target:
-            # 调用全局导入的工具
-            smap = get_unified_source_map(target, is_archive)
+            # 💡 这里的调用会触发 profile.py 里的 ensure_environment
+            smap = get_unified_source_map(target)
             raw_report = user_msg + self._format_deep_report(smap)
         else:
-            # 🚩 删除了这里的局部 import 语句，直接使用全局导入的函数
             raw_report = user_msg + (
                 f"### AIIDA RESOURCE OVERVIEW ###\n"
                 f"Available Profiles: {list_system_profiles()}\n"
@@ -55,7 +45,6 @@ class AIIDASchemaPerceptor:
             )
 
         return Observation(source="aiida_aware_scanner", raw=raw_report, features={"target": target})
-
     def _format_deep_report(self, smap):
         """格式化深度扫描报告"""
         if "error" in smap:

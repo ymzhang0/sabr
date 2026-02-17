@@ -6,41 +6,21 @@ from loguru import logger
 from sab_core.schema.action import Action
 
 # 批量导入你的工具库
-from engines.aiida.tools import (
-    profile, calculation, process, group, 
-    submission, remote, repository, bands, interpreter
-)
+from engines.aiida import tools
 
 class AiiDAExecutor:
     def __init__(self):
         # 建立一个完整的工具清单
-        self.tool_map = {
-            # 1. 环境与统计 (Profile/Group)
-            "get_statistics": profile.get_statistics,
-            "list_groups": profile.list_groups,
-            "inspect_group": group.inspect_group,
-            
-            # 2. 深度诊断 (Process/Calculation)
-            "inspect_process": process.inspect_process,
-            "get_calculation_io": calculation.get_calculation_io,
-            "get_process_log": process.get_process_log,
-            
-            # 3. 数据提取 (Bands/Remote/Repo)
-            "get_bands_plot_data": bands.get_bands_plot_data,
-            "list_remote_files": remote.list_remote_files,
-            "get_node_file_content": repository.get_node_file_content,
-            
-            # 4. 任务提交 (Submission)
-            "inspect_workchain": submission.inspect_workchain,
-            "submit_draft": submission.submit_draft,
-            
-            # 5. 兜底方案：动态执行
-            "run_python_code": interpreter.run_python_code,
-        }
+        self.tool_map =  {name: getattr(tools, name) for name in tools.__all__}
 
     async def execute(self, action: Action) -> Any:
         if action.name == "say": return None
-
+        # 🚩 改进处理：专门捕获并记录系统错误，但不抛出“未知工具”警告
+        if action.name == "error_reported":
+            error_msg = action.payload.get('message', 'Unknown brain error')
+            logger.error(f"🧠 Brain Report Error: {error_msg}")
+            return f"System Error: {error_msg}" # 返回给 Reporter 展示
+            
         tool_func = self.tool_map.get(action.name)
         if not tool_func:
             logger.warning(f"⚠️ Action '{action.name}' is not registered in Executor.")

@@ -1,6 +1,7 @@
 # engines/aiida/brain_factory.py
 from sab_core.brain.gemini import GeminiBrain
-from engines.aiida.tools import profile, process, calculation, submission 
+from engines.aiida import tools
+
 
 EVOLUTION_PROMPT = """
 You are a proactive AiiDA Research Intelligence. 
@@ -20,15 +21,8 @@ Current Resources:
 """
 
 def create_aiida_brain(schema_info: str):
-    aiida_tools = [
-        profile.get_statistics,
-        profile.list_groups,
-        process.inspect_process,
-        calculation.get_calculation_io,
-        submission.inspect_workchain, 
-        interpreter.run_aiida_code
-        ]
+    tool_list = [getattr(tools, name) for name in tools.__all__]
     return GeminiBrain(
         system_prompt=EVOLUTION_PROMPT.format(schema_info=schema_info),
-        tools=aiida_tools
+        tools=tool_list
         )

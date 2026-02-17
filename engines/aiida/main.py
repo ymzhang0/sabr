@@ -1,4 +1,9 @@
-from nicegui import ui
+import os
+
+from nicegui import ui, run
+import tkinter as tk
+from tkinter import filedialog
+
 from sab_core.engine import SABEngine
 from sab_core.reporters.console import ConsoleReporter
 from engines.aiida.perceptors.database import AIIDASchemaPerceptor
@@ -49,56 +54,78 @@ def main():
         reporters=[console_rep, web_rep]
     )
 
-    # 绑定模型选择事件
-    def handle_model_change(e):
-        # 直接修改 GeminiBrain 内部的私有变量
-        engine._brain._model_name = e.value
-        ui.notify(f"Active Model: {e.value}", color='primary', position='top')
+# --- 1. 档案切换逻辑 ---
+    async def select_archive(path):
+        """同步 UI 状态并强制后端感知器刷新 Profile"""
+        components['archive_select'].value = path
+        ui.notify(f"Switched to: {os.path.basename(path)}", color='primary')
+        # 🚩 触发一次静默运行，强制 Perceptor 执行 load_profile
+        await engine.run_once(intent=f"Inspect archive '{path}'. User task: System Refresh")
 
-    components['model_select'].on_value_change(handle_model_change)
-    
-    # --- 绑定发送逻辑 ---
-    async def handle_send():
-        text = components['input'].value
-        # 获取当前选择的路径（如果是通过 Browse 按钮选择的，它也会在 archive_select 的 value 中）
-        selected_arch = components['archive_select'].value
+    # --- 2. 文件上传逻辑 (带错误捕获和置顶保护) ---
+    async def pick_local_file():
+        def get_path():
+            try:
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes('-topmost', True) # 🚩 强制窗口最前
+                root.lift()
+                path = filedialog.askopenfilename(filetypes=[("AiiDA Archives", "*.aiida *.zip")])
+                root.destroy()
+                return path
+            except Exception as e:
+                print(f"Tkinter Error: {e}")
+                return None
+
+        selected_path = await run.io_bound(get_path)
         
-        if not text: return
-        
-        # 1. 立即清空输入，防止卡顿
-        components['input'].value = ""
-        
-        # 2. UI 交互：立即显示用户消息
-        with components['chat_area']:
-            ui.chat_message(text, name='You', sent=True) \
-                .classes('self-end font-medium text-white') \
-                .props('bg-color=primary text-color=white')
+        if selected_path:
+            # 更新历史记录
+            if selected_path not in components['archive_select'].options:
+                components['archive_select'].options.append(selected_path)
+                with components['archive_history']:
+                    # 🚩 使用 with 语句嵌套解决之前的 AttributeError
+                    with ui.item(on_click=lambda p=selected_path: select_archive(p)) \
+                        .classes('rounded-xl hover:bg-blue-50 px-3 cursor-pointer mb-1'):
+                        with ui.item_section():
+                            ui.label(os.path.basename(selected_path)).classes('text-xs font-medium text-slate-600')
             
-            thinking_container = ui.row().classes('w-full items-center gap-3')
-            with thinking_container:
-                ui.spinner(size='sm', color='primary', thickness=3)
-                ui.label('SABR is processing your request...').classes('text-sm text-grey-4 animate-pulse')
+            await select_archive(selected_path)
+
+    components['upload_btn'].on('click', pick_local_file)
+
+    # --- 3. 发送与引导消失逻辑 ---
+    async def handle_send(preset_text=None):
+        text = preset_text if preset_text else components['input'].value
+        if not text: return
+
+        # 🚀 引导页一键消失
+        components['welcome_screen'].set_visibility(False)
+        components['suggestion_container'].set_visibility(False)
+        components['input'].value = ""
+
+        with components['chat_area']:
+            # 🚩 发送气泡设置深蓝色，确保文字白色可见
+            ui.chat_message(text, name='You', sent=True).classes('self-end w-full')
+            
+            thinking = ui.row().classes('items-center gap-2 pl-4')
+            with thinking:
+                ui.spinner(size='xs'); ui.label('Processing...').classes('text-xs text-grey-5')
 
         ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
         
         try:
-            # 3. 【关键修改】：构造符合感知器正则匹配的意图字符串
-            # 必须包含 "archive" 关键字并将路径用单引号包裹
-            if selected_arch and selected_arch != '(None)':
-                final_intent = f"Inspect archive '{selected_arch}'. User task: {text}"
-            else:
-                final_intent = text
-            
-            # 4. 调用异步 Engine
-            await engine.run_once(intent=final_intent)
-            
-        except Exception as e:
-            ui.notify(f"System Error: {str(e)}", type='negative')
+            arch = components['archive_select'].value
+            intent = f"Inspect archive '{arch}'. User task: {text}" if arch != '(None)' else text
+            await engine.run_once(intent=intent)
         finally:
-            # 5. 移除加载动画
-            thinking_container.delete()
+            thinking.delete()
 
-    components['send_btn'].on('click', handle_send)
+    components['send_btn'].on('click', lambda: handle_send())
+    
+    # 🚩 绑定建议卡片点击直接发送
+    for card, full_text in components['suggestion_cards']:
+        card.on('click', lambda t=full_text: handle_send(t))
 
     ui.run(
         port=8080, 

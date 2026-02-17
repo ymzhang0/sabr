@@ -1,6 +1,6 @@
 from aiida import orm
 
-def get_node_file_content(pk, filename, source="folder"):
+def get_node_file_content(pk: str, filename: str, source: str="folder"):
     """
     Retrieve text content of a file from a node's repository or file output.
     source: 'folder' (Process/FolderData) or 'repository' (The node's own repo)

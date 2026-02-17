@@ -4,7 +4,7 @@ import sys
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
 
-def run_aiida_code(script: str):
+def run_python_code(script: str):
     """执行 Python 脚本与 AiiDA 交互。AI 专用。"""
     exec_globals = {}
     try:

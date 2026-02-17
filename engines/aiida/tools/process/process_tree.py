@@ -4,13 +4,13 @@ from aiida import orm
 
 class ProcessTree:
     """Recursively builds and serializes the AiiDA process provenance tree."""
-    def __init__(self, node: ProcessNode, name: str = "ROOT"):
+    def __init__(self, node: orm.ProcessNode, name: str = "ROOT"):
         self.name = name
         self.node = node
         self.children: Dict[str, 'ProcessTree'] = {}
 
         # 仅 WorkflowNode (如 WorkChain) 具有 .called 属性
-        if isinstance(node, WorkflowNode):
+        if isinstance(node, orm.WorkChainNode):
             subprocesses = sorted(node.called, key=lambda p: p.ctime)
             counts = defaultdict(int)
             

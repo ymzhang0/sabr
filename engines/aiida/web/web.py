@@ -1,117 +1,93 @@
-from nicegui import ui, run
-import os
-from engines.aiida.tools.profile import list_local_archives
-from tkinter import filedialog, Tk
+# engines/aiida/web/web.py
+from nicegui import ui
+
 def create_layout():
-    # 🎨 注入全局 CSS 魔法：解决气泡自适应、滚动条和布局间距
+    # 🎨 CSS 增强
     ui.add_head_html('''
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap');
-            body { background-color: #FFFFFF; font-family: 'Inter', sans-serif; }
-            /* 气泡自适应宽度 */
-            .q-message-text { max-width: 85% !important; width: auto !important; border-radius: 18px !important; }
-            .q-message-container { width: 100% !important; }
-            /* 输入框呼吸感 */
-            .custom-input .q-field__control { height: 80px !important; padding: 10px 20px !important; }
-            /* 侧边栏干净风格 */
-            .q-drawer { background-color: #F9FBFF !important; }
-            .q-item__section--side { color: #606266; }
+            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+            body { background-color: #FFFFFF; font-family: 'Inter', sans-serif; overflow-x: hidden; }
+            
+            /* 🚩 气泡宽度：占满容器且与输入框对齐 */
+            .q-message-text { 
+                max-width: 100% !important; 
+                width: auto !important; 
+                min-width: 200px;
+                border-radius: 20px !important; 
+                padding: 12px 18px !important;
+                font-size: 14px !important;
+                line-height: 1.5;
+            }
+            .q-message-container { width: 100% !important; margin-bottom: 12px; }
+            
+            /* 🚩 确保发送消息清晰可见 (深蓝色 + 纯白文字) */
+            .q-message-sent .q-message-text { 
+                background-color: #1a73e8 !important; 
+                color: white !important; 
+            }
+            .q-message-sent .q-message-text-content { color: white !important; }
+            
+            .q-message-received .q-message-text { background-color: #f1f3f4 !important; color: #3c4043 !important; }
+            .custom-input .q-field__control { min-height: 64px !important; border-radius: 32px !important; }
         </style>
     ''')
 
-    # --- 1. 头部 ---
-    with ui.header(elevated=False).classes('bg-white text-grey-9 q-pa-md border-b'):
-        with ui.row().classes('w-full items-center no-wrap'):
-            ui.icon('bolt', color='primary').classes('text-2xl')
-            ui.label('SABR').classes('text-xl font-bold tracking-tighter')
-            ui.badge('AiiDA v2.6', color='blue-1 text-blue-8').props('outline').classes('ml-2')
-
-    # --- 2. 侧边栏 (配色与右侧统一) ---
-    with ui.left_drawer(value=True, fixed=True).classes('q-pa-lg border-r'):
+    # --- 1. 侧边栏 ---
+    with ui.left_drawer(value=True, fixed=True).classes('bg-[#F9FBFF] border-r q-pa-lg'):
         with ui.column().classes('w-full gap-6'):
-            ui.label('Data Resources').classes('text-xs font-bold text-blue-5 tracking-widest uppercase')
+            with ui.row().classes('w-full items-center justify-between'):
+                ui.label('ARCHIVES').classes('text-[11px] font-bold text-blue-500 tracking-widest')
+                # 🚩 确认 icon 为 'add'
+                upload_btn = ui.button(icon='add').props('flat round color=primary').tooltip('Upload Archive')
             
-            # 选择器：显示已选路径
-            archive_select = ui.select(
-                options=['(None)'] + list_local_archives(),
-                label='Selected Resource',
-                value='(None)'
-            ).classes('w-full').props('outlined rounded bg-white dense')
-
-            # 🆕 本地浏览按钮：核心功能
-            async def pick_local_file():
-                # 在 io_bound 中运行，防止阻塞 NiceGUI 事件循环
-                def get_path():
-                    root = Tk()
-                    root.withdraw()
-                    root.attributes('-topmost', True) # 确保窗口在最前面
-                    file_path = filedialog.askopenfilename(filetypes=[("AiiDA Archives", "*.aiida *.zip")])
-                    root.destroy()
-                    return file_path
-
-                selected_path = await run.io_bound(get_path)
-                if selected_path:
-                    # 将绝对路径加入选项并选中，这样 Perceptor 就能拿到完整路径
-                    if selected_path not in archive_select.options:
-                        archive_select.options.append(selected_path)
-                    archive_select.value = selected_path
-                    ui.notify(f'Selected: {os.path.basename(selected_path)}')
-
-            ui.button('Browse Computer', icon='folder', on_click=pick_local_file) \
-                .props('unelevated rounded color=primary').classes('w-full py-2')
-
-            ui.separator().classes('q-my-sm')
-
-            # 🆕 增加复制按钮的 Insight 区域
-            with ui.row().classes('w-full items-center no-wrap'):
-                with ui.expansion('Insight', icon='psychology').classes('flex-grow text-grey-6 text-sm'):
-                    debug_log = ui.markdown('System standby.').classes('text-[11px] p-3 bg-white rounded-xl border')
-                    thought_log = ui.log().classes('w-full h-48 bg-slate-900 text-slate-300 text-[10px] mt-2 rounded-xl')
-                
-                # 点击复制按钮：将 markdown 内容写进剪贴板
-                ui.button(icon='content_copy', 
-                          on_click=lambda: ui.run_javascript(f'navigator.clipboard.writeText({repr(debug_log.content)})')) \
-                    .props('flat round dense color=grey-4') \
-                    .tooltip('Copy insights')
-
-    # --- 3. 底部区域 (Gemini 风格布局) ---
-    with ui.footer(fixed=True).classes('bg-transparent border-none flex justify-start pb-10'):
-        # 这里的 ml-[340px] 确保了不挤占侧边栏空间
-        with ui.column().classes('w-full max-w-none ml-[340px] mr-12 gap-2'):
+            archive_history = ui.list().props('dense').classes('w-full text-sm')
+            archive_select = ui.select(options=['(None)'], value='(None)').classes('hidden')
             
-            # 第一行：输入框 (Pill Shape)
-            with ui.row().classes('w-full bg-white shadow-2xl rounded-[32px] px-8 py-4 border-2 border-blue-50 items-center no-wrap'):
-                input_field = ui.textarea(placeholder='Describe the analysis...').classes('flex-grow custom-input').props('borderless autogrow')
-                with ui.row().classes('items-center gap-2'):
-                    ui.button(icon='attach_file').props('flat round color=grey-4')
-                    send_btn = ui.button(icon='auto_awesome', color='primary').props('round elevated size=lg')
+            ui.separator()
+            with ui.expansion('Engine Insight', icon='psychology').classes('text-grey-7 text-sm'):
+                debug_log = ui.markdown('Ready.').classes('text-[11px] p-3 bg-white border rounded-xl')
+                thought_log = ui.log().classes('w-full h-40 bg-slate-900 text-slate-300 text-[10px] mt-2 rounded-xl')
 
-            # 🆕 第二行：模型选择与其他辅助信息 (放在输入框下方)
-            with ui.row().classes('items-center gap-4 ml-6'):
-                with ui.row().classes('items-center gap-1 cursor-pointer'):
-                    ui.icon('auto_awesome', color='primary').classes('text-[10px]')
+    # --- 底部固定区 ---
+    with ui.footer(fixed=True).classes('bg-white border-t flex justify-center pb-6'):
+        # 限制最大宽度并居中，左侧留出 Drawer 的宽度 (340px)
+        with ui.column().classes('w-full max-w-[900px] ml-[340px] px-4 gap-2'):
+            
+            # 1. 快捷建议 (Suggestions) - 放在输入框上方
+            suggestion_container = ui.row().classes('w-full gap-2 no-wrap overflow-x-auto pb-2 justify-center')
+            suggestion_cards = []
+            prompts = [('📊 Stats', 'Show stats'), ('🔍 Groups', 'List groups')]
+            for label, text in prompts:
+                card = ui.card().classes('cursor-pointer p-3 min-w-[140px] shadow-none border border-blue-100 hover:bg-blue-50')
+                with card:
+                    ui.label(label).classes('text-xs font-bold text-blue-800')
+                suggestion_cards.append((card, text))
+
+            # 2. 对话输入框 (Locked Position)
+            with ui.row().classes('w-full bg-slate-50 rounded-[24px] px-6 py-2 items-center no-wrap border'):
+                input_field = ui.textarea(placeholder='Ask SABR...').classes('flex-grow bg-transparent').props('borderless autogrow')
+                send_btn = ui.button(icon='send', color='primary').props('round flat')
+
+            # 3. 🚩 模式选择 (放在对话框正下方)
+            with ui.row().classes('w-full items-center justify-between px-4'):
+                with ui.row().classes('items-center gap-1'):
+                    ui.icon('settings', size='12px', color='grey-5')
                     model_select = ui.select(
-                        options=[
-                            'gemini-2.0-flash', 
-                            'gemini-2.0-pro-exp-02-05', 
-                            'gemini-1.5-pro'
-                        ],
+                        options=['gemini-2.0-flash', 'gemini-1.5-pro'],
                         value='gemini-2.0-flash'
-                    ).props('dense options-dense borderless').classes('text-[11px] font-bold text-grey-5 bg-transparent')
-                
-                # 装饰性标签或状态
-                ui.label('SABR V1.0').classes('text-[9px] text-grey-4 uppercase tracking-widest ml-2')
-    # --- 4. 主对话区 (同步修正间距) ---
-    # 🚀 关键修改：ml-[340px] 确保与输入框对齐，且不被侧边栏遮挡
-    with ui.column().classes('w-full max-w-none ml-[340px] mr-12 q-pa-lg mb-40'):
-        chat_area = ui.column().classes('w-full gap-8 items-start') 
+                    ).props('dense borderless').classes('text-[10px] font-bold text-grey-6')
+                ui.label('SABR-AiiDA v1.0').classes('text-[9px] text-grey-4 uppercase tracking-widest')
+
+    # --- 对话显示区 ---
+    with ui.column().classes('w-full max-w-[900px] ml-[340px] px-8 pt-12 pb-64'):
+        welcome_screen = ui.column().classes('items-center justify-center py-20 w-full')
+        with welcome_screen:
+            ui.label('Hi, Where should we start?').classes('text-4xl font-light text-slate-400')
+        chat_area = ui.column().classes('w-full gap-6')
 
     return {
-        'chat_area': chat_area, 
-        'input': input_field, 
-        'send_btn': send_btn,
-        'debug_log': debug_log, 
-        'thought_log': thought_log, 
-        'archive_select': archive_select,
-        'model_select': model_select  # 🚩 记得返回这个组件
+        'welcome_screen': welcome_screen, 'suggestion_container': suggestion_container,
+        'chat_area': chat_area, 'input': input_field, 'send_btn': send_btn,
+        'upload_btn': upload_btn, 'archive_history': archive_history, 'archive_select': archive_select,
+        'debug_log': debug_log, 'thought_log': thought_log, 'suggestion_cards': suggestion_cards, 'model_select': model_select,
     }

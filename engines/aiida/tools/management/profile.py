@@ -1,7 +1,10 @@
 """
 Tools for inspecting the AiiDA profile (database statistics, groups).
 """
+import os
 import io
+import json      # 🚩 补上这个
+import zipfile   # 🚩 补上这个
 from pathlib import Path
 from aiida import load_profile, orm
 from aiida.orm import Group, Node, QueryBuilder
@@ -9,6 +12,27 @@ from aiida.manage.configuration import get_config
 from aiida.manage.manager import get_manager
 
 # --- 1. 资源列表工具 (Perceptor 强依赖) ---
+
+def ensure_environment(target: str):
+    """
+    智能切换环境：自动识别是本地 Profile 还是 Archive 文件。
+    """
+    if not target or target == "(None)":
+        return
+    
+    try:
+        # 1. 如果是文件路径且存在
+        if os.path.isfile(target) and target.lower().endswith(('.aiida', '.zip')):
+            # 🚀 核心修复：将 Archive 文件路径包装成临时 Profile 对象
+            archive_profile = SqliteZipBackend.create_profile(path=target, name='temp_archive')
+            load_profile(archive_profile, allow_switch=True)
+            print(f"✅ Backend loaded archive as profile: {target}")
+        else:
+            # 2. 否则按普通 Profile 名称加载
+            load_profile(target, allow_switch=True)
+            print(f"✅ Backend switched to profile: {target}")
+    except Exception as e:
+        print(f"❌ DEBUG: Failed to switch AiiDA environment: {e}")
 
 def list_system_profiles():
     """
@@ -44,72 +68,36 @@ def switch_profile(profile_name: str) -> str:
     except Exception as e:
         return f"Error switching profile: {e}"
 
-def load_archive_profile(archive_path: str):
+def load_archive_profile(filepath: str):
     """
     将压缩包作为临时 Profile 加载（主要用于 AiiDA 2.x 的只读探测）。
     """
     try:
         from aiida.storage.sqlite_zip.backend import SqliteZipBackend
-        archive_profile = SqliteZipBackend.create_profile(AIIDA_PROFILE_NAME)
+        archive_profile = SqliteZipBackend.create_profile(filepath = filepath)
         load_profile(archive_profile, allow_switch=True)
         # 这里的实现取决于你的具体环境配置，通常建议直接通过 get_archive_info 探测
         # 如果需要完整加载，通常使用临时存储后端
-        return f"Archive profile loading for '{archive_path}' is ready for implementation."
+        return f"Archive profile loading for '{filepath}' is ready for implementation."
     except Exception as e:
         return f"Error loading archive: {e}"
 
 # --- 3. 深度感知工具 (Unified Map) ---
-
-def inspect_archive(archive_path: str):
+def get_unified_source_map(target: str):
     """
-    【手动探测器】直接读取 .aiida 压缩包内部的元数据。
-    无需 aiida.tools.archive 模块。
+    统一资源映射逻辑：先强制同步环境，再用 QueryBuilder 读取。
     """
+    ensure_environment(target)
+    
+    result = {"name": os.path.basename(target), "groups": []}
     try:
-        with zipfile.ZipFile(archive_path, 'r') as zip_ref:
-            # AiiDA 存档通常在 metadata.json 或 export_parameters.json 中存储信息
-            # 这里的逻辑根据 AiiDA 导出版本的不同可能略有差异
-            if 'metadata.json' in zip_ref.namelist():
-                with zip_ref.open('metadata.json') as f:
-                    meta = json.load(f)
-                    # 尝试提取组标签
-                    groups = meta.get('export_parameters', {}).get('groups', [])
-                    return {
-                        "groups": [{"label": g} for g in groups] if groups else [],
-                        "version": meta.get('aiida_version', 'unknown')
-                    }
-        return {"groups": [], "note": "Basic zip scan complete, no metadata found."}
+        # 环境一旦同步，统一使用 ORM 查询
+        qb = orm.QueryBuilder().append(orm.Group, project=["label", "id"])
+        for label, pk in qb.all():
+            if "import" in label.lower(): continue
+            result["groups"].append({"label": label, "pk": pk})
     except Exception as e:
-        return {"error": f"Zip inspection failed: {str(e)}"}
-
-def get_unified_source_map(source_id: str, is_archive: bool = False):
-    """
-    【统一接口】无论是在线数据库还是离线包，返回一致的字典结构。
-    """
-    result = {"name": source_id, "type": "archive" if is_archive else "profile", "groups": []}
-
-    if is_archive:
-        info = inspect_archive(source_id)
-        if "error" in info:
-            result["error"] = info["error"]
-        else:
-            result["groups"] = [{"label": g["label"], "count": "N/A"} for g in info["groups"]]
-    else:
-        try:
-            load_profile(source_id, allow_switch=True)
-            # 获取最近的 8 个组
-            qb = orm.QueryBuilder().append(orm.Group, project=["label", "id", "*"])
-            for label, pk, group in qb.all():
-                if group.type_string == "core.import": continue
-                sample = group.nodes[0] if len(group.nodes) > 0 else None
-                result["groups"].append({
-                    "label": label,
-                    "count": len(group.nodes),
-                    "extras": list(sample.base.extras.all.keys())[:5] if sample else []
-                })
-        except Exception as e:
-            result["error"] = str(e)
-            
+        result["error"] = str(e)
     return result
     
 # --- 4. 数据统计工具 ---
