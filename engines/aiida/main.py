@@ -54,7 +54,7 @@ def main():
         reporters=[console_rep, web_rep]
     )
 
-# --- 1. 档案切换逻辑 ---
+    # --- 1. 档案切换逻辑 ---
     async def select_archive(path):
         """同步 UI 状态并强制后端感知器刷新 Profile"""
         components['archive_select'].value = path
@@ -65,47 +65,42 @@ def main():
     # --- 2. 文件上传逻辑 (带错误捕获和置顶保护) ---
     async def pick_local_file():
         def get_path():
-            try:
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes('-topmost', True) # 🚩 强制窗口最前
-                root.lift()
-                path = filedialog.askopenfilename(filetypes=[("AiiDA Archives", "*.aiida *.zip")])
-                root.destroy()
-                return path
-            except Exception as e:
-                print(f"Tkinter Error: {e}")
-                return None
+            root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True)
+            path = filedialog.askopenfilename(filetypes=[("AiiDA Archives", "*.aiida *.zip")])
+            root.destroy()
+            return path
 
         selected_path = await run.io_bound(get_path)
-        
         if selected_path:
-            # 更新历史记录
             if selected_path not in components['archive_select'].options:
                 components['archive_select'].options.append(selected_path)
                 with components['archive_history']:
-                    # 🚩 使用 with 语句嵌套解决之前的 AttributeError
-                    with ui.item(on_click=lambda p=selected_path: select_archive(p)) \
-                        .classes('rounded-xl hover:bg-blue-50 px-3 cursor-pointer mb-1'):
+                    # 🚩 使用 with 语句正确添加 Item
+                    with ui.item(on_click=lambda p=selected_path: components['archive_select'].set_value(p)) \
+                        .classes('rounded-xl hover:bg-blue-50 px-3 cursor-pointer'):
                         with ui.item_section():
-                            ui.label(os.path.basename(selected_path)).classes('text-xs font-medium text-slate-600')
+                            ui.label(os.path.basename(selected_path)).classes('text-xs')
             
-            await select_archive(selected_path)
+            components['archive_select'].value = selected_path
 
     components['upload_btn'].on('click', pick_local_file)
 
-    # --- 3. 发送与引导消失逻辑 ---
+# 1. 修正模型切换事件 (解决特性消失问题)
+    def handle_model_change(e):
+        engine._brain._model_name = e.value
+        ui.notify(f"Brain active: {e.value}")
+    components['model_select'].on_value_change(handle_model_change)
+    
+    # 3. 发送逻辑 (带引导隐藏)
     async def handle_send(preset_text=None):
         text = preset_text if preset_text else components['input'].value
         if not text: return
-
-        # 🚀 引导页一键消失
+        
         components['welcome_screen'].set_visibility(False)
         components['suggestion_container'].set_visibility(False)
         components['input'].value = ""
 
         with components['chat_area']:
-            # 🚩 发送气泡设置深蓝色，确保文字白色可见
             ui.chat_message(text, name='You', sent=True).classes('self-end w-full')
             
             thinking = ui.row().classes('items-center gap-2 pl-4')

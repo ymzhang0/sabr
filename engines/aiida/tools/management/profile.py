@@ -10,7 +10,7 @@ from aiida import load_profile, orm
 from aiida.orm import Group, Node, QueryBuilder
 from aiida.manage.configuration import get_config
 from aiida.manage.manager import get_manager
-
+from aiida.storage.sqlite_zip.backend import SqliteZipBackend
 # --- 1. 资源列表工具 (Perceptor 强依赖) ---
 
 def ensure_environment(target: str):
@@ -24,7 +24,7 @@ def ensure_environment(target: str):
         # 1. 如果是文件路径且存在
         if os.path.isfile(target) and target.lower().endswith(('.aiida', '.zip')):
             # 🚀 核心修复：将 Archive 文件路径包装成临时 Profile 对象
-            archive_profile = SqliteZipBackend.create_profile(path=target, name='temp_archive')
+            archive_profile = SqliteZipBackend.create_profile(filepath=target,)
             load_profile(archive_profile, allow_switch=True)
             print(f"✅ Backend loaded archive as profile: {target}")
         else:
@@ -89,7 +89,13 @@ def get_unified_source_map(target: str):
     """
     ensure_environment(target)
     
-    result = {"name": os.path.basename(target), "groups": []}
+    # 🚩 修复 KeyError: 增加 'type' 键
+    is_arch = target.lower().endswith(('.aiida', '.zip'))
+    result = {
+        "name": os.path.basename(target), 
+        "type": "archive" if is_arch else "profile", 
+        "groups": []
+    }
     try:
         # 环境一旦同步，统一使用 ORM 查询
         qb = orm.QueryBuilder().append(orm.Group, project=["label", "id"])
@@ -99,7 +105,7 @@ def get_unified_source_map(target: str):
     except Exception as e:
         result["error"] = str(e)
     return result
-    
+
 # --- 4. 数据统计工具 ---
 
 def get_statistics(profile_name: str = None):
