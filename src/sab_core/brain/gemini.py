@@ -56,3 +56,20 @@ class GeminiBrain:
                     payload={"content": "⚠️ I had trouble understanding the tool parameters. I'll try to simplify my request."}
                 )
             return Action(name="error_reported", payload={"message": str(e)})
+
+    async def get_available_models(self) -> list[str]:
+        """
+        使用新版 google-genai SDK 动态获取模型列表
+        """
+        try:
+            available = []
+            async for m in await self._client.aio.models.list():
+                # 新版 SDK 使用 supported_actions 属性
+                if 'generateContent' in m.supported_actions:
+                    name = m.name.replace('models/', '')
+                    available.append(name)
+            # 过滤掉 'models/' 前缀并排序
+            return sorted(available, key=lambda x: ("2.0" not in x, x))
+        except Exception as e:
+            print(f"Failed to fetch models: {e}")
+            return ['gemini-2.0-flash', 'gemini-1.5-pro']

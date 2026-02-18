@@ -45,6 +45,7 @@ class AIIDASchemaPerceptor:
             )
 
         return Observation(source="aiida_aware_scanner", raw=raw_report, features={"target": target})
+        
     def _format_deep_report(self, smap):
         """格式化深度扫描报告"""
         if "error" in smap:

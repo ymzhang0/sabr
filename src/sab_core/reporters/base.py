@@ -13,7 +13,11 @@ class BaseReporter(ABC):
     def emit(self, observation: Observation, action: Action) -> None:
         """核心方法：负责将一次 观察-决策 循环输出到目的地"""
         pass
-
+    def report_system(self, event_type: str, data: dict) -> None:
+        """
+        🚩 新增：上报系统级事件（模型刷新、API 报错、环境切换等）
+        """
+        pass
     def report_error(self, message: str) -> None:
         """通用方法：报告系统错误"""
         print(f"ERROR: {message}")

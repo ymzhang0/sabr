@@ -1,0 +1,43 @@
+/* --- 颜色绑定逻辑 (补在这里) --- */
+
+/* 1. 侧边栏染色 */
+.q-drawer__content {
+    background-color: var(--sidebar-bg) !important;
+    color: var(--sidebar-text) !important;
+}
+
+/* 2. 覆盖 Python 里写死的 text-slate 类名，强制跟随主题 */
+.text-slate-800 { color: var(--sidebar-text) !important; }
+.text-slate-400 { color: var(--sidebar-sub) !important; }
+
+/* 3. Insight 区域染色 */
+.insight-markdown {
+    background-color: var(--insight-bg) !important;
+    border: 1px solid var(--border-color) !important;
+    color: var(--sidebar-text) !important;
+    border-radius: 16px !important;
+}
+
+/* 4. 建议卡片染色 */
+.suggestion-card {
+    background-color: var(--card-bg) !important;
+    color: var(--text-main) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+/* 5. 输入框区域 */
+.input-pill {
+    background-color: var(--card-bg) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+/* 6. 强制修正深色模式下的文本框输入文字颜色 */
+.q-textarea textarea {
+    color: var(--text-main) !important;
+}
+
+/* 7. 分割线透明度微调 */
+.q-separator {
+    background: var(--sidebar-sub) !important;
+    opacity: 0.1 !important;
+}

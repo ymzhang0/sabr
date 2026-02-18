@@ -11,25 +11,36 @@ from aiida.orm import Group, Node, QueryBuilder
 from aiida.manage.configuration import get_config
 from aiida.manage.manager import get_manager
 from aiida.storage.sqlite_zip.backend import SqliteZipBackend
+
+# 🚩 增加一个内存缓存，记录当前加载的 Archive 路径
+_CURRENT_MOUNTED_ARCHIVE = None
+
 # --- 1. 资源列表工具 (Perceptor 强依赖) ---
 
 def ensure_environment(target: str):
     """
     智能切换环境：自动识别是本地 Profile 还是 Archive 文件。
     """
+    global _CURRENT_MOUNTED_ARCHIVE
+
     if not target or target == "(None)":
         return
-    
+
+    if target == _CURRENT_MOUNTED_ARCHIVE:
+        return
+
     try:
         # 1. 如果是文件路径且存在
         if os.path.isfile(target) and target.lower().endswith(('.aiida', '.zip')):
             # 🚀 核心修复：将 Archive 文件路径包装成临时 Profile 对象
             archive_profile = SqliteZipBackend.create_profile(filepath=target,)
             load_profile(archive_profile, allow_switch=True)
+            _CURRENT_MOUNTED_ARCHIVE = target # 更新缓存
             print(f"✅ Backend loaded archive as profile: {target}")
         else:
             # 2. 否则按普通 Profile 名称加载
             load_profile(target, allow_switch=True)
+            _CURRENT_MOUNTED_ARCHIVE = None # 切换回普通 Profile
             print(f"✅ Backend switched to profile: {target}")
     except Exception as e:
         print(f"❌ DEBUG: Failed to switch AiiDA environment: {e}")

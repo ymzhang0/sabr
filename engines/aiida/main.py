@@ -1,10 +1,11 @@
 import os
 
-from nicegui import ui, run
+from nicegui import app, ui, run
 import tkinter as tk
 from tkinter import filedialog
 
 from sab_core.engine import SABEngine
+from sab_core.brain.gemini import GeminiBrain
 from sab_core.reporters.console import ConsoleReporter
 from engines.aiida.perceptors.database import AIIDASchemaPerceptor
 from engines.aiida.perceptors.human import HumanPerceptor
@@ -12,6 +13,12 @@ from engines.aiida.brain_factory import create_aiida_brain
 from engines.aiida.web.web import create_layout
 from engines.aiida.reporters.nicegui import NiceGUIReporter
 from engines.aiida.executors.executor import AiiDAExecutor 
+
+# 🚩 获取当前 main.py 所在的绝对路径，并定位到 static 文件夹
+static_path = os.path.join(os.path.dirname(__file__), 'static')
+
+# 🚩 将该文件夹挂载到网页路径 /aiida/static
+app.add_static_files('/aiida/static', static_path)
 
 def main():
 
@@ -84,8 +91,32 @@ def main():
             components['archive_select'].value = selected_path
 
     components['upload_btn'].on('click', pick_local_file)
+    async def refresh_models():
+        """动态获取模型并上报系统状态"""
+        try:
+            # 获取列表
+            models = await engine._brain.get_available_models()
+            
+            # 🚩 广播给所有报告器 (Console & NiceGUI)
+            for reporter in engine._reporters:
+                if hasattr(reporter, 'report_system'):
+                    reporter.report_system("api_status", {"models": models, "error": None})
+            
+            # 🚩 核心修复：更新选项并强制刷新
+            components['model_select'].options = models
+            components['model_select'].update() # 强制通知 NiceGUI 更新 DOM
+            
+            # 重新选中当前模型，防止刷新后变回默认值
+            components['model_select'].value = engine._brain._model_name
+            
+        except Exception as e:
+            for reporter in engine._reporters:
+                if hasattr(reporter, 'report_system'):
+                    reporter.report_system("api_status", {"models": [], "error": str(e)})
 
-# 1. 修正模型切换事件 (解决特性消失问题)
+    # 在启动 0.1s 后触发刷新
+    ui.timer(0.1, refresh_models, once=True)
+    # 1. 修正模型切换事件 (解决特性消失问题)
     def handle_model_change(e):
         engine._brain._model_name = e.value
         ui.notify(f"Brain active: {e.value}")
@@ -125,7 +156,7 @@ def main():
     ui.run(
         port=8080, 
         title="SABR-AiiDA Explorer", 
-        reload=False,   # 🚩 Windows 下 reload=True 极易导致进程卡死，建议关闭
+        reload=True,   # 🚩 Windows 下 reload=True 极易导致进程卡死，建议关闭
         dark=False, 
         show=True       # 自动打开浏览器，省得你手动点
     )
