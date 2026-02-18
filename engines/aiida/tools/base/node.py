@@ -1,5 +1,27 @@
 from aiida import orm
 
+# engines/aiida/tools/base/node.py
+from aiida.orm import load_node
+import json
+
+def get_node_summary(node_pk: int) -> dict:
+    """获取节点的结构化摘要，用于 UI 展示或 Brain 分析"""
+    try:
+        node = load_node(node_pk)
+        return {
+            "pk": node.pk,
+            "type": node.node_type.split('.')[-2] if '.' in node.node_type else node.node_type,
+            "ctime": node.ctime.strftime('%Y-%m-%d %H:%M:%S'),
+            "label": node.label or "(No Label)",
+            "state": getattr(node, 'process_state', 'N/A'),
+            "exit_status": getattr(node, 'exit_status', 'N/A'),
+            "incoming": len(node.get_incoming().all()),
+            "outgoing": len(node.get_outgoing().all()),
+            "attributes": node.attributes
+        }
+    except Exception as e:
+        raise RuntimeError(f"Failed to load node {node_pk}: {str(e)}")
+        
 def serialize_node(node: orm.Node) -> dict:
     """
     将任何 AiiDA 节点转化为 AI 可读的字典格式。

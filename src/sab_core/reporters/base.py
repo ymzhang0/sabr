@@ -25,3 +25,7 @@ class BaseReporter(ABC):
     def report_thought(self, thought: str) -> None:
         """通用方法：报告大脑的中间思考过程"""
         pass
+    
+    def debug(self, message: str, level: str = "INFO"):
+        """统一的调试信息接口"""
+        pass

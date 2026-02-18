@@ -16,7 +16,7 @@ class Brain(Protocol):
     perception and execution.
     """
 
-    def decide(self, observation: Observation) -> Action:
+    def decide(self, observation: Observation, history=None) -> Action:
         """
         Produce an Action from the current Observation (e.g. via LLM).
 

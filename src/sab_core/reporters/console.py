@@ -13,3 +13,8 @@ class ConsoleReporter(BaseReporter):
         logger.info("Raw: {}", raw_snippet)
         logger.info("Decision: {} {}", action.name, action.payload)
         logger.info("--------------------------")
+
+    def debug(self, message: str, level: str = "INFO"):
+        icon = "🔍" if level == "DEBUG" else "💡"
+        # 使用简单的 ANSI 颜色或者直接打印
+        print(f"[{level}] {icon} {message}")

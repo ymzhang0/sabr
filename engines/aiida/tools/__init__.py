@@ -1,4 +1,12 @@
-from .management.profile import list_system_profiles, list_local_archives, switch_profile, get_statistics, list_groups, get_unified_source_map
+from .management.profile import (
+    list_system_profiles, 
+    list_local_archives, 
+    switch_profile, 
+    get_statistics, 
+    list_groups, 
+    get_unified_source_map,
+    get_database_summary
+    )
 from .management.group import inspect_group
 from .process.process import inspect_process, fetch_recent_processes
 from .submission.submission import inspect_workchain_spec, draft_workchain_builder, submit_workchain_builder

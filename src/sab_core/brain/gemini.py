@@ -16,13 +16,16 @@ class GeminiBrain:
         # 这里的 tools 是函数引用列表
         self._tools = tools 
 
-    async def decide(self, observation: Observation) -> Action:
+    async def decide(self, observation: Observation, history: list | None = None) -> Action:        
         """
         自动解析 Gemini 的决策：是调用工具还是回复文字。
         """
         # 将观察结果传给 Gemini
-        contents = [f"Observation Source: {observation.source}\nContent: {observation.raw}"]
-        
+        contents = history or []
+
+        # 2. 将最新的观察结果（Observation）作为最后一个 user 消息加入
+        current_prompt = f"Observation Source: {observation.source}\nContent: {observation.raw}"
+        contents.append(types.Content(role="user", parts=[types.Part(text=current_prompt)]))
         try:
             response = await self._client.aio.models.generate_content(
                 model=self._model_name,

@@ -157,3 +157,29 @@ def list_groups(search_string: str = None):
         lines.append(f"| {pk} | {label} | {len(group.nodes)} |")
     
     return "\n".join(lines)
+
+def get_database_summary():
+    """
+    专门为 UI 迎宾界面设计的快速统计工具。
+    返回原始数据字典，供 UI 使用。
+    """
+    try:
+        from aiida.orm import QueryBuilder, Node, ProcessNode
+        n_count = QueryBuilder().append(Node).count()
+        p_count = QueryBuilder().append(ProcessNode).count()
+        
+        # 还可以顺便统计一下失败的任务
+        from aiida import orm
+        failed_count = QueryBuilder().append(
+            orm.ProcessNode, 
+            filters={'process_state': {'==': 'finished'}, 'exit_status': {'!==': 0}}
+        ).count()
+
+        return {
+            "status": "success",
+            "node_count": n_count,
+            "process_count": p_count,
+            "failed_count": failed_count
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
