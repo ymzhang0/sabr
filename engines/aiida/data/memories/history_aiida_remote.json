@@ -1,0 +1,11 @@
+{
+  "turns": [],
+  "summary": "",
+  "action_history": [
+    {
+      "action": "list_system_profiles",
+      "result_summary": "[]",
+      "success": false
+    }
+  ]
+}

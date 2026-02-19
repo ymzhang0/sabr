@@ -8,5 +8,6 @@ class Config:
     # Use os.getenv with a fallback default for safety
     MEMORY_DIR = os.getenv("SABR_MEMORY_DIR", "data/memories")
     DEBUG_LEVEL = os.getenv("SABR_DEBUG_LEVEL", "INFO")
-
+    ENGINE_TYPE = os.getenv("ENGINE_TYPE", "aiida")
+    
 settings = Config()

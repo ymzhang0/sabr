@@ -700,29 +700,25 @@
       "response": "",
       "final_action": "inspect_group",
       "total_steps": 10
+    },
+    {
+      "intent": "Inspect archive 'C:/Users/Administrator/Desktop/Yiming/sab-core/engines/aiida/data/test_dislocation.aiida'. User task: System Refresh",
+      "response": "",
+      "final_action": "inspect_group",
+      "total_steps": 10
     }
   ],
   "summary": "",
   "action_history": [
     {
-      "action": "say",
-      "result_summary": "None",
-      "success": false
-    },
-    {
       "action": "inspect_group",
-      "result_summary": "=== Analysis for Group: dislocation/test/Al ===\nFound 8 (showing top 5):\nPK=40518 | Attributes={\"pro",
+      "result_summary": "=== Analysis for Group: dislocation/test/Al ===\nFound 8 (showing top 20):\nPK=40518 | Attributes={\"pr",
       "success": true
     },
     {
-      "action": "say",
-      "result_summary": "None",
-      "success": false
-    },
-    {
-      "action": "say",
-      "result_summary": "None",
-      "success": false
+      "action": "inspect_group",
+      "result_summary": "=== Analysis for Group: dislocation/test/Al ===\nFound 8 (showing top 20):\nPK=40518 | Attributes={\"pr",
+      "success": true
     }
   ]
 }

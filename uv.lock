@@ -1943,13 +1943,16 @@ name = "sab-core"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "google-genai" },
+    { name = "httpx" },
     { name = "loguru" },
     { name = "nicegui" },
     { name = "psutil" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "tenacity" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -1970,7 +1973,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiida-core", marker = "extra == 'aiida'", specifier = ">=2.0.0" },
+    { name = "fastapi", specifier = ">=0.129.0" },
     { name = "google-genai", specifier = ">=1.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "nicegui", specifier = ">=3.7.1" },
     { name = "psutil", specifier = ">=5.9.0,<6" },
@@ -1979,6 +1984,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "tenacity", specifier = ">=8.0" },
+    { name = "uvicorn", specifier = ">=0.40.0" },
 ]
 provides-extras = ["dev", "aiida"]
 
