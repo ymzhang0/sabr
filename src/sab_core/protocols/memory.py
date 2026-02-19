@@ -2,7 +2,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 
-class BaseMemory(ABC):
+class Memory(ABC):
     """
     SABRM 架构中的 M (Memory) 协议
     负责对话历史、决策路径及环境快照的持久化与检索

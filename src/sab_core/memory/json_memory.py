@@ -2,9 +2,9 @@
 import json
 import os
 from typing import List, Dict, Any
-from ..protocols.memory import BaseMemory
+from ..protocols.memory import Memory
 
-class JSONMemory(BaseMemory):
+class JSONMemory(Memory):
     def __init__(self, storage_dir: str, namespace: str = "default"):
         self.path = os.path.join(storage_dir, f"history_{namespace}.json")
         os.makedirs(storage_dir, exist_ok=True)
@@ -13,22 +13,21 @@ class JSONMemory(BaseMemory):
     def _load(self) -> List[Dict]:
         if os.path.exists(self.path):
             with open(self.path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                # Ensure we always return the list part
+                if isinstance(data, dict):
+                    return data.get("turns", [])
+                return data # Backwards compatibility if file is just a list
         return []
 
     def store(self, turn_data: Dict[str, Any]):
-        """
-        turn_data 预期结构:
-        {
-            "intent": str,
-            "actions": List[Dict],  # 🚩 新增：记录执行的命令和结果
-            "response": str,
-            "observation_snapshot": str
-        }
-        """
         self.turns.append(turn_data)
+        # Always load existing data to preserve KV pairs, then update turns
+        current_data = self._load_full_dict() 
+        current_data["turns"] = self.turns
+        
         with open(self.path, 'w', encoding='utf-8') as f:
-            json.dump(self.turns, f, ensure_ascii=False, indent=2)
+            json.dump(current_data, f, ensure_ascii=False, indent=2)
 
     def get_action_history(self, limit: int = 5) -> str:
         """

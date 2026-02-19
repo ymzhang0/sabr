@@ -7,7 +7,7 @@ import json      # 🚩 补上这个
 import zipfile   # 🚩 补上这个
 from pathlib import Path
 from aiida import load_profile, orm
-from aiida.orm import Group, Node, QueryBuilder
+from aiida.orm import Group, Node, QueryBuilder, ProcessNode, Node
 from aiida.manage.configuration import get_config
 from aiida.manage.manager import get_manager
 from aiida.storage.sqlite_zip.backend import SqliteZipBackend
@@ -164,15 +164,13 @@ def get_database_summary():
     返回原始数据字典，供 UI 使用。
     """
     try:
-        from aiida.orm import QueryBuilder, Node, ProcessNode
         n_count = QueryBuilder().append(Node).count()
         p_count = QueryBuilder().append(ProcessNode).count()
         
         # 还可以顺便统计一下失败的任务
-        from aiida import orm
-        failed_count = QueryBuilder().append(
-            orm.ProcessNode, 
-            filters={'process_state': {'==': 'finished'}, 'exit_status': {'!==': 0}}
+        failed_count = orm.QueryBuilder().append(
+            ProcessNode, 
+            filters={'exit_status': {'!==': 0}}
         ).count()
 
         return {
@@ -183,3 +181,22 @@ def get_database_summary():
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+def get_recent_processes(limit: int = 5):
+    """
+    🚩 核心：封装 AiiDA 数据库查询逻辑。
+    这个函数既可以给 AI 当 Tool 用，也可以给 Controller 当内部数据源用。
+    """
+    qb = QueryBuilder()
+    qb.append(ProcessNode, project=['id', 'attributes.process_state', 'attributes.process_label', 'ctime'], tag='process')
+    qb.order_by({'process': {'ctime': 'desc'}})
+    qb.limit(limit)
+    
+    results = []
+    for pk, state, label, ctime in qb.all():
+        results.append({
+            'pk': pk,
+            'state': state.value if hasattr(state, 'value') else str(state),
+            'label': label or 'Unknown Task'
+        })
+    return results

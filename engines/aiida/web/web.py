@@ -1,8 +1,12 @@
 import os
-from nicegui import ui
+from nicegui import app, ui
 from engines.aiida.web.themes import THEMES
 
-def create_layout(theme_name='gemini_dark'):
+app.add_static_files('/aiida/static', 'engines/aiida/static')
+
+
+
+def create_layout(theme_name='gemini_dark', available_models=[None]):
     theme = THEMES.get(theme_name, THEMES['gemini_dark'])
     theme_css = ":root {\n" + "\n".join([f"    {k}: {v};" for k, v in theme.items()]) + "\n}"
 
@@ -17,37 +21,119 @@ def create_layout(theme_name='gemini_dark'):
     ''')
 
     # --- 1. 侧边栏 ---
+    ICON_W = "w-[40px]"
+ 
     with ui.left_drawer(value=True, fixed=True).props('width=380').classes('q-pa-none border-r') as drawer:
         with ui.column().classes('w-full h-full no-wrap gap-0'):
-            # 头部标题
-            with ui.row().classes('items-center gap-3 px-6 py-8'):
-                ui.icon('auto_awesome', color='primary', size='32px')
-                ui.label('SABR-AiiDA').classes('text-2xl font-black tracking-tighter') # 🚩 加粗标题
-            with ui.column().classes('history-container w-full flex-grow gap-2 px-6'):
-                with ui.row().classes('w-full items-center justify-between'):
-                    ui.label('RECENT ARCHIVES').classes('text-[11px] font-bold tracking-widest text-slate-400')
+            
+            # 🚩 [Section 1] 标题
+            with ui.row().classes('items-center px-4 py-8 gap-0'):
+                with ui.element('div').classes(f'{ICON_W} flex items-center'):
+                    ui.icon('auto_awesome', color='primary', size='28px')
+                ui.label('SABR-AiiDA').classes('text-2xl font-black tracking-tighter')
+
+            # 🚩 [Section 2] RECENT ARCHIVES
+            with ui.column().classes('w-full gap-2 mb-4'):
+                with ui.row().classes('w-full items-center px-4 justify-between'):
+                    with ui.row().classes('items-center gap-0'):
+                        with ui.element('div').classes(f'{ICON_W} flex items-center'):
+                            ui.icon('history', size='18px').classes('text-slate-400')
+                        ui.label('RECENT ARCHIVES').classes('text-[11px] font-bold tracking-widest text-slate-400')
                     upload_btn = ui.button(icon='add').props('flat round color=primary size=sm')
-                with ui.scroll_area().classes('w-full flex-grow'):
-                    archive_history = ui.list().props('dense').classes('w-full')
+                
+                with ui.column().classes('w-full max-h-[120px] h-auto overflow-y-auto px-0'):
+                    archive_history = ui.list().props('dense').classes('w-full p-0')
                 archive_select = ui.select(options=['(None)'], value='(None)').classes('hidden')
 
-            ui.separator().classes('opacity-10 my-4')
-            with ui.expansion('INSIGHT', icon='analytics', value=True).classes('w-full px-6 text-slate-400'):
-                with ui.column().classes('w-full gap-2 pb-8'):
-                    debug_log = ui.markdown('').classes('insight-markdown opacity-0 transition-all duration-500 p-0')
-                    thought_log = ui.log().classes('thought-log-container w-full h-32 text-[10px] p-2 bg-black rounded-xl mt-2') #
+            ui.separator().classes('opacity-10 my-4 mx-8')
+
+            async def toggle_log(): # 🚩 改为异步，因为滚动需要等 UI 渲染
+                log_container.visible = not log_container.visible
+                
+                if log_container.visible:
+                    terminal_header.classes(remove='rounded-xl', add='rounded-t-xl')
+                    # 🚩 核心：展开时强制让日志滚动到底部，防止高度计算延迟
+                    # 延迟一小会儿等待展开动画完成
+                    await ui.run_javascript(f'const log = document.getElementById("c{thought_log.id}"); if(log) log.scrollTop = log.scrollHeight;', respond=False)
+                else:
+                    terminal_header.classes(remove='rounded-t-xl', add='rounded-xl')
+
+            # 🚩 [Section 3] INSIGHT (通过 Slot 强制对齐)
+            # 不再在 ui.expansion 里写 icon='analytics'，因为那会破坏对齐
+            with ui.expansion('', value=True).classes('w-full text-slate-400').props('header-class="px-4 py-2"') as insight_exp:
+                # 使用 header slot 自定义表头结构，使其与上面的 RECENT ARCHIVES 一模一样
+                with insight_exp.add_slot('header'):
+                    with ui.row().classes('items-center w-full gap-0'):
+                        with ui.element('div').classes(f'{ICON_W} flex items-center'):
+                            ui.icon('analytics', size='18px')
+                        ui.label('INSIGHT').classes('text-[11px] font-bold tracking-widest')
+
+                with ui.column().classes('w-full gap-0 px-0 pb-4'):
+                    # 1. 深度见解区 (原 debug_log，现重命名为 insight_view)
+                    # 当有结构化数据（表格、列表、状态摘要）时使用它
+                    insight_view = ui.markdown('').classes(
+                        'w-full px-4 py-3 text-[12px] text-slate-200 leading-relaxed '
+                        'bg-primary/5 rounded-xl border border-primary/20 mb-3 mx-0 ' # 带有淡淡的主色调背景
+                        'shadow-[inset_0_0_20px_rgba(var(--primary-rgb),0.05)]'      # 内部微弱发光
+                    ).style('display: none;')
+
+                    with ui.row().on('click', toggle_log).classes(
+                            'w-full bg-[#1e1e1e] px-4 py-2 rounded-t-xl border border-white/5 '
+                            'items-center cursor-pointer hover:bg-[#252525] transition-all'
+                        ) as header:
+                            
+                        # 三个点：固定宽度容器
+                        with ui.row().classes('items-center gap-1.5 w-9 no-wrap'):
+                            ui.element('div').classes('w-2.5 h-2.5 rounded-full bg-[#ff5f56]')
+                            ui.element('div').classes('w-2.5 h-2.5 rounded-full bg-[#ffbd2e]')
+                            ui.element('div').classes('w-2.5 h-2.5 rounded-full bg-[#27c93f]')
+                        # 终端文字：紧跟在三个点后面
+                        ui.label('TERMINAL').classes(
+                            'text-[9px] font-black tracking-[0.2em] text-white/30 uppercase'
+                        )
+                        
+                        # 右侧加一个状态指示（可选，用于提示当前是折叠还是展开）
+                        ui.space()
+                        with ui.row().classes('opacity-20'):
+                            icon_less = ui.icon('expand_less', size='16px')
+                            icon_more = ui.icon('expand_more', size='16px')
+                        # 🚩 3. 终端内容区 (Log Body)
+                    with ui.column().classes('w-full') as log_container:
+                        thought_log = ui.log().classes(
+                            'thought-log-container w-full h-50 text-[10px] p-3 '
+                            'bg-[#0a0a0a] rounded-b-xl border-x border-b border-white/5 '
+                            'font-mono leading-relaxed'
+                        )
+
+                    icon_less.bind_visibility_from(log_container, 'visible')
+                    icon_more.bind_visibility_from(log_container, 'visible', backward=lambda v: not v)
+                    debug_log = ui.markdown('').classes('insight-markdown opacity-0 p-0')
+
+            ui.separator().classes('opacity-10 my-4 mx-8')
+
+            # 🚩 [Section 4] LIVE PROCESSES (移出 INSIGHT，与它们并列)
+            with ui.column().classes('w-full gap-2 mb-8'):
+                with ui.row().classes('items-center px-4 gap-0'):
+                    with ui.element('div').classes(f'{ICON_W} flex items-center'):
+                        ui.icon('sensors', size='18px').classes('text-slate-400')
+                    ui.label('LIVE PROCESSES').classes('text-[11px] font-bold text-slate-400 tracking-widest')
+                
+                # Ticker 内容：文字部分同样缩进 px-8 + ICON_W 的距离，或者直接对齐 px-8
+                process_ticker = ui.column().classes('w-full px-8 gap-2')
 
     # --- 2. 核心对话区 ---
-    with ui.column().classes('chat-container flex-grow w-full pb-64') as main_column:
-        with ui.column().classes('items-center justify-center py-24 w-full') as welcome_screen:
+    with ui.column().classes('chat-container flex-grow w-full pb-64 items-center') as main_column:
+        # with ui.column().classes('items-center justify-center py-24 w-full') as welcome_screen:
+        with ui.column().classes('w-full items-center justify-start pt-[20vh] flex-grow') as welcome_screen:
             # 🚩 给这两个标签赋值变量名
             welcome_title = ui.label('Hi, Where should we start?').classes('text-5xl font-light opacity-20 tracking-tight text-center')
             welcome_sub = ui.label('Select a shortcut or analyze your database below.').classes('text-sm text-slate-300 mt-4 uppercase tracking-widest text-center')
         
-        chat_area = ui.column().classes('w-full max-w-[900px] mx-auto gap-8 px-4')
+        chat_area = ui.column().classes('w-full max-w-[850px] mx-auto gap-8 px-4')
+
     # --- 3. 悬浮控制区 (Fixed Footer) ---
-    with ui.column().classes('fixed bottom-0 right-0 p-8 z-10').style(f'left: 340px; background: linear-gradient(to top, var(--main-bg) 60%, transparent);'):
-        with ui.column().classes('w-full max-w-[1000px] mx-auto'):
+    with ui.column().classes('fixed bottom-0 right-0 z-10 p-8 items-center').style(f'left: 340px; background: linear-gradient(to top, var(--main-bg) 60%, transparent);'):
+        with ui.column().classes('w-full max-w-[850px] gap-4'):
             
             with ui.element('div').classes('suggestion-grid') as suggestion_container:
                 suggestion_cards = []
@@ -66,18 +152,51 @@ def create_layout(theme_name='gemini_dark'):
                     suggestion_cards.append((card, full_intent))
 
             # 输入框
-            with ui.row().classes('w-full input-pill px-8 py-3 items-center no-wrap shadow-lg') as input_container: # 🚩 添加容器变量
+            with ui.row().classes('w-full input-pill px-6 py-1 items-center no-wrap shadow-2xl') as input_container: # 🚩 添加容器变量
                 input_field = ui.textarea(placeholder='Ask SABR...').classes('flex-grow bg-transparent text-xl').props('borderless autogrow')
                 send_btn = ui.button(icon='send', color='primary').props('round flat size=lg')
-            with ui.row().classes('w-full items-center justify-between px-6 opacity-40'):
-                model_select = ui.select(options=['gemini-2.0-flash'], value='gemini-2.0-flash').props('dense borderless').classes('text-[10px] font-bold')
-                ui.label('SABR-AiiDA v1.2').classes('text-[9px] uppercase tracking-widest')
+
+            with ui.row().classes('w-full items-center justify-between'):
+                # 🚩 补全模型选择器
+                model_select = ui.select(
+                        options=available_models,
+                        value=available_models[0]
+                    ).props(
+                        # borderless: 去掉下划线
+                        # hide-dropdown-icon: 如果你想极简，可以去掉小箭头（可选）
+                        # options-dense: 让下拉列表更紧凑
+                        # popup-content-class: 给弹出的菜单加圆角
+                        'flat dense borderless options-dense hide-dropdown-icon '
+                        'popup-content-class="rounded-xl border border-white/10 shadow-xl"'
+                    ).classes(
+                        'text-[12px] font-bold tracking-widest uppercase '
+                        'px-3 py-1 rounded-full cursor-pointer '
+                        'text-slate-400 hover:text-primary hover:bg-primary/10 ' # 悬浮变色变底
+                        'transition-all duration-300 w-auto min-w-[120px]'
+                    )
+                with model_select.add_slot('prepend'):
+                    with ui.element('div').classes('flex items-center justify-center pr-2'): # pr-2 控制灯与字的距离
+                        ui.element('div').classes('w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_8px_rgba(34,197,94,0.6)]')
+                # 右侧可以放一些状态标识（可选）
+                ui.label('AI ENGINE READY').classes('text-[9px] font-black tracking-widest text-primary/40')
+
+                ui.label('LATENCY: STABLE').classes('text-[9px] font-black opacity-30 tracking-widest')
 
     return {
-        'welcome_screen': welcome_screen, 'welcome_title': welcome_title, 'welcome_sub': welcome_sub, 
+        'welcome_screen': welcome_screen, 
+        'welcome_title': welcome_title, 
+        'welcome_sub': welcome_sub, 
         'suggestion_container': suggestion_container,
-        'chat_area': chat_area, 'input_container': input_container, 'input': input_field, 'send_btn': send_btn,
-        'upload_btn': upload_btn, 'archive_history': archive_history, 'archive_select': archive_select,
-        'debug_log': debug_log, 'thought_log': thought_log, 'model_select': model_select, 
-        'suggestion_cards': suggestion_cards
+        'chat_area': chat_area, 
+        'input_container': input_container, 
+        'input': input_field, 
+        'send_btn': send_btn,
+        'upload_btn': upload_btn, 
+        'archive_history': archive_history, 
+        'archive_select': archive_select, # 🚩 确保这里不再报错
+        'debug_log': debug_log, 
+        'thought_log': thought_log, 
+        'model_select': model_select, 
+        'suggestion_cards': suggestion_cards,
+        'process_ticker': process_ticker
     }

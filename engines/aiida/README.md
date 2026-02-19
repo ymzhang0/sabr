@@ -36,3 +36,42 @@
 联动逻辑：Brain 生成 Action 后，先不执行，而是在 UI 上显示“即将查询 500 个节点，是否继续？”。
 
 丝滑体现：这种“确认-执行”的反馈链条能极大增加用户对系统的信任感。
+
+1. 动态建议卡片 (Adaptive Suggestions)
+目前的 4 个快捷卡片（📊 Stats, 🔍 Group...）是静态的。
+
+改进思路：让 Brain 在每次回复后，根据当前上下文生成 3 个“下一步建议”。
+
+实现：在 Action 协议里增加一个 suggestions 字段。比如当你查看了一个 WorkChain 失败了，AI 自动在下方生成一个“查看失败报错”和“检查输入参数”的卡片。
+
+价值：变“搜索式交互”为“引导式交互”，这就是所谓的 Anticipatory UI。
+
+2. 后台任务状态条 (Process Ticker)
+AiiDA 的任务（Process）通常耗时较长，用户点击“运行”后往往会陷入焦虑。
+
+改进思路：在侧边栏的 Thought Log 下方加一个极简的 Active Tasks 列表。
+
+实现：在 AiiDAController 里加一个定时器（ui.timer），每 30 秒执行一次 verdi process list -a -n 5，并以小胶囊的形式显示状态（Running, Finished, Failed）。
+
+价值：让用户无需询问 AI 就能实时感知后端 AiiDA 引擎的状态。
+
+3. “深度感知”模式 (Deep Inspection)
+目前的 Perceptor 是一次性产生一个报告。
+
+改进思路：引入 Hierarchical Perception（层级感知）。
+
+实现：当用户点击左侧历史中的某个 Node 时，触发一个 inspect_node 的 Action，这个 Action 会绕过大模型，直接让 Perceptor 抓取该 Node 的所有 inputs/outputs。
+
+价值：减少 AI 的幻觉。AI 不需要猜，它直接看到了最详尽的数据。
+
+4. 故障自愈记忆 (Self-Healing Memory)
+我们已经有了 Action Logs。
+
+改进思路：利用 Memory 实现“经验沉淀”。
+
+实现：如果 AI 执行某个命令报错了，记录下这个错误。当用户下次问类似问题时，在注入 Memory 的同时，附带一条：“Note: Last time you tried command X, it failed due to Y. Avoid that.”
+
+价值：这才是真正的 M (Memory)。它不只是记录，而是在进化。
+
+目前的 chat_area 是垂直堆叠的，你可以尝试给 AI 的回复增加一个 “Source Citations”（来源标注）。
+当 AI 说“这个结构已经优化好了”时，在文字下方显示一个小小的标签 [Node PK: 102]，点击直接跳转到该 Node 的详细视图。

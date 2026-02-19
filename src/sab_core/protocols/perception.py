@@ -15,7 +15,7 @@ class Perceptor(Protocol):
     decoupled from decision and execution.
     """
 
-    def perceive(self) -> Observation:
+    def perceive(self, intent: str = None) -> Observation:
         """
         Capture the current state of the environment as an Observation.
 

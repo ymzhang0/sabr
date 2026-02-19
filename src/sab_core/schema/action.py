@@ -17,3 +17,8 @@ class Action(BaseModel):
         default_factory=dict,
         description="Key-value pairs of parameters. All values should be strings.",
     )
+
+    suggestions: list[str] = Field(
+        default_factory=list,
+        description="A list of 3 short, actionable follow-up suggestions for the user."
+    )

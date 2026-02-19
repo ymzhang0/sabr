@@ -68,7 +68,7 @@ class NiceGUIReporter(BaseReporter):
         if "aiida" in observation.source:
             # 💡 调用清洗函数，不再使用 YAML 代码块包裹，以便正常显示 Markdown 图标
             formatted_content = self._format_insight_for_human(observation.raw)
-            content = f"### 📊 Insight\n\n{formatted_content}"
+            content = f"##### 📊 Insight\n\n{formatted_content}"
  
             self.comp['debug_log'].set_content(formatted_content)
             
@@ -85,6 +85,10 @@ class NiceGUIReporter(BaseReporter):
         elif action.name == "error_reported":
             self.comp['thought_log'].push(f"⚠️ Brain Error: {action.payload.get('message')}")
 
+        # 2. 🚩 动态建议更新
+        if hasattr(action, 'suggestions') and action.suggestions:
+            self._render_dynamic_suggestions(action.suggestions)
+
     def _render_chat_message(self, content, is_ai=True):
         """
         在聊天区渲染 Markdown 消息气泡
@@ -97,6 +101,47 @@ class NiceGUIReporter(BaseReporter):
                         with ui.card().classes('bg-white shadow-sm border-none p-4 rounded-2xl'):
                             # 渲染 AI 回复
                             ui.markdown(content).classes('text-md text-grey-9')
+
+    def _render_dynamic_suggestions(self, suggestions: list):
+        self.comp['thought_log'].push(f"Suggestions: {suggestions}")
+        container = self.comp['suggestion_container']
+        ctrl = self.comp['controller']
+        
+        container.clear() # 清空旧卡片
+        
+        with container:
+            for text in suggestions:
+                # 使用你 web.py 里的卡片样式
+                card = ui.card().classes('suggestion-card cursor-pointer shadow-none')
+                with card:
+                    with ui.column().classes('gap-1'):
+                        ui.label('✨ NEXT STEP').classes('text-[10px] opacity-40 font-bold')
+                        ui.label(text).classes('text-sm font-medium')
+                
+                # 绑定点击
+                # 绑定点击事件
+                if ctrl:
+                    card.on('click', lambda t=text: ctrl.handle_send(t))
+                else:
+                    self.log("Warning: Controller not found in components, suggestions unclickable", level="WARN")
+                                            
+    def _update_suggestions_ui(self, suggestions: list):
+        container = self.comp['suggestion_container']
+        controller = self.comp['controller'] # 确保 components 里存了 ctrl 的引用
+        
+        container.clear() # 🚩 清空旧的 4 个静态卡片
+        
+        with container:
+            for text in suggestions:
+                # 动态创建新卡片
+                card = ui.card().classes('suggestion-card cursor-pointer shadow-none')
+                with card:
+                    with ui.column().classes('gap-1'):
+                        ui.label('✨ Suggested').classes('text-[10px] opacity-50 uppercase')
+                        ui.label(text).classes('text-sm font-bold')
+                
+                # 🚩 绑定点击事件：直接发送建议文本
+                card.on('click', lambda t=text: controller.handle_send(t))
 
     def debug(self, message: str, level: str = "INFO"):
         # 🚩 核心：直接推送到侧边栏那个黑色的 thought_log 区域

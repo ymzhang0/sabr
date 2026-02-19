@@ -1,5 +1,23 @@
 /* engines/aiida/static/style.css */
 
+/* 1. 统一聊天卡片的边距和字体 */
+.nicegui-card {
+    line-height: 1.6;
+    letter-spacing: 0.01em;
+}
+
+/* 2. 修正 Markdown 里的间距（防止表格或列表撑开容器） */
+.nicegui-markdown p {
+    margin-bottom: 0.5rem;
+}
+
+.nicegui-markdown pre {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 1rem;
+    border-radius: 0.75rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
 /* --- 1. 基础布局与变量 --- */
 body {
     background-color: var(--main-bg);
@@ -30,6 +48,12 @@ body {
     display: none !important;
 }
 
+.q-item.group:hover {
+    /* 给悬停项加一个极细的左侧发光边框 */
+    border-left: 2px solid var(--primary);
+    box-shadow: inset 10px 0 15px -10px rgba(var(--primary-rgb), 0.2);
+}
+
 /* --- 🚩 从 main 搬过来的“灵魂”样式 --- */
 .nicegui-chat-message { margin-bottom: 20px; }
 .q-message-text { border-radius: 18px !important; }
@@ -56,6 +80,10 @@ body {
 .text-slate-400 { color: var(--sidebar-sub) !important; }
 
 /* --- 3. 建议卡片网格与染色 --- */
+@keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
 .suggestion-grid {
     display: grid !important;
     grid-template-columns: repeat(3, 1fr) !important;
@@ -64,6 +92,7 @@ body {
 }
 
 /* 🚩 关键：将变量应用到建议卡片 */
+
 .suggestion-card { 
     background-color: var(--card-bg) !important; 
     color: var(--text-main) !important;
@@ -75,6 +104,7 @@ body {
     flex-direction: column;
     justify-content: center;
     padding: 24px !important;
+    animation: fadeInUp 0.4s ease-out forwards;
 }
 
 .suggestion-card:hover { 
@@ -156,7 +186,7 @@ body {
 /* 优化 Insight 内部的代码块外观 */
 .insight-markdown code {
     background-color: rgba(255, 255, 255, 0.1);
-    padding: 2px 4px;
+    /* padding: 2px 4px; */
     border-radius: 4px;
     color: var(--accent-color);
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
@@ -166,6 +196,12 @@ body {
 .history-container .q-scrollarea__bar,
 .history-container .q-scrollarea__thumb {
     opacity: 0 !important;
+}
+
+.thought-log-container {
+    color: #a0a0a0; /* 灰白色，不刺眼 */
+    font-family: 'Fira Code', 'JetBrains Mono', 'Menlo', monospace !important;
+    text-shadow: 0 0 5px rgba(255, 255, 255, 0.05); /* 微弱的文字发光 */
 }
 
 .thought-log-container, 
@@ -185,6 +221,20 @@ body {
     height: 0 !important;
 }
 
+.thought-log-container::-webkit-scrollbar {
+    width: 4px;
+}
+.thought-log-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+.thought-log-container::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 10px;
+}
+
+.thought-log-container::-webkit-scrollbar-thumb:hover {
+    background: var(--primary); /* 鼠标放上去时滚动条变亮 */
+}
 /* 确保 thought_log 内部容器也不显示滚动条 */
 .thought-log-container div,
 .thought-log-container pre {
