@@ -15,11 +15,148 @@ class AiiDAController(BaseController):
     def __init__(self, engine, components, memory):
         super().__init__(engine, components)
         self.global_mem = memory
-        # 🚩 启动时自动恢复历史列表
         self._load_archive_history()
         self.ticker_timer = ui.timer(10.0, self.update_process_status)
         self.terminal = components.get('thought_log')
         self.insight = components.get('insight_view')
+
+    # ============================================================
+    # 核心私有调度方法 (Dispatcher Methods)
+    # ============================================================
+
+    def _prepare_ui(self):
+        """Reset UI states and clear inputs before a new request."""
+        if 'insight_view' in self.components:
+            self.components['insight_view'].set_content('')
+            self.components['insight_view'].style('display: none;')
+        
+        self.components['welcome_screen'].set_visibility(False)
+        self.components['suggestion_container'].set_visibility(False)
+        self.components['input'].value = ""
+
+    def _create_chat_bubble(self, text: str, role: str = 'user'):
+        """Render custom chat bubbles for users or AI with specific styling."""
+        with self.components['chat_area']:
+            if role == 'user':
+                # User Bubble: Aligned Right, Primary theme
+                with ui.row().classes('w-full justify-end mb-6'):
+                    with ui.column().classes('items-end max-w-[80%]'):
+                        ui.label('YOU').classes('text-[10px] font-black opacity-30 pr-2 tracking-tighter')
+                        with ui.card().classes('bg-primary/10 p-4 rounded-2xl shadow-none border-none').style('border-bottom-right-radius: 2px;'):
+                            ui.markdown(text).classes('text-slate-200 leading-relaxed')
+            else:
+                # AI Bubble: Aligned Left, with Avatar and Secondary theme
+                with ui.row().classes('w-full justify-start mb-6'):
+                    with ui.row().classes('items-start gap-3 no-wrap'):
+                        ui.avatar('auto_awesome', color='primary', text_color='white').props('size=sm shadow-lg')
+                        with ui.column().classes('max-w-[85%] items-start'):
+                            ui.label('SABR-AIIDA').classes('text-[10px] font-black text-primary opacity-60 pl-1 tracking-tighter')
+                            with ui.card().classes('bg-white/5 border border-white/10 p-4 rounded-2xl shadow-none').style('border-top-left-radius: 2px;'):
+                                ui.markdown(text).classes('text-slate-300 leading-relaxed')
+    
+    def _route_engine_result(self, response):
+        """Route engine output to the appropriate UI component (Chat vs. Insight View)."""
+        if not response:
+            self.engine.log("No response received from Engine.", level="ERROR")
+            return
+
+        # Determine display content
+        display_text = response.content
+        if response.action_name != "say":
+            display_text = str(response.result or "")
+
+        # Route by content type: Tables go to Insight View, text goes to Chat Area
+        if "|" in display_text and "---" in display_text:
+            self.log(display_text, level="SUCCESS") 
+        else:
+            self._create_chat_bubble(display_text, role='ai')
+
+        # Render action chips if suggestions exist
+        if response.suggestions:
+            self.render_suggestion_chips(response.suggestions)
+
+    # ============================================================
+    # 主业务逻辑
+    # ============================================================
+
+    async def handle_send(self, preset_text=None):
+        """Main entry point for handling user messages and orchestrating UI updates."""
+        text = preset_text if preset_text else self.components['input'].value
+        if not text: return
+
+        # 1. UI Preparation
+        self._prepare_ui()
+        
+        # 2. Render User Input
+        self._create_chat_bubble(text, role='user')
+
+        # 3. Show Thinking Animation
+        with self.components['chat_area']:
+            # 1. 🚩 Thinking Section (Dropdown)
+            with ui.expansion('', icon='psychology').classes('w-full mb-2 text-slate-400') as thought_exp:
+                with thought_exp.add_slot('header'):
+                    # The dynamic "Topic" label
+                    thought_topic = ui.label('SABR is starting...').classes('text-xs italic ml-2')
+                
+                # Detailed logs inside the expansion
+                detail_log = ui.log().classes('w-full h-32 text-[10px] bg-slate-900/50 p-2')
+
+            # 2. 🚩 AI Response Bubble (Initially empty)
+            with ui.row().classes('w-full justify-start mb-6'):
+                with ui.row().classes('items-start gap-3 no-wrap'):
+                    ui.avatar('auto_awesome', color='primary').props('size=sm')
+                    with ui.card().classes('bg-white/5 border border-white/10 p-4 rounded-2xl'):
+                        ai_markdown = ui.markdown('').classes('text-slate-300')
+
+        ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
+        
+        try:
+            # Consume the engine stream
+            async for event in self.engine.run_stream(intent=text):
+                if event['type'] == 'status':
+                    # Update the topic next to the icon
+                    thought_topic.set_text(event['topic'])
+                    detail_log.push(f"⚙️ {event['topic']}")
+                    
+                elif event['type'] == 'chunk':
+                    # Streaming tokens into the markdown component
+                    # Note: You need a small logic to extract "content" from the JSON stream
+                    # Here we simplify: assume chunk is part of the final text
+                    ai_markdown.content += event['text']
+                    ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
+
+                elif event['type'] == 'done':
+                    # Auto-collapse thinking if successful
+                    thought_topic.set_text('Thought process completed.')
+                    thought_exp.value = False 
+                    
+        except Exception as e:
+            detail_log.push(f"❌ Error: {str(e)}")
+            thought_topic.set_text("Thinking interrupted by error.")
+        finally:
+            thinking.delete()
+            ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
+
+    def _build_intent(self, text: str) -> str:
+        """Helper to inject archive context into the user intent."""
+        path = self.components['archive_select'].value
+        if path and path != '(None)':
+            return f"Context: Inspect archive '{path}'. Task on {os.path.basename(path)}: {text}"
+        return text
+
+    def render_suggestion_chips(self, suggestions):
+        """Render clickable suggestion chips in the chat area."""
+        with self.components['chat_area']:
+            with ui.row().classes('flex-wrap gap-2 py-2 pl-12 mb-8 animate-fade-in'):
+                for text in suggestions:
+                    ui.button(
+                        text, 
+                        on_click=lambda t=text: self.handle_send(preset_text=t)
+                    ).props('outline rounded dense no-caps shadow-none').classes(
+                        'text-[11px] px-3 py-1 border-primary/20 text-primary/70 '
+                        'hover:bg-primary/10 hover:border-primary transition-all bg-white/5 italic'
+                    )
+
     def _load_archive_history(self):
         """从全局记忆中读取历史路径并填充 UI"""
         history = self.global_mem.get_raw_data("recent_archives") or []
@@ -67,6 +204,7 @@ class AiiDAController(BaseController):
                         'text-[11px] font-medium text-slate-400 transition-colors '
                         'group-hover:text-white'
                     )
+
     async def handle_archive_selection(self, path: str):
         """当用户点击侧边栏档案时的核心处理逻辑"""
         import os
@@ -234,155 +372,6 @@ class AiiDAController(BaseController):
                 
             self.components['archive_select'].value = selected_path
 
-    def render_suggestion_chips(self, suggestions):
-        """在聊天区生成可点击的建议卡片"""
-        if not suggestions: return
-        
-        with self.components['chat_area']:
-            # 创建一个横向流式布局容器
-            with ui.row().classes('flex-wrap gap-2 py-2 px-4 mb-4 animate-fade-in'):
-                for text in suggestions:
-                    # 🚩 核心：点击按钮直接触发 handle_send(text)
-                    ui.button(
-                        text, 
-                        on_click=lambda t=text: self.handle_send(preset_text=t)
-                    ).props('outline rounded dense no-caps').classes(
-                        'text-[11px] px-3 py-1 border-primary/30 text-primary/80 '
-                        'hover:bg-primary/10 hover:border-primary transition-all '
-                        'bg-primary/5 capitalize italic'
-                    )
-
-    async def handle_send(self, preset_text=None):
-        """处理消息发送（修复变量未定义错误）"""
-        import os
-        
-        # 1. 获取输入
-        text = preset_text if preset_text else self.components['input'].value
-        if not text: return
-        
-        # 重置见解区
-        if 'insight_view' in self.components:
-            self.components['insight_view'].set_content('')
-            self.components['insight_view'].style('display: none;')
-        
-        self.engine.log(f"Handling send: {text[:30]}...", level="DEBUG")
-
-        # 2. UI 状态切换
-        self.components['welcome_screen'].set_visibility(False)
-        self.components['suggestion_container'].set_visibility(False)
-        self.components['input'].value = ""
-
-    async def handle_send(self, preset_text=None):
-        """处理消息发送（深度定制 UI 对齐版）"""
-        import os
-        
-        # 1. 获取并清理输入
-        text = preset_text if preset_text else self.components['input'].value
-        if not text: return
-        
-        # 重置：开始新对话时隐藏旧的见解区
-        if 'insight_view' in self.components:
-            self.components['insight_view'].set_content('')
-            self.components['insight_view'].style('display: none;')
-        
-        # 2. UI 状态切换：隐藏欢迎词和固定建议
-        self.components['welcome_screen'].set_visibility(False)
-        self.components['suggestion_container'].set_visibility(False)
-        self.components['input'].value = ""
-
-        # 3. 【渲染用户消息】 - 强制靠右对齐
-        with self.components['chat_area']:
-            with ui.row().classes('w-full justify-end mb-6'):
-                with ui.column().classes('items-end max-w-[80%]'):
-                    ui.label('YOU').classes('text-[10px] font-black opacity-30 pr-2 tracking-tighter')
-                    with ui.card().classes('bg-primary/10 p-4 rounded-2xl shadow-none border-none').style('border-bottom-right-radius: 2px;'):
-                        ui.markdown(text).classes('text-slate-200 leading-relaxed')
-
-            # 4. 【思考中状态】 - 靠左对齐
-            thinking = ui.row().classes('items-center gap-3 pl-2 py-4 animate-pulse')
-            with thinking:
-                ui.avatar('auto_awesome', color='primary', text_color='white').props('size=sm')
-                ui.label('SABR is thinking...').classes('text-xs text-slate-500 italic')
-
-        # 初始滚动
-        ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
-        
-        try:
-            # 4. 构造上下文意图
-            arch_full_path = self.components['archive_select'].value
-            intent = text
-            # 🚩 修复点：先给 arch_name 默认值
-            display_context = "Global"
-            
-            # 统一判断：只有路径存在且不为 (None) 时才处理
-            if arch_full_path and arch_full_path != '(None)':
-                arch_name = os.path.basename(arch_full_path)
-                display_context = arch_name # 更新显示的上下文名称
-                intent = f"Context: Inspect archive '{arch_full_path}'. Task on {arch_name}: {text}"
-            
-            # 5. 执行 Engine 循环
-            # 🚩 使用统一的 display_context，不再报错
-            self.engine.log(f"Consulting Brain with context: {display_context}", level="INFO")
-            
-            response = await self.engine.run_once(intent=intent)
-            if not response: # 防御：如果 engine 返回了 None
-                self.engine.log("Engine returned no data.", level="ERROR")
-                return
-
-            # 7. 【智能路由：渲染 AI 回复】
-            # 如果内容是表格或长报告，依然去 insight_view；如果是对话，则出聊天气泡
-            final_content = response.get("content", "")
-            if response.get("action_name") != "say":
-                 final_content = str(response.get("result", ""))
-
-            # 🚩 核心逻辑：判断是发到气泡还是发到见解区
-            if "|" in final_content and "---" in final_content:
-                # 是表格：发到侧边见解区（之前调好的黑色大框）
-                self.engine.log(final_content, level="SUCCESS") 
-            else:
-                # 是对话：在聊天区生成 AI 气泡
-                with self.components['chat_area']:
-                    with ui.row().classes('w-full justify-start mb-6'):
-                        with ui.row().classes('items-start gap-3 no-wrap'):
-                            ui.avatar('auto_awesome', color='primary', text_color='white').props('size=sm shadow-lg')
-                            with ui.column().classes('max-w-[85%] items-start'):
-                                ui.label('SABR-AIIDA').classes('text-[10px] font-black text-primary opacity-60 pl-1 tracking-tighter')
-                                with ui.card().classes('bg-white/5 border border-white/10 p-4 rounded-2xl shadow-none').style('border-top-left-radius: 2px;'):
-                                    ui.markdown(final_content).classes('text-slate-300 leading-relaxed')
-
-            self.engine.log(final_content, level="SUCCESS")
-            
-            # 8. 渲染建议卡片
-            suggestions = response.get("suggestions", [])
-            if suggestions:
-                # 🚩 确保 render_suggestion_chips 内部也是 max-w-[850px]
-                self.render_suggestion_chips(suggestions)
-
-            self.engine.log("Task completed.", level="SUCCESS")
-            
-        except Exception as e:
-            # 打印完整的错误追踪到控制台，方便排查
-            import traceback
-            traceback.print_exc()
-            self.engine.log(f"Critical error: {str(e)}", level="ERROR")
-        
-        finally:
-            thinking.delete()
-            ui.run_javascript('window.scrollTo(0, document.body.scrollHeight)')
-
-    def render_suggestion_chips(self, suggestions):
-        with self.components['chat_area']:
-            # 这里的 pl-12 是为了避开 AI 的头像宽度，让卡片对齐文字
-            with ui.row().classes('flex-wrap gap-2 py-2 pl-12 mb-8 animate-fade-in'):
-                for text in suggestions:
-                    ui.button(
-                        text, 
-                        on_click=lambda t=text: self.handle_send(preset_text=t)
-                    ).props('outline rounded dense no-caps shadow-none').classes(
-                        'text-[11px] px-3 py-1 border-primary/20 text-primary/70 '
-                        'hover:bg-primary/10 hover:border-primary transition-all '
-                        'bg-white/5 italic'
-                    )
     async def handle_model_change(self, e):
         """处理模型切换逻辑"""
         new_model = e.value

@@ -1,24 +1,24 @@
 """Action model: structured output from the Brain for the Executor."""
 
 from pydantic import BaseModel, ConfigDict, Field
-
+from typing import List, Dict, Any
 
 class Action(BaseModel):
     """
     Standard contract for actions.
-    'extra="forbid"' is required for Gemini Structured Output compatibility.
+    Note: 'extra="forbid"' is removed to ensure Gemini API compatibility.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    # 🚩 Remove extra="forbid" to prevent 'additionalProperties' generation
+    model_config = ConfigDict(protected_namespaces=())
 
     name: str = Field(..., description="The name of the action to take.")
 
-    payload: dict[str, str] = Field(
+    payload: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Key-value pairs of parameters. All values should be strings.",
+        description="Parameters for the tool. All values should be strings or numbers."
     )
-
-    suggestions: list[str] = Field(
+    suggestions: List[str] = Field(
         default_factory=list,
-        description="A list of 3 short, actionable follow-up suggestions for the user."
+        description="3 short follow-up suggestions for the user."
     )

@@ -144,6 +144,18 @@ class NiceGUIReporter(BaseReporter):
                 card.on('click', lambda t=text: controller.handle_send(t))
 
     def debug(self, message: str, level: str = "INFO"):
-        # 🚩 核心：直接推送到侧边栏那个黑色的 thought_log 区域
-        icon = "🛠️" if level == "DEBUG" else "ℹ️"
-        self.comp['thought_log'].push(f"{icon} {message}")
+        """Safe debug logging that prevents RuntimeError if UI is deleted."""
+        log_el = self.comp.get('thought_log')
+        if not log_el: return
+        
+        try:
+            # 🚩 防御性检查：确保所属的 Client 仍然处于连接状态
+            # 只有在 Client 活跃且元素未被标记为 'deleted' 时才推送消息
+            if not log_el._deleted and log_el.client and log_el.client.has_socket_connection:
+                icon = "🛠️" if level == "DEBUG" else "ℹ️"
+                # 在元素自己的上下文内执行，确保能找到正确的 Slot
+                with log_el:
+                    log_el.push(f"{icon} {message}")
+        except Exception:
+            # 界面已经不存在了，直接忽略，防止阻塞后台 Engine 运行
+            pass

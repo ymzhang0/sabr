@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 from sab_core.schema.action import Action
 from sab_core.schema.observation import Observation
+from sab_core.brain.parser import ResponseParser
 
 class GeminiBrain:
     def __init__(self, *, model_name: str = "gemini-2.0-flash", api_key: str | None = None, 
@@ -22,13 +23,40 @@ class GeminiBrain:
         current_prompt = f"Observation Source: {observation.source}\nContent: {observation.raw}"
         contents.append(types.Content(role="user", parts=[types.Part(text=current_prompt)]))
 
+        def clean_schema(schema: dict):
+            """Recursively remove 'additionalProperties' and 'title' for Gemini API."""
+            if not isinstance(schema, dict):
+                return schema
+            
+            # Remove keys forbidden by Gemini Structured Output
+            schema.pop('additionalProperties', None)
+            schema.pop('title', None) # 'title' can also cause issues in some versions
+            
+            for key, value in schema.items():
+                if isinstance(value, dict):
+                    clean_schema(value)
+                elif isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, dict):
+                            clean_schema(item)
+            return schema
+
         try:
+            # 1. 🚩 Prepare and clean the schema dictionary
+            raw_schema = Action.model_json_schema()
+            action_schema = clean_schema(raw_schema)
+
+            # 🚩 KEY CHANGE: Configure for Type-Safe Structured Output
             response = await self._client.aio.models.generate_content(
                 model=self._model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(
                     system_instruction=self._system_prompt,
-                    tools=self._tools,
+                    # Optional: tools can still be used, but response_schema 
+                    # enforces the text part to be valid JSON matching Action.
+                    tools=self._tools, 
+                    response_mime_type="application/json",
+                    response_schema=action_schema, # 🚩 Directly pass the Pydantic model
                 ),
             )
 
@@ -37,65 +65,28 @@ class GeminiBrain:
                 return Action(
                     name="say", 
                     payload={"content": "⚠️ Gemini returned empty content. This might be due to safety filters."}, 
-                    suggestions=["Retry", "Rephrase request"]
                 )
 
             first_part = response.candidates[0].content.parts[0]
 
-            # --- 情况 A: 原生函数调用 ---
+            # Strategy A: Native Function Call
+            # (Gemini might still prefer Function Call parts if tools are triggered)
             if first_part.function_call:
                 fc = first_part.function_call
                 return Action(
                     name=fc.name,
-                    payload={k: v for k, v in fc.args.items()}
+                    payload={k: str(v) for k, v in fc.args.items()}
                 )
+            # Strategy B: Type-Safe Parsed Response
+            # When passing a dict to response_schema, response.parsed is often a dict
+            if response.parsed:
+                if isinstance(response.parsed, dict):
+                    return Action.model_validate(response.parsed)
+                return response.parsed
 
-            # --- 情况 B: 文本回复 (JSON 或 标记文本) ---
+            # Fallback for older SDK versions or edge cases
             raw_text = response.text or ""
-            text_content = raw_text
-            suggestions = []
-
-            # 1. 尝试解析 JSON (针对你的 EVOLUTION_PROMPT)
-            try:
-                clean_json_str = re.sub(r'```json\s*|\s*```', '', raw_text).strip()
-                if clean_json_str.startswith('{') and clean_json_str.endswith('}'):
-                    data = json.loads(clean_json_str)
-                    action_name = data.get("action", "say")
-                    full_payload = data.get("payload", {})
-                    verbal_content = full_payload.pop("content", "")
-                    suggestions = full_payload.pop("suggestions", [])
-                    if action_name == "run_aiida_code" and "command" in full_payload:
-                        full_payload["code"] = full_payload.pop("command")
-                    # 如果是普通对话，payload 重新包装回 content
-                    if action_name == "say":
-                        tool_payload = {"content": verbal_content}
-                    else:
-                        # 如果是工具调用（如 get_statistics），此时 tool_payload 应该是空的 {}
-                        # 或者只包含工具需要的参数
-                        tool_payload = full_payload
-                    return Action(
-                        name=action_name,
-                        payload=tool_payload,
-                        suggestions=suggestions,
-                        # 🚩 建议：如果你能给 Action 类加个 content 属性最好
-                        # 如果不能改 Action 类，我们就把 content 留在日志里
-                    )
-            except:
-                pass # 解析失败，退化到普通文本解析
-
-            # 2. 尝试解析标记位 [SUGGESTIONS]:
-            marker = "[SUGGESTIONS]:"
-            if marker in text_content:
-                parts = text_content.split(marker)
-                text_content = parts[0].strip()
-                raw_sug = parts[1].strip().split(",")
-                suggestions = [s.strip().replace('"', '').replace('*', '') for s in raw_sug if s.strip()]
-
-            return Action(
-                name="say", 
-                payload={"content": text_content},
-                suggestions=suggestions 
-            )
+            return ResponseParser.parse_response(first_part, raw_text)
 
         except Exception as e:
             # 🚩 不在这里 log，而是返回一个 error_reported Action
@@ -103,7 +94,7 @@ class GeminiBrain:
             return Action(
                 name="error_reported", 
                 payload={"message": str(e)},
-                suggestions=["Check API Status", "Simplify Input"]
+                suggestions=["Check API Status", "Simplify Request"]
             )
             
     def get_available_models(self) -> list[str]:
@@ -122,3 +113,38 @@ class GeminiBrain:
         except Exception as e:
             print(f"Failed to fetch models: {e}")
             return ['gemini-2.0-flash', 'gemini-1.5-pro']
+
+    async def stream_decide(self, observation: Observation, history: list | None = None):
+        """Streaming version of decision making."""
+        contents = history or []
+        current_prompt = f"Observation Source: {observation.source}\nContent: {observation.raw}"
+        contents.append(types.Content(role="user", parts=[types.Part(text=current_prompt)]))
+
+        # Prepare cleaned schema for Structured Output
+        def clean_schema(schema: dict):
+            if not isinstance(schema, dict): return schema
+            schema.pop('additionalProperties', None)
+            schema.pop('title', None)
+            for v in schema.values(): clean_schema(v)
+            return schema
+
+        action_schema = clean_schema(Action.model_json_schema())
+
+        # 🚩 Use generate_content_stream for token streaming
+        async for chunk in await self._client.aio.models.generate_content_stream(
+            model=self._model_name,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=self._system_prompt,
+                tools=self._tools,
+                response_mime_type="application/json",
+                response_schema=action_schema,
+            ),
+        ):
+            # If the chunk has a function call, we usually don't stream text
+            if chunk.candidates[0].content.parts[0].function_call:
+                yield chunk.candidates[0].content.parts[0].function_call
+                return
+
+            # Yield the text fragments
+            yield chunk.text
