@@ -1,4 +1,3 @@
-# app_api.py
 import os
 import importlib
 from contextlib import asynccontextmanager
@@ -6,57 +5,64 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-# 🚩 第一步：在所有逻辑开始前加载环境变量（用于代理和 API Key）
+# 1. Load environment variables at the very beginning (Proxy, API Keys)
 load_dotenv()
 
 from src.sab_core.config import settings
-from src.sab_core.factory import get_engine_instance
-from src.sab_core.api.schemas import AgentRequest, AgentResponse
+from src.sab_core.memory.json_memory import JSONMemory
+from src.sab_core.schema import AgentRequest, SABRResponse
+from src.sab_core.schema.response import SABRResponse
 
-# 全局状态存储容器
+# Global state container for long-lived objects
 state = {}
 
 # ============================================================
-# 🧬 生命周期管理 (Lifespan)
+# 🧬 Lifespan Management
 # ============================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    管理后端服务的启动和关闭。
-    在这里完成 Engine 的组装、数据库连接和 AiiDA 环境检查。
+    Handles startup and shutdown logic for the SABR Hub.
     """
-    print(f"🚀 [Backend] Starting SABR-API (2026 Edition)")
-    print(f"🌐 [Proxy] Current HTTP_PROXY: {os.getenv('HTTP_PROXY')}")
+    print(f"🚀 [SABR v2] Initializing Backend Hub...")
     
+    # Initialize Global Memory
+    state["memory"] = JSONMemory(
+        namespace="sabr_v2_global",
+        storage_path=settings.SABR_MEMORY_DIR  # Now it's dynamic!
+        )
+    
+    # Dynamically load the engine-specific agent and deps
+    engine_name = settings.ENGINE_TYPE  # e.g., 'aiida'
     try:
-        # 1. 动态获取引擎实例 (根据 settings.ENGINE_TYPE)
-        print(f"🧬 [Engine] Initializing '{settings.ENGINE_TYPE}' engine...")
-        state["engine"] = get_engine_instance()
+        # Load the Researcher Agent from the engine folder
+        # e.g., from engines.aiida.agents.researcher import aiida_researcher
+        agent_module = importlib.import_module(f"engines.{engine_name}.agents.researcher")
+        state["agent"] = getattr(agent_module, f"{engine_name}_researcher")
         
-        # 2. 验证引擎是否就绪
-        if state["engine"]:
-            print(f"✅ [Engine] {settings.ENGINE_TYPE.upper()} is ready.")
+        # Load the specific Deps class
+        # e.g., from engines.aiida.deps import AiiDADeps
+        deps_module = importlib.import_module(f"engines.{engine_name}.deps")
+        state["deps_class"] = getattr(deps_module, f"{engine_name.capitalize()}Deps")
         
+        print(f"✅ [Agent] '{engine_name}' expert agent is online.")
     except Exception as e:
-        print(f"❌ [Backend] Startup failed: {e}")
-        # 这里不 raise，让服务带病运行以便通过 API 报错，而不是直接崩溃
+        print(f"❌ [Critical] Failed to load agent/deps for {engine_name}: {e}")
     
     yield
-    # 3. 清理工作
+    # Cleanup logic
     state.clear()
-    print("🛑 [Backend] SABR-API shut down.")
+    print("🛑 [SABR v2] Hub shut down.")
 
 # ============================================================
-# 🛠️ FastAPI 实例初始化
+# 🛠️ FastAPI Application Setup
 # ============================================================
 app = FastAPI(
-    title="SABR Research API",
-    description="Decoupled Agentic Backend for AiiDA & Science Agents",
-    version="1.0.0",
+    title="SABR v2 Central Hub",
+    description="Multi-Agent Scientific Research Bus powered by PydanticAI",
     lifespan=lifespan
 )
 
-# 允许跨域（如果前端 app_web.py 在不同机器或端口上运行）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -65,81 +71,76 @@ app.add_middleware(
 )
 
 # ============================================================
-# 🚩 动态挂载引擎特有路由 (Router Mounting)
+# 🚩 Engine-Specific Route Mounting
 # ============================================================
-def mount_engine_api():
+def mount_specific_routes():
     """
-    自动发现并挂载 engines/{engine_name}/api.py 中的路由。
-    例如：/v1/aiida/processes, /v1/aiida/nodes/{pk}
+    Mounts additional API endpoints defined inside engine folders.
+    Example: engines/aiida/api.py -> /v1/aiida/...
     """
     engine_name = settings.ENGINE_TYPE
     try:
-        api_module = importlib.import_module(f"engines.{engine_name}.api")
-        if hasattr(api_module, "router"):
-            app.include_router(api_module.router, prefix="/v1")
-            print(f"🔗 [Router] Mounted specific API for '{engine_name}'")
+        api_mod = importlib.import_module(f"engines.{engine_name}.api")
+        if hasattr(api_mod, "router"):
+            app.include_router(api_mod.router, prefix="/v1")
+            print(f"🔗 [Router] Mounted specific routes for {engine_name}")
     except ImportError:
-        print(f"ℹ️ [Router] No extra API routes found for '{engine_name}'.")
-    except Exception as e:
-        print(f"⚠️ [Router] Failed to mount engine routes: {e}")
+        pass
 
-mount_engine_api()
+mount_specific_routes()
 
 # ============================================================
-# 🛣️ 通用公共端点 (Public Endpoints)
+# 🛣️ Core Agent Endpoint (The Cyclic Hub)
 # ============================================================
 
-@app.post("/v1/chat", response_model=AgentResponse)
+@app.post("/v1/chat", response_model=SABRResponse)
 async def chat_endpoint(req: AgentRequest):
     """
-    通用聊天接口。接收用户意图，返回 AI 回复和执行结果。
+    Main entry point for user interaction. 
+    Triggers the PydanticAI cyclic reasoning loop.
     """
-    engine = state.get("engine")
-    if not engine:
-        raise HTTPException(status_code=503, detail="SABR Engine is not initialized.")
+    agent = state.get("agent")
+    DepsClass = state.get("deps_class")
     
-    # 构造带上下文的意图
-    intent = req.intent
-    if req.context_archive and req.context_archive != "(None)":
-        # 如果是 AiiDA 引擎，自动注入档案背景
-        intent = f"Context: Inspect archive '{req.context_archive}'. Task: {intent}"
+    if not agent or not DepsClass:
+        raise HTTPException(status_code=503, detail="Agent system not fully initialized.")
+
+    # 1. Instantiate the 'Blood' (Deps) for this specific request cycle
+    # This carries the archive path and shared state into the loop.
+    current_deps = DepsClass(
+        archive_path=req.context_archive,
+        memory=state["memory"]
+    )
 
     try:
-        # 执行 Agent 决策循环 (Run-Once 模式)
-        response_data = await engine.run_once(intent=intent)
+        # 2. Execute the Cyclic Graph: Think -> Tool -> Observe -> Repeat
+        # PydanticAI handles the internal iteration until SABRResponse is satisfied.
+        result = await agent.run(req.intent, deps=current_deps)
         
-        # 将 EngineResponse 映射为符合 API Schema 的字典
-        return AgentResponse(
-            content=response_data.get("content", ""),
-            action_name=response_data.get("action_name", "unknown"),
-            result=response_data.get("result"),
-            suggestions=response_data.get("suggestions", [])
-        )
+        # 3. Extract the validated Pydantic model
+        # The 'result.data' is guaranteed to follow the SABRResponse schema.
+        response_data = result.data
+        
+        # Enrich the response with the step history captured in Deps
+        if hasattr(current_deps, "step_history"):
+            response_data.thought_process = current_deps.step_history
+            
+        return response_data
+
     except Exception as e:
-        print(f"🔥 [Chat Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/v1/models")
-async def list_models():
-    """获取当前 Brain 支持的所有可用模型名称列表"""
-    engine = state.get("engine")
-    if engine and hasattr(engine._brain, 'get_available_models'):
-        return {"models": engine._brain.get_available_models()}
-    return {"models": ["gemini-2.0-flash", "gemini-1.5-pro"]}
-
-@app.get("/health")
-async def health_check():
-    """服务健康状况检查"""
-    return {
-        "status": "healthy", 
-        "engine": settings.ENGINE_TYPE,
-        "initialized": "engine" in state
-    }
+        print(f"🔥 [Agent Loop Error] {str(e)}")
+        # In case of cyclic failure, we return a structured error response
+        return SABRResponse(
+            answer=f"I encountered a technical issue during analysis: {str(e)}",
+            thought_process=["Error occurred during reasoning cycle."],
+            is_successful=False,
+            suggestions=["Retry query", "Check AiiDA status"]
+        )
 
 # ============================================================
-# 🏁 启动服务
+# 🏁 Execution Entry
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
-    # 使用 8000 端口，生产环境建议 host 设为 0.0.0.0
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Listening on port 8000
+    uvicorn.run(app, host="0.0.0.0", port=8000)

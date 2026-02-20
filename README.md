@@ -1,44 +1,21 @@
-# SABR Framework
-> **Sense | Act | Brain | Reflect**
+# SABR v2: Standard Agent Bus for Research
 
-SABR is a modular Python framework designed for building autonomous AI agents through a strictly decoupled architecture. It separates environment perception, decision-making, and tool execution into distinct, protocol-driven components.
+SABR v2 is a next-generation AI agent framework designed for autonomous scientific discovery, specifically optimized for the **AiiDA** (Advanced Interactive Infrastructure for Data-Agnostic) ecosystem. 
 
----
+Built on top of **PydanticAI**, SABR v2 transitions from linear execution to a **Cyclic Reasoning Graph**, enabling agents to self-diagnose failures and autocorrect simulation parameters in real-time.
 
-## 💡 Core Concept
-The framework orchestrates a control loop that abstracts the interaction between a Large Language Model (LLM) and complex external systems through four primary pillars:
+## 🚀 Key Features
 
-* **Perceptor**: Observes the environment and normalizes data into a structured `Observation`.
-* **Brain**: A reasoning layer (e.g., Gemini, GPT) that processes observations to decide on an `Action`.
-* **Executor**: Routes actions to specific tools or executes dynamically generated code.
-* **Reporter**: Provides observability by logging the internal state and decision chain to multiple sinks (Console, Web UI, etc.).
+- **Cyclic Reasoning**: Powered by PydanticAI, the agent can loop through "Think-Tool-Observe" cycles to self-correct and retry failed tasks.
+- **Strict Type Safety**: Every response is validated against Pydantic models, ensuring the UI always receives structured, reliable data.
+- **Engine Decoupling**: The core bus (`sab_core`) is isolated from specific research engines (e.g., `aiida`), allowing for easy extension to other scientific tools like VASP or QE.
+- **Oxford-Style UI**: A sophisticated, dark-themed dashboard built with **NiceGUI**, featuring a real-time thinking terminal and structured insights.
 
----
+## 🏗️ Architecture
 
-## 📂 Project Structure
-The repository is organized into two main layers to ensure high extensibility:
-
-* `sab_core/`: The hardware-agnostic core engine and base protocols.
-* `engines/`: Domain-specific implementations (e.g., `engines/aiida` for scientific data management).
-
----
-
-## 🚀 Current Status
-SABR is currently in the **MVP (Minimum Viable Product)** phase.
-
-* **Core Engine**: Fully asynchronous, supporting non-blocking execution loops.
-* **Brain Integration**: Implementation for **Google Gemini 2.0** with native function calling support.
-* **AiiDA Engine**: A reference implementation for the AiiDA provenance database, featuring automated resource scanning and a Python code interpreter.
-* **Web Interface**: A **NiceGUI-based** dashboard for real-time monitoring and human-in-the-loop interaction.
-
----
-
-## 🛠 Installation & Usage
-
-### 1. Installation
-Clone the repository and install in editable mode:
-
-```bash
-git clone [https://github.com/your-username/sabr.git](https://github.com/your-username/sabr.git)
-cd sabr
-pip install -e .
+```text
+sabr/
+├── src/sab_core/        # Core Agent Bus (Generic logic & base classes)
+├── engines/aiida/       # AiiDA Engine (Specialized agents, tools, & API)
+├── app_api.py           # Backend Hub (FastAPI & Agent Orchestrator)
+└── app_web.py           # Frontend UI (NiceGUI Dashboard)

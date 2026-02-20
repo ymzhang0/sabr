@@ -1,6 +1,4 @@
-"""Pydantic models for data consistency across Perception, Brain, and Execution."""
+from .request import AgentRequest
+from .response import SABRResponse
 
-from sab_core.schema.observation import Observation
-from sab_core.schema.action import Action
-
-__all__ = ["Observation", "Action"]
+__all__ = ["AgentRequest", "SABRResponse"]
