@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     """
     # --- AI & Engine ---
     ENGINE_TYPE: str = "aiida" 
+    DEPS_CLASS: str = "AiiDADeps" 
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "your-key-here")
     
     # --- AiiDA Specifics (From your .env) ---

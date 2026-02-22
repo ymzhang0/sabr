@@ -1,6 +1,6 @@
 import os
 from nicegui import app, ui
-from engines.aiida.web.themes import THEMES
+from engines.aiida.ui.themes import THEMES
 
 def create_aiida_layout(theme_name='gemini_dark', available_models=["gemini-2.0-flash", "gemini-1.5-pro"]):
     """

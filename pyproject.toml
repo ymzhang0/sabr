@@ -17,6 +17,10 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic-settings>=2.13.1",
     "pydantic-ai>=1.62.0",
+    "fastui>=0.9.0",
+    "ipykernel>=7.2.0",
+    "aiida-core==2.6.4",
+    "sse-starlette>=3.2.0",
 ]
 
 [project.optional-dependencies]

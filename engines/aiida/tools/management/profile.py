@@ -11,9 +11,8 @@ from aiida.orm import Group, Node, QueryBuilder, ProcessNode, Node
 from aiida.manage.configuration import get_config
 from aiida.manage.manager import get_manager
 from aiida.storage.sqlite_zip.backend import SqliteZipBackend
+from aiida.manage import Profile
 
-# 🚩 增加一个内存缓存，记录当前加载的 Archive 路径
-_CURRENT_MOUNTED_ARCHIVE = None
 
 # --- 1. 资源列表工具 (Perceptor 强依赖) ---
 
@@ -45,16 +44,18 @@ def ensure_environment(target: str):
     except Exception as e:
         print(f"❌ DEBUG: Failed to switch AiiDA environment: {e}")
 
+def get_default_profile() -> Profile:
+    config = get_config()
+    return config.get_profile(config.default_profile_name)
+    # return load_profile(config.default_profile_name, allow_switch=True)
+    
 def list_system_profiles():
     """
     获取系统中所有 AiiDA Profile 的名称列表。
     (修复了感知器找不到该函数的问题)
     """
-    try:
-        return [p.name for p in get_config().profiles]
-    except Exception as e:
-        logger.warning(f"AiiDA config not found or invalid: {e}")
-        return []
+    config = get_config()
+    return config.profiles
 
 def list_local_archives():
     """
@@ -65,17 +66,13 @@ def list_local_archives():
 
 # --- 2. 环境切换工具 ---
 
-def switch_profile(profile_name: str) -> str:
+def switch_profile(profile: Profile) -> str:
     """
     切换当前的 AiiDA Profile。
     """
-    available = list_system_profiles()
-    if profile_name not in available:
-        return f"Error: Profile '{profile_name}' not found. Available: {available}"
-        
     try:
-        load_profile(profile_name, allow_switch=True)
-        return f"Successfully switched to profile '{profile_name}'."
+        load_profile(profile, allow_switch=True)
+        return f"Successfully switched to profile '{profile.name}'."
     except Exception as e:
         return f"Error switching profile: {e}"
 
@@ -86,12 +83,12 @@ def load_archive_profile(filepath: str):
     try:
         from aiida.storage.sqlite_zip.backend import SqliteZipBackend
         archive_profile = SqliteZipBackend.create_profile(filepath = filepath)
-        load_profile(archive_profile, allow_switch=True)
+        profile = load_profile(archive_profile, allow_switch=True)
         # 这里的实现取决于你的具体环境配置，通常建议直接通过 get_archive_info 探测
         # 如果需要完整加载，通常使用临时存储后端
-        return f"Archive profile loading for '{filepath}' is ready for implementation."
+        return profile
     except Exception as e:
-        return f"Error loading archive: {e}"
+        raise Warning(f"Error loading archive: {e}")
 
 # --- 3. 深度感知工具 (Unified Map) ---
 def get_unified_source_map(target: str):

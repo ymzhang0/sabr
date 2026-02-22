@@ -1,85 +1,160 @@
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, RunContext, ModelRetry
 from src.sab_core.schema.response import SABRResponse
 from engines.aiida.deps import AiiDADeps
 
-# 1. Import your granular atomic tools from their specific categories
-from engines.aiida.tools.base.node import load_node_summary
-from engines.aiida.tools.process.process import get_process_state
-from engines.aiida.tools.submission.submission import submit_standard_workchain
-from engines.aiida.tools.cyclic.error_handler import diagnose_and_suggest_fix
+# 1. 严格按照 tools/__init__.py 中的 __all__ 列表导入所有函数
+from engines.aiida.tools import (
+    list_system_profiles,
+    list_local_archives,
+    switch_profile,
+    get_statistics,
+    list_groups,
+    get_unified_source_map,
+    get_database_summary,
+    get_recent_processes,
+    inspect_group,
+    inspect_process,
+    fetch_recent_processes,
+    inspect_workchain_spec,
+    draft_workchain_builder,
+    submit_workchain_builder,
+    run_python_code,
+    get_bands_plot_data,
+    list_remote_files,
+    get_remote_file_content,
+    get_node_file_content
+)
+# 导入 node 摘要工具（用于深入查看节点细节）
+from engines.aiida.tools.base.node import get_node_summary
 
-# 2. Initialize the AiiDA-specialized Agent
-# This agent stays inside the engines/ folder to keep sab_core clean.
-
+    
+# 2. 设定增强版 System Prompt
 SYSTEM_PROMPT = """
 You are a proactive AiiDA Research Intelligence (SABR v2). 
 Your mission is to provide high-level scientific insights and automate complex data exploration.
 
-### SCIENTIFIC PHILOSOPHY
-- ANALYZE & DISCOVER: Do not just output raw data. Look for patterns, anomalies, or physical trends in AiiDA nodes.
-- PROACTIVE RETRY (CYCLIC LOGIC): If a tool execution fails or returns an error (e.g., convergence failure, missing pseudopotentials), do NOT simply report the error. Analyze the output, use your diagnostic tools, and attempt to fix the parameters to retry the task immediately.
-- PROVENANCE AWARENESS: You understand the AiiDA directed acyclic graph (DAG). You can trace back from a Result to its Input structures.
-
 ### OPERATIONAL RULES
-- ENVIRONMENT SYNC: You are running within a specific AiiDA profile/archive defined in your Context. Trust the data provided by your tools.
-- TOOL FIRST: Use specific tools (list_groups, inspect_node, etc.) whenever possible.
-- CODE POWER: If standard tools are insufficient for complex data mining, use the 'run_aiida_code' tool to write custom QueryBuilder scripts.
+- ENVIRONMENT SYNC: You are inside the archive/profile defined in Context. Trust the tools.
+- CYCLIC RETRY: If a calculation fails, use 'inspect_process' to read logs, diagnose, and retry with new parameters.
+- SUGGESTIONS: Always provide 2-3 "Smart Chips" (suggestions) under 5 words in your response.
 
-### SUGGESTION STRATEGY
-- Always provide 2-3 "Smart Chips" (suggestions) in your response.
-- Suggestions must be actionable next steps (e.g., "Analyze Band Structure", "Check Parent Calculation").
-- Keep each suggestion under 5 words.
-
-### SMART CHIP (SUGGESTION) STRATEGY:
-1. AFTER DATA QUERY: Suggest inspecting a specific node or plotting data. 
-   (e.g., "Inspect PK 101", "Plot Band Structure")
-2. AFTER SUCCESSFUL SUBMISSION: Suggest monitoring the process or checking inputs.
-   (e.g., "Monitor Workflow", "Verify K-Points")
-3. AFTER FAILURE: Suggest a diagnostic action.
-   (e.g., "Check Error Logs", "Refine Pseudo Potentials")
-4. NO REPETITION: Do not suggest the task you just completed.
-
+### TOOLBOX USAGE
+- DB Analysis: Use 'get_database_statistics' and 'list_groups' to navigate.
+- Deep Dive: Use 'inspect_group' to see attributes of many nodes, or 'inspect_node' for one.
+- Submission: Always 'inspect_workchain_spec' before drafting a builder to ensure inputs are correct.
+- Custom Logic: If standard tools fail, write custom QueryBuilder code using 'run_aiida_code'.
 """
 
 aiida_researcher = Agent(
     'google-gla:gemini-1.5-flash',
     deps_type=AiiDADeps,
-    result_type=SABRResponse,
-    system_prompt=SYSTEM_PROMPT
+    output_type=SABRResponse,
+    system_prompt=SYSTEM_PROMPT,
+    retries=3
 )
 
-# 3. Register Atomic Tools via Wrappers
-# We wrap them to inject RunContext[AiiDADeps], ensuring environment awareness.
+ 
+# --- 3. 注册所有工具 (与 tools/__init__.py 一一对应) ---
+
+# --- Profile & System Management ---
+@aiida_researcher.tool
+async def list_profiles(ctx: RunContext[AiiDADeps]):
+    """List all available AiiDA profiles on this system."""
+    return list_system_profiles()
 
 @aiida_researcher.tool
-async def inspect_node(ctx: RunContext[AiiDADeps], pk: int) -> str:
-    """
-    Examine the details of a specific AiiDA node (Data or Calculation).
-    """
-    # Passing context to original logic if needed
-    return await load_node_summary(pk)
+async def list_archives(ctx: RunContext[AiiDADeps]):
+    """List .aiida or .zip archive files in the current directory."""
+    return list_local_archives()
 
 @aiida_researcher.tool
-async def monitor_process(ctx: RunContext[AiiDADeps], pk: int) -> str:
-    """
-    Check the current status and exit code of an active process.
-    """
-    return await get_process_state(pk)
+async def switch_aiida_profile(ctx: RunContext[AiiDADeps], profile_name: str):
+    """Switch the current active AiiDA profile."""
+    ctx.deps.log_step(f"Switching to profile: {profile_name}")
+    return switch_profile(profile_name)
 
 @aiida_researcher.tool
-async def submit_job(ctx: RunContext[AiiDADeps], structure_pk: int, workflow_type: str) -> str:
-    """
-    Submit a new simulation workchain to the AiiDA engine.
-    """
-    ctx.deps.log_step(f"Attempting to submit {workflow_type} for node {structure_pk}")
-    return await submit_standard_workchain(structure_pk, workflow_type)
+async def get_db_statistics(ctx: RunContext[AiiDADeps]):
+    """Get high-level counts of nodes and processes in the current database."""
+    return get_statistics()
 
 @aiida_researcher.tool
-async def handle_execution_failure(ctx: RunContext[AiiDADeps], exit_status: int, log_snippet: str) -> str:
-    """
-    🚩 CYCLIC TOOL: Call this when a process FAILED to get a fix strategy.
-    The agent will use the returned advice to adjust parameters and retry.
-    """
-    ctx.deps.log_step(f"Diagnosing failure for exit_status {exit_status}")
-    fix_suggestion = await diagnose_and_suggest_fix(exit_status, log_snippet)
-    return f"Diagnosis complete. Suggestion: {fix_suggestion}. You should now try to re-submit."
+async def get_db_summary(ctx: RunContext[AiiDADeps]):
+    """Get a quick summary of database health (node count, failed processes)."""
+    return get_database_summary()
+
+@aiida_researcher.tool
+async def get_source_map(ctx: RunContext[AiiDADeps], target: str):
+    """Get a unified map of groups for a specific profile or archive."""
+    return get_unified_source_map(target)
+
+# --- Groups & Nodes ---
+@aiida_researcher.tool
+async def list_aiida_groups(ctx: RunContext[AiiDADeps], search_string: str = None):
+    """List all groups, optionally filtered by name."""
+    return list_groups(search_string)
+
+@aiida_researcher.tool
+async def inspect_aiida_group(ctx: RunContext[AiiDADeps], group_name: str, limit: int = 20):
+    """Deeply analyze all nodes in a group (attributes & extras)."""
+    ctx.deps.log_step(f"Analyzing group: {group_name}")
+    return inspect_group(group_name, limit)
+
+@aiida_researcher.tool
+async def inspect_node_details(ctx: RunContext[AiiDADeps], pk: int):
+    """Get a structured summary of a specific node's type, state, and attributes."""
+    return get_node_summary(pk)
+
+# --- Process & Submission ---
+@aiida_researcher.tool
+async def inspect_process_details(ctx: RunContext[AiiDADeps], identifier: str):
+    """Analyze a process (calculation or workchain), including logs and exit status."""
+    ctx.deps.log_step(f"Inspecting process logs: {identifier}")
+    return inspect_process(identifier)
+
+@aiida_researcher.tool
+async def get_recent_aiida_processes(ctx: RunContext[AiiDADeps], limit: int = 15):
+    """Fetch the most recent processes for status overview."""
+    return fetch_recent_processes(limit)
+
+@aiida_researcher.tool
+async def check_workflow_spec(ctx: RunContext[AiiDADeps], entry_point: str):
+    """Inspect the required inputs and protocols for a WorkChain."""
+    return inspect_workchain_spec(entry_point)
+
+@aiida_researcher.tool
+async def submit_new_workflow(ctx: RunContext[AiiDADeps], workchain: str, structure_pk: int, code: str, protocol: str = 'moderate'):
+    """Draft and submit a new workchain using specified protocols."""
+    ctx.deps.log_step(f"Submitting workflow: {workchain}")
+    draft = draft_workchain_builder(workchain, structure_pk, code, protocol)
+    if isinstance(draft, dict) and draft.get("status") == "DRAFT_READY":
+        return submit_workchain_builder(draft)
+    return f"Failed to submit: {draft}"
+
+# --- Data & Visualization ---
+@aiida_researcher.tool
+async def get_bands_data(ctx: RunContext[AiiDADeps], pk: int):
+    """Retrieve plot-ready data for Band Structure nodes."""
+    return get_bands_plot_data(pk)
+
+@aiida_researcher.tool
+async def list_remote_path_files(ctx: RunContext[AiiDADeps], remote_path_pk: int):
+    """List files in a RemoteData directory on the cluster."""
+    return list_remote_files(remote_path_pk)
+
+@aiida_researcher.tool
+async def get_remote_file(ctx: RunContext[AiiDADeps], remote_path_pk: int, filename: str):
+    """Read the content of a file from a remote directory."""
+    return get_remote_file_content(remote_path_pk, filename)
+
+@aiida_researcher.tool
+async def get_node_file(ctx: RunContext[AiiDADeps], pk: int, filename: str):
+    """Read the content of a file stored in a node's repository."""
+    return get_node_file_content(pk, filename)
+
+# --- Advanced Logic ---
+@aiida_researcher.tool
+async def run_aiida_code_script(ctx: RunContext[AiiDADeps], script: str):
+    """Execute custom Python/AiiDA code for complex data mining."""
+    ctx.deps.log_step("Running custom research script")
+    return run_python_code(script)

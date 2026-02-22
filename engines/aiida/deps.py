@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 from src.sab_core.deps.base import BaseSABRDeps
 from src.sab_core.config import settings
+
 @dataclass
 class AiiDADeps(BaseSABRDeps):
     """
