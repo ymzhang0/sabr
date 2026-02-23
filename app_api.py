@@ -86,8 +86,8 @@ async def lifespan(app: FastAPI):
         logger.info(f"✅ [Agent] '{engine_name}' expert agent is online.")
 
         # 4. Dynamically mount the engine-specific frontend entry point.
-        @app.get(f"/{engine_name}/{{path:path}}", response_class=HTMLResponse)
-        async def engine_frontend(_path: str):
+        @app.get(f"/{engine_name}/{{_path:path}}", response_class=HTMLResponse)
+        async def engine_frontend(_path: str = ""):
             return prebuilt_html(
                 api_root_url='/api',  # Keep the shared /api root path.
                 title=f"SABR | {engine_name.upper()}"
@@ -156,8 +156,8 @@ mount_engine(app, "aiida")
 # ============================================================
 
 # External-only route for hosting the FastUI shell.
-@app.get('/ui/{path:path}')
-async def fastui_frontend(_path: str) -> HTMLResponse:
+@app.get('/ui/{_path:path}')
+async def fastui_frontend(_path: str = "") -> HTMLResponse:
     return HTMLResponse(prebuilt_html(
         api_root_url='/api',
         title='SABR v2'

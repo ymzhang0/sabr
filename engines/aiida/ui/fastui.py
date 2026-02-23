@@ -52,7 +52,8 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
     1) configured system profiles
     2) imported local archives
     """
-
+    profiles_display = profiles_display or []
+    processes = processes or []
     sidebar_content = []
     sidebar_content.append(
         c.Div(class_name="mb-5 mt-4 px-2", components=[
@@ -119,8 +120,10 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
                 class_name="text-dark fw-bold opacity-75 small uppercase mb-3", 
                 components=[c.Text(text="Recent Tasks")]
             ),
-            c.Sse(
-                source='/api/aiida/processes/stream',
+            c.ServerLoad(
+                path='/api/aiida/processes/stream',
+                sse=True,
+                sse_retry=3000,
                 components=get_process_panel(processes)
             )
         ])

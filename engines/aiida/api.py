@@ -8,7 +8,6 @@ from sab_core.schema.request import AgentRequest
 from .ui import fastui as ui
 from loguru import logger
 
-from fastapi.concurrency import run_in_threadpool
 import tkinter as tk
 from tkinter import filedialog
 from .hub import hub
@@ -44,12 +43,26 @@ def ask_for_folder_path():
 
 router = APIRouter()
 
+
+def _get_sidebar_state() -> tuple[list, list]:
+    """Load sidebar context for all dashboard-like pages."""
+    if not hub.current_profile:
+        hub.start()
+    try:
+        recent_procs = get_recent_processes(limit=5)
+    except Exception as e:
+        logger.error(f"Failed to fetch processes: {e}")
+        recent_procs = []
+    return hub.get_display_list(), recent_procs
+
 @router.get("/processes/stream")
 async def stream_processes(request: Request):
     """
     SSE endpoint that pushes latest process status every 3 seconds.
     """
     async def event_generator():
+        if not hub.current_profile:
+            hub.start()
         while True:
             # Stop the stream when the client disconnects.
             if await request.is_disconnected():
@@ -65,10 +78,20 @@ async def stream_processes(request: Request):
                 
                 # 3. Wrap payload in FastUI JSON.
                 yield {
-                    "data": FastUI(root=[body]).model_dump_json()
+                    "data": FastUI(root=body).model_dump_json()
                 }
             except Exception as e:
                 logger.error(f"Streaming error: {e}")
+                yield {
+                    "data": FastUI(
+                        root=[
+                            c.Div(
+                                class_name="text-muted small px-2 py-3",
+                                components=[c.Text(text="Recent processes unavailable.")]
+                            )
+                        ]
+                    ).model_dump_json()
+                }
 
             # 4. Throttle update frequency.
             await asyncio.sleep(3)
@@ -78,15 +101,7 @@ async def stream_processes(request: Request):
 # 1. Dashboard page (http://localhost:8000/ui/)
 @router.get("/", response_model=FastUI, response_model_exclude_none=True)
 async def aiida_ui_root() -> FastUI:
-
-    hub.start()
-    # 2. Fetch recent tasks via the tool layer.
-    try:
-        # Database query logic is encapsulated inside tools.
-        recent_procs = get_recent_processes(limit=5)
-    except Exception as e:
-        logger.error(f"Failed to fetch processes: {e}")
-        recent_procs = []
+    profiles_display, recent_procs = _get_sidebar_state()
 
     # 3. Build the default main-content view.
     chat_content = ui.get_chat_interface()
@@ -94,7 +109,7 @@ async def aiida_ui_root() -> FastUI:
     # 4. Render full dashboard layout.
     return ui.get_aiida_dashboard_layout(
         content=chat_content,
-        profiles_display=hub.get_display_list(),
+        profiles_display=profiles_display,
         processes=recent_procs  # Inject process data.
     )
  
@@ -104,7 +119,9 @@ async def aiida_ui_root() -> FastUI:
 async def trigger_native_browse():
     
     # 1. Open native file browser.
-    selected_file = await run_in_threadpool(ask_for_folder_path)
+    # macOS requires NSWindow/Tk to run on the main thread.
+    # Running this in a threadpool crashes with NSInternalInconsistencyException.
+    selected_file = ask_for_folder_path()
     
     if selected_file:
         # Key path: register the archive dynamically.
@@ -122,14 +139,19 @@ async def handle_switch(name: str):
 
 # 2. Chat input page (http://localhost:8000/aiida/chat)
 # Triggered by "Start New Analysis" or direct navigation.
-@router.get("/aiida/chat", response_model=FastUI, response_model_exclude_none=True)
+@router.get("/chat", response_model=FastUI, response_model_exclude_none=True)
 async def aiida_chat_input_page() -> FastUI:
     # Return the ModelForm defined in fastui.py.
-    return get_aiida_dashboard_layout(get_chat_interface())
+    profiles_display, recent_procs = _get_sidebar_state()
+    return get_aiida_dashboard_layout(
+        content=get_chat_interface(),
+        profiles_display=profiles_display,
+        processes=recent_procs,
+    )
 
 # 3. Agent execution endpoint and response rendering.
 # FastUI automatically posts here on ModelForm submission.
-@router.post("/aiida/chat", response_model=FastUI, response_model_exclude_none=True)
+@router.post("/chat", response_model=FastUI, response_model_exclude_none=True)
 async def aiida_chat_handler(request: Request, form: AgentRequest):
     """
     Core handler: run PydanticAI on form input and return rendered UI.
@@ -156,12 +178,22 @@ async def aiida_chat_handler(request: Request, form: AgentRequest):
         if hasattr(current_deps, "step_history"):
             result.data.thought_process = current_deps.step_history
             
+        profiles_display, recent_procs = _get_sidebar_state()
         # Return the pre-rendered result layout.
-        return get_aiida_dashboard_layout(render_sabr_response(result.data))
+        return get_aiida_dashboard_layout(
+            content=render_sabr_response(result.data),
+            profiles_display=profiles_display,
+            processes=recent_procs,
+        )
 
     except Exception as e:
-        return get_aiida_dashboard_layout([
-            c.Heading(text="Analysis Error", level=2),
-            c.Markdown(text=f"Something went wrong: `{str(e)}`"),
-            c.Button(text="Back to Chat", on_click=c.GoToEvent(url='/aiida/chat'))
-        ])
+        profiles_display, recent_procs = _get_sidebar_state()
+        return get_aiida_dashboard_layout(
+            content=[
+                c.Heading(text="Analysis Error", level=2),
+                c.Markdown(text=f"Something went wrong: `{str(e)}`"),
+                c.Button(text="Back to Chat", on_click=c.GoToEvent(url='/aiida/chat'))
+            ],
+            profiles_display=profiles_display,
+            processes=recent_procs,
+        )

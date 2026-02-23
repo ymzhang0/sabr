@@ -26,7 +26,15 @@ class AiiDAHub:
     def start(self):
         logger.info(f"🚀 [AiiDA Hub] Initializing backend environment: {self.current_profile}")
         try:
-            self._CURRENT_PROFILE = get_default_profile().name
+            default_profile = get_default_profile()
+            load_profile(default_profile, allow_switch=True)
+            self._CURRENT_PROFILE = default_profile.name
+
+            # Preserve user-imported archives across re-initialization.
+            imported_profiles = {
+                name: item for name, item in self._ALL_PROFILES.items() if item.type == "imported"
+            }
+            self._ALL_PROFILES = imported_profiles
             for p in list_system_profiles():
                 self._ALL_PROFILES[p.name] = ProfileItem(
                     type="configured",
