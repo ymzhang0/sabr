@@ -5,6 +5,7 @@ from loguru import logger
 from .tools import get_default_profile, list_system_profiles, load_archive_profile
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict
+from src.sab_core.logging_utils import log_event
 
 # UI display model used by FastUI.
 class ProfileItem(BaseModel):
@@ -24,7 +25,7 @@ class AiiDAHub:
         self._CURRENT_PROFILE = None
 
     def start(self):
-        logger.info(f"🚀 [AiiDA Hub] Initializing backend environment: {self.current_profile}")
+        logger.info(log_event("aiida.hub.start.begin", current_profile=self.current_profile))
         try:
             default_profile = get_default_profile()
             load_profile(default_profile, allow_switch=True)
@@ -42,9 +43,9 @@ class AiiDAHub:
                     object=p,
                 )
                 
-            logger.success(f"✅ [AiiDA Hub] Hub started with {len(self._ALL_PROFILES)} system profiles.")
+            logger.success(log_event("aiida.hub.start.done", profiles=len(self._ALL_PROFILES)))
         except Exception as e:
-            logger.error(f"❌ [AiiDA Hub] Failed to initialize: {e}")
+            logger.exception(log_event("aiida.hub.start.failed", error=str(e)))
 
     @property
     def current_profile(self):
@@ -52,21 +53,29 @@ class AiiDAHub:
 
     def switch_profile(self, name: str):
         if not name in self._ALL_PROFILES:
-            logger.warning(f"⚠️ [AiiDA Hub] {name} not found in registered profiles")
+            logger.warning(log_event("aiida.profile.switch.missing", profile=name))
             return
         # Fast path: avoid reloading when the target profile is already active.
         if name == self.current_profile:
-            logger.info(f"✨ [AiiDA Hub] Profile '{name}' is already active, skipping load.")
+            logger.info(log_event("aiida.profile.switch.skip", profile=name))
             self._CURRENT_PROFILE = name  # Keep internal UI state consistent.
             return
         profileitem = self._ALL_PROFILES[name]
-        logger.warning(f"🔄 [AiiDA Hub] Switching context: {self.current_profile} -> {name}")
+        logger.info(
+            log_event(
+                "aiida.profile.switch.begin",
+                old_profile=self.current_profile,
+                new_profile=name,
+                profile_type=profileitem.type,
+            )
+        )
         if profileitem.type == 'configured':
             load_profile(self._ALL_PROFILES[name].object, allow_switch=True)
         elif profileitem.type == 'imported':
             load_archive_profile(filepath = str(profileitem.path))
 
         self._CURRENT_PROFILE = name
+        logger.success(log_event("aiida.profile.switch.done", profile=name))
 
     def import_archive(self, path: Path):
         """
@@ -84,7 +93,13 @@ class AiiDAHub:
 
         # Record renaming when a collision occurs.
         if unique_name != base_name:
-            logger.warning(f"⚠️ [AiiDA Hub] Collision detected: Renaming profile '{base_name}' -> '{unique_name}' for UI display.")
+            logger.warning(
+                log_event(
+                    "aiida.profile.import.rename",
+                    original=base_name,
+                    renamed=unique_name,
+                )
+            )
 
         # Register in the profile pool.
         self._ALL_PROFILES[unique_name] = ProfileItem(
@@ -93,7 +108,7 @@ class AiiDAHub:
             object=None,
         )
 
-        logger.success(f"✅ [AiiDA Hub] {unique_name} registered.")
+        logger.success(log_event("aiida.profile.import.done", profile=unique_name, path=str(path)))
         
         return unique_name  # Return the final profile key for follow-up actions.
 

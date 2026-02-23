@@ -5,7 +5,7 @@ from fastui.components import forms as f
 from fastui import events as e
 from fastui import FastUI
 
-SIDEBAR_SHELL = "col-md-3 vh-100 p-3 p-lg-4 d-flex flex-column border-end border-dark border-opacity-10 bg-white"
+SIDEBAR_SHELL = "col-md-3 vh-100 p-3 p-lg-4 d-flex flex-column overflow-auto border-end border-dark border-opacity-10 bg-white"
 MAIN_SHELL = "col-md-9 vh-100 p-0 bg-white"
 PANEL_BORDER = "border border-dark border-opacity-10 rounded-4 bg-white"
 AIIDA_ICON_URL = "https://aiida.readthedocs.io/projects/aiida-core/en/stable/_images/aiida-icon.svg"
@@ -50,7 +50,40 @@ def get_process_panel(processes: list) -> list:
         )
     return items
 
-def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> list[AnyComponent]:
+
+def get_log_panel(lines: list[str]) -> list[AnyComponent]:
+    """Render sidebar log console with latest backend lines."""
+    if not lines:
+        return [
+            c.Div(
+                class_name="sabr-log-terminal mb-0 font-monospace bg-dark text-light rounded-3 p-2",
+                components=[
+                    c.Div(
+                        class_name="text-muted sabr-log-line",
+                        components=[c.Text(text="No logs yet.")],
+                    )
+                ],
+            )
+        ]
+    safe_lines = [str(line) for line in lines[-36:]]
+    line_components: list[AnyComponent] = [
+        c.Div(class_name="sabr-log-line", components=[c.Text(text=line)]) for line in safe_lines
+    ]
+    return [
+        c.Div(
+            class_name=(
+                "sabr-log-terminal mb-0 font-monospace bg-dark text-light rounded-3 p-2 "
+                "d-flex flex-column gap-1"
+            ),
+            components=line_components,
+        )
+    ]
+
+def get_aiida_sidebar(
+    profiles_display: list = None,
+    processes: list = None,
+    log_lines: list[str] | None = None,
+) -> list[AnyComponent]:
     """
     Refactored sidebar with two entry paths:
     1) configured system profiles
@@ -58,6 +91,7 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
     """
     profiles_display = profiles_display or []
     processes = processes or []
+    log_lines = log_lines or []
     sidebar_content = []
     sidebar_content.append(
         c.Div(class_name=f"mb-4 mt-2 px-3 py-3 {PANEL_BORDER}", components=[
@@ -132,12 +166,30 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
             )
         ])
     )
+    sidebar_content.append(
+        c.Div(
+            class_name=f"mt-3 px-2 py-3 {PANEL_BORDER}",
+            components=[
+                c.Div(
+                    class_name="text-dark fw-semibold opacity-75 small uppercase mb-2",
+                    components=[c.Text(text="Runtime Logs")],
+                ),
+                c.ServerLoad(
+                    path="/aiida/logs/stream",
+                    sse=True,
+                    sse_retry=1200,
+                    components=get_log_panel(log_lines),
+                ),
+            ],
+        )
+    )
     return sidebar_content
 
 def get_aiida_dashboard_layout(
     content: list[AnyComponent], 
     profiles_display: list = None, 
-    processes: list = None) -> list[AnyComponent]:
+    processes: list = None,
+    log_lines: list[str] | None = None) -> list[AnyComponent]:
     """
     Claude-inspired layout: ivory-gray background with white rounded cards.
     """
@@ -153,7 +205,11 @@ def get_aiida_dashboard_layout(
                         # Sidebar.
                         c.Div(
                             class_name=SIDEBAR_SHELL,
-                            components=get_aiida_sidebar(profiles_display=profiles_display, processes=processes)
+                            components=get_aiida_sidebar(
+                                profiles_display=profiles_display,
+                                processes=processes,
+                                log_lines=log_lines,
+                            )
                         ),
                         # Main content.
                         c.Div(

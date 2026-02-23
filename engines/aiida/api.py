@@ -8,6 +8,7 @@ from src.sab_core.config import settings
 from .ui import fastui as ui
 from loguru import logger
 from google import genai
+from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event
 
 import tkinter as tk
 from tkinter import filedialog
@@ -24,7 +25,7 @@ def ask_for_folder_path():
     """
     Open a native file-selection dialog on the server host machine.
     """
-    logger.info("🖥️ Opening native folder dialog on host OS...")
+    logger.info(log_event("aiida.archive_picker.open"))
     root = tk.Tk()
     root.withdraw()  # Hide the root window.
     root.attributes('-topmost', True)  # Keep the dialog on top.
@@ -38,10 +39,10 @@ def ask_for_folder_path():
     root.destroy()  # Close tkinter.
     
     if file_selected:
-        logger.success(f"📂 User selected: {file_selected}")
+        logger.success(log_event("aiida.archive_picker.selected", path=file_selected))
         return file_selected
     else:
-        logger.warning("🚫 User cancelled folder selection.")
+        logger.info(log_event("aiida.archive_picker.cancelled"))
         return None
 
 
@@ -61,7 +62,7 @@ def _get_sidebar_state() -> tuple[list, list]:
     try:
         recent_procs = get_recent_processes(limit=5)
     except Exception as e:
-        logger.error(f"Failed to fetch processes: {e}")
+        logger.error(log_event("aiida.processes.fetch.failed", error=str(e)))
         recent_procs = []
     return hub.get_display_list(), recent_procs
 
@@ -131,7 +132,7 @@ def _get_available_models(state) -> list[str]:
         if not models:
             models = DEFAULT_MODELS
     except Exception as e:
-        logger.warning(f"Failed to query GenAI models, using fallback list: {e}")
+        logger.warning(log_event("aiida.models.fetch.fallback", error=str(e)))
         models = DEFAULT_MODELS
 
     state.available_models = models
@@ -159,6 +160,7 @@ def _render_chat_page(state) -> FastUI:
     profiles_display, recent_procs = _get_sidebar_state()
     available_models = _get_available_models(state)
     selected_model = _get_selected_model(state, available_models)
+    _version, log_lines = get_log_buffer_snapshot(limit=240)
     return get_aiida_dashboard_layout(
         content=get_chat_interface(
             chat_history=_get_chat_history(state),
@@ -168,6 +170,7 @@ def _render_chat_page(state) -> FastUI:
         ),
         profiles_display=profiles_display,
         processes=recent_procs,
+        log_lines=log_lines,
     )
 
 
@@ -186,11 +189,16 @@ def _update_assistant_message(state, turn_id: int, text: str, status: str = "thi
             msg["text"] = text
             msg["status"] = status
             _touch_chat(state)
-            logger.info(
-                f"[ChatTurn {turn_id}] message_update | status={status} | chars={len(text)}"
+            logger.debug(
+                log_event(
+                    "aiida.chat_turn.message_update",
+                    turn_id=turn_id,
+                    status=status,
+                    chars=len(text),
+                )
             )
             return
-    logger.warning(f"[ChatTurn {turn_id}] message_update missed | status={status}")
+    logger.warning(log_event("aiida.chat_turn.message_update_missed", turn_id=turn_id, status=status))
 
 
 def _append_assistant_message(state, turn_id: int, text: str, status: str = "done") -> None:
@@ -205,7 +213,12 @@ def _append_assistant_message(state, turn_id: int, text: str, status: str = "don
     )
     _touch_chat(state)
     logger.info(
-        f"[ChatTurn {turn_id}] message_append | status={status} | chars={len(text)}"
+        log_event(
+            "aiida.chat_turn.message_append",
+            turn_id=turn_id,
+            status=status,
+            chars=len(text),
+        )
     )
 
 
@@ -244,10 +257,22 @@ def _start_chat_turn(
     })
     _touch_chat(state)
     logger.info(
-        f"[ChatTurn {turn_id}] queued | source={source} | model={selected_model} "
-        f"| intent={user_intent[:120]!r} | context={context_archive!r}"
+        log_event(
+            "aiida.chat_turn.queued",
+            turn_id=turn_id,
+            source=source,
+            model=selected_model,
+            intent=user_intent[:120],
+            context=context_archive,
+        )
     )
-    logger.info(f"[ChatTurn {turn_id}] queued_history | digest={_history_digest(chat_history)}")
+    logger.debug(
+        log_event(
+            "aiida.chat_turn.queued_history",
+            turn_id=turn_id,
+            digest=_history_digest(chat_history),
+        )
+    )
     asyncio.create_task(
         _execute_chat_turn(
             state=state,
@@ -277,8 +302,13 @@ async def _execute_chat_turn(
 
     async with lock:
         logger.info(
-            f"[ChatTurn {turn_id}] start | model={selected_model} "
-            f"| intent={user_intent[:120]!r} | context={context_archive!r}"
+            log_event(
+                "aiida.chat_turn.start",
+                turn_id=turn_id,
+                model=selected_model,
+                intent=user_intent[:120],
+                context=context_archive,
+            )
         )
 
         try:
@@ -329,9 +359,14 @@ async def _execute_chat_turn(
             state.chat_history = _get_chat_history(state)[-200:]
             _touch_chat(state)
             logger.info(
-                f"[ChatTurn {turn_id}] done | run_id={getattr(result, 'run_id', None)} "
-                f"| elapsed={elapsed:.2f}s | answer_chars={len(answer_text)} "
-                f"| steps={len(getattr(current_deps, 'step_history', []) or [])}"
+                log_event(
+                    "aiida.chat_turn.done",
+                    turn_id=turn_id,
+                    run_id=getattr(result, "run_id", None),
+                    elapsed=f"{elapsed:.2f}s",
+                    answer_chars=len(answer_text),
+                    steps=len(getattr(current_deps, "step_history", []) or []),
+                )
             )
 
             if hasattr(state, "memory") and state.memory:
@@ -342,13 +377,24 @@ async def _execute_chat_turn(
                         metadata={"context_archive": context_archive},
                     )
                 except Exception as mem_e:
-                    logger.warning(f"Failed to persist chat turn: {mem_e}")
+                    logger.warning(
+                        log_event(
+                            "aiida.chat_turn.persist_failed",
+                            turn_id=turn_id,
+                            error=str(mem_e),
+                        )
+                    )
 
         except Exception as err:
             elapsed = time.perf_counter() - t0
             logger.exception(
-                f"[ChatTurn {turn_id}] failed | elapsed={elapsed:.2f}s "
-                f"| model={selected_model} | err={err}"
+                log_event(
+                    "aiida.chat_turn.failed",
+                    turn_id=turn_id,
+                    elapsed=f"{elapsed:.2f}s",
+                    model=selected_model,
+                    error=str(err),
+                )
             )
             _append_assistant_message(
                 state, turn_id, f"处理请求时出现错误：{str(err)}", status="error"
@@ -455,14 +501,19 @@ async def _parse_chat_payload(request: Request) -> tuple[str, str | None, str | 
             form = await request.form()
             raw = dict(form)
     except Exception as e:
-        logger.warning(f"Failed to parse chat payload, fallback to empty body: {e}")
+        logger.warning(log_event("aiida.chat_payload.parse_failed", error=str(e)))
 
     intent = str(_first_value(raw.get("intent")) or "").strip()
     model_name = _first_value(raw.get("model_name"))
     context_archive = _first_value(raw.get("context_archive"))
-    logger.info(
-        f"[ChatPayload] keys={list(raw.keys())} | intent_len={len(intent)} "
-        f"| model={model_name!r} | context={context_archive!r}"
+    logger.debug(
+        log_event(
+            "aiida.chat_payload.parsed",
+            keys=",".join(sorted(str(k) for k in raw.keys())),
+            intent_len=len(intent),
+            model=model_name,
+            context=context_archive,
+        )
     )
     return intent, (str(model_name) if model_name else None), (str(context_archive) if context_archive else None)
 
@@ -473,13 +524,13 @@ async def stream_processes(request: Request):
     """
     async def event_generator():
         stream_id = id(request)
-        logger.info(f"[ProcStream {stream_id}] connected")
+        logger.info(log_event("aiida.process_stream.connected", stream_id=stream_id))
         if not hub.current_profile:
             hub.start()
         while True:
             # Stop the stream when the client disconnects.
             if await request.is_disconnected():
-                logger.info(f"[ProcStream {stream_id}] disconnected")
+                logger.info(log_event("aiida.process_stream.disconnected", stream_id=stream_id))
                 break
 
             # 1. Fetch latest process data.
@@ -495,7 +546,9 @@ async def stream_processes(request: Request):
                     "data": FastUI(root=body).model_dump_json()
                 }
             except Exception as e:
-                logger.error(f"[ProcStream {stream_id}] error: {e}")
+                logger.exception(
+                    log_event("aiida.process_stream.failed", stream_id=stream_id, error=str(e))
+                )
                 yield {
                     "data": FastUI(
                         root=[
@@ -524,10 +577,10 @@ async def stream_chat_messages(request: Request):
         stream_id = id(request)
         last_version = -1
         heartbeat_ts = time.monotonic()
-        logger.info(f"[ChatStream {stream_id}] connected")
+        logger.info(log_event("aiida.chat_stream.connected", stream_id=stream_id))
         while True:
             if await request.is_disconnected():
-                logger.info(f"[ChatStream {stream_id}] disconnected")
+                logger.info(log_event("aiida.chat_stream.disconnected", stream_id=stream_id))
                 break
             try:
                 history = _get_chat_history(state)
@@ -538,21 +591,64 @@ async def stream_chat_messages(request: Request):
                 if should_push:
                     body = ui.get_chat_messages_panel(history)
                     yield {"data": FastUI(root=body).model_dump_json()}
-                    logger.info(
-                        f"[ChatStream {stream_id}] push | version={version} | messages={len(history)} "
-                        f"| digest={_history_digest(history)} | {_history_layout_debug(history)} "
-                        f"| {_history_ui_group_debug(history)}"
+                    logger.debug(
+                        log_event(
+                            "aiida.chat_stream.push",
+                            stream_id=stream_id,
+                            version=version,
+                            messages=len(history),
+                            digest=_history_digest(history),
+                            layout=_history_layout_debug(history),
+                            ui_groups=_history_ui_group_debug(history),
+                        )
                     )
                     last_version = version
                     heartbeat_ts = now
             except Exception as err:
-                logger.exception(f"[ChatStream {stream_id}] error: {err}")
+                logger.exception(
+                    log_event("aiida.chat_stream.failed", stream_id=stream_id, error=str(err))
+                )
                 yield {
                     "data": FastUI(
                         root=[c.Div(class_name="text-muted small", components=[c.Text(text="Chat stream unavailable.")])]
                     ).model_dump_json()
                 }
             await asyncio.sleep(0.25)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/logs/stream")
+async def stream_logs(request: Request):
+    """SSE endpoint to stream recent backend logs into sidebar console."""
+
+    async def event_generator():
+        stream_id = id(request)
+        last_version = -1
+        heartbeat_ts = time.monotonic()
+        logger.info(log_event("aiida.log_stream.connected", stream_id=stream_id))
+        while True:
+            if await request.is_disconnected():
+                logger.info(log_event("aiida.log_stream.disconnected", stream_id=stream_id))
+                break
+            try:
+                version, lines = get_log_buffer_snapshot(limit=240)
+                now = time.monotonic()
+                should_push = (version != last_version) or ((now - heartbeat_ts) >= 2.0)
+                if should_push:
+                    yield {"data": FastUI(root=ui.get_log_panel(lines)).model_dump_json()}
+                    last_version = version
+                    heartbeat_ts = now
+            except Exception as err:
+                logger.exception(
+                    log_event("aiida.log_stream.failed", stream_id=stream_id, error=str(err))
+                )
+                yield {
+                    "data": FastUI(
+                        root=[c.Div(class_name="text-muted small", components=[c.Text(text="Log stream unavailable.")])]
+                    ).model_dump_json()
+                }
+            await asyncio.sleep(0.5)
 
     return EventSourceResponse(event_generator())
       
@@ -575,7 +671,7 @@ async def trigger_native_browse():
     if selected_file:
         # Key path: register the archive dynamically.
         hub.import_archive(Path(selected_file))
-        logger.info(f"Dynamically expanded profiles with: {selected_file}")
+        logger.info(log_event("aiida.archive.imported", path=selected_file))
     
     # 2. Force page refresh to reload the dashboard.
     return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/'))])
@@ -599,7 +695,7 @@ async def clear_chat_history(request: Request):
     state = request.app.state
     state.chat_history = []
     _touch_chat(state)
-    logger.info("[Chat] history cleared")
+    logger.info(log_event("aiida.chat_history.cleared"))
     return _render_chat_page(state)
 
 
@@ -610,12 +706,18 @@ async def quick_chat_prompt(request: Request, shortcut_id: int) -> FastUI:
     selected_model = _get_selected_model(state, available_models)
 
     if shortcut_id < 0 or shortcut_id >= len(QUICK_PROMPTS):
-        logger.warning(f"[QuickChat] invalid shortcut_id={shortcut_id}")
+        logger.warning(log_event("aiida.quick_chat.invalid_shortcut", shortcut_id=shortcut_id))
         return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
 
     label, prompt = QUICK_PROMPTS[shortcut_id]
     logger.info(
-        f"[QuickChat] id={shortcut_id} | label={label!r} | prompt={prompt!r} | model={selected_model}"
+        log_event(
+            "aiida.quick_chat.selected",
+            shortcut_id=shortcut_id,
+            label=label,
+            prompt=prompt,
+            model=selected_model,
+        )
     )
     _start_chat_turn(
         state,
@@ -624,7 +726,7 @@ async def quick_chat_prompt(request: Request, shortcut_id: int) -> FastUI:
         context_archive=None,
         source=f"quick:{shortcut_id}",
     )
-    logger.info(f"[QuickChat] queued shortcut_id={shortcut_id}, redirecting to /aiida/chat")
+    logger.info(log_event("aiida.quick_chat.queued", shortcut_id=shortcut_id))
     return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
 
 # 3. Agent execution endpoint and response rendering.
@@ -641,8 +743,13 @@ async def aiida_chat_handler(request: Request):
     selected_model = submitted_model if submitted_model in available_models else _get_selected_model(state, available_models)
     state.selected_model = selected_model
     logger.info(
-        f"[ChatHandler] intent_len={len(user_intent)} | selected_model={selected_model} "
-        f"| submitted_model={submitted_model!r}"
+        log_event(
+            "aiida.chat_handler.request",
+            intent_len=len(user_intent),
+            selected_model=selected_model,
+            submitted_model=submitted_model,
+            context=context_archive,
+        )
     )
 
     if not user_intent:
@@ -655,5 +762,5 @@ async def aiida_chat_handler(request: Request):
         context_archive=context_archive,
         source="form",
     )
-    logger.info("[ChatHandler] turn queued, redirecting to /aiida/chat")
+    logger.info(log_event("aiida.chat_handler.queued"))
     return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
