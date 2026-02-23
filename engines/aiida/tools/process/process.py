@@ -6,14 +6,14 @@ from engines.aiida.tools.process.workchain import inspect_workchain
 
 def inspect_process(identifier: str) -> str:
     """
-    统一入口：根据节点类型自动路由到 calculation 或 workchain 的详细分析。
+    Unified entry point: route to detailed calculation/workchain inspection by node type.
     """
     try:
         node = orm.load_node(identifier)
         if not isinstance(node, ProcessNode):
             return f"Error: {identifier} is not a ProcessNode."
 
-        # 1. 基础汇总
+        # 1. Base summary.
         report = {
             "summary": {
                 "pk": node.pk,
@@ -24,7 +24,7 @@ def inspect_process(identifier: str) -> str:
             "logs": get_process_log(node.pk)
         }
 
-        # 2. 逻辑分发：Calculation 关注 IO/仓库，WorkChain 关注树
+        # 2. Branch by process type: calculations emphasize IO/repository, workchains emphasize provenance tree.
         if isinstance(node, CalcJobNode):
             report.update(inspect_calculation(node))
         elif isinstance(node, WorkflowNode):
@@ -35,7 +35,7 @@ def inspect_process(identifier: str) -> str:
         return f"Error inspecting process: {str(e)}"
 
 def get_process_log(pk: int) -> str:
-    """抓取混合日志：WorkChain Report 或 CalcJob Stderr。"""
+    """Fetch merged logs: WorkChain reports and/or CalcJob stderr."""
     node = orm.load_node(pk)
     log_lines = []
     
@@ -52,7 +52,7 @@ def get_process_log(pk: int) -> str:
     return "\n".join(log_lines) or "No logs found."
 
 def fetch_recent_processes(limit: int = 15):
-    """获取最近任务供感知器使用。"""
+    """Fetch recent processes for perceptor-side status snapshots."""
     qb = QueryBuilder().append(
         ProcessNode, 
         project=["id", "attributes.process_label", "attributes.process_state", "ctime"],

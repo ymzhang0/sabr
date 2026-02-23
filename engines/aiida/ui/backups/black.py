@@ -2,15 +2,14 @@
 from fastui import AnyComponent
 from fastui import components as c
 from fastui import events as e
-from fastui import forms as f
 from sab_core.schema.response import SABRResponse
 from sab_core.schema.request import AgentRequest
 
 def get_aiida_sidebar() -> list[AnyComponent]:
     """
-    构建侧边栏。修复了 c.Text 带有 class_name 的错误。
+    Build sidebar widgets and avoid invalid `class_name` usage on `c.Text`.
     """
-    # 模拟数据
+    # Mock data.
     archives = ["initial_structure.aiida", "surface_relaxation.aiida"]
     processes = [{"id": "101", "label": "PwCalculation", "status": "Finished"}]
 
@@ -35,8 +34,8 @@ def get_aiida_sidebar() -> list[AnyComponent]:
     )    
 
 
-    # 2. Recent Processes
-# --- 组件 2: Recent Processes 动态列表 ---
+    # 2. Recent processes.
+    # --- Component 2: dynamic recent-process list ---
     sidebar_content.append(
         c.Div(class_name="mb-4", components=[
             c.Heading(text="RECENT TASKS", level=6, class_name="text-uppercase text-secondary small fw-bold mb-3"),
@@ -69,7 +68,7 @@ def get_aiida_sidebar() -> list[AnyComponent]:
 
 def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent]:
     """
-    主布局。增加了 pt-5 避开悬浮 Navbar。
+    Main dashboard layout.
     """
     return [
         c.PageTitle(text="SABR v2 | AiiDA Dashboard"),
@@ -84,12 +83,12 @@ def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent
                 c.Div(
                     class_name="row mt-2",
                     components=[
-                        # 左侧边栏
+                        # Left sidebar.
                         c.Div(
                             class_name="col-md-3 vh-100 bg-dark p-4 d-flex flex-column sticky-top",
                             components=get_aiida_sidebar() 
                         ),
-                        # 右侧主区
+                        # Right main area.
                         c.Div(
                             class_name="col-md-9 bg-light p-5 vh-100 overflow-auto",
                             components=[
@@ -105,7 +104,7 @@ def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent
         )
     ]
 
-# 保持其他函数不变...
+# Keep remaining render helpers unchanged.
 def get_chat_interface():
     return [
         c.Heading(text="Research Intelligence", level=2),

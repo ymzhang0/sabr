@@ -6,7 +6,7 @@ from perceptor import SystemPerceptor
 from executor import ConsoleExecutor
 from web_reporter import NiceGUIReporter, UIState
 
-# 全局状态和引擎（保证整个 App 生命周期内只有一个 Agent 在跑）
+# Global state and engine instance (single-agent lifecycle per app process).
 app_state = UIState()
 engine = SABEngine(
         perceptor=SystemPerceptor(),
@@ -24,7 +24,7 @@ def index():
     
     with ui.card().classes("w-64"):
         ui.label("System Status").classes("text-subtitle1")
-        # 核心：使用 bind_text 直接绑定对象属性
+        # Core pattern: bind UI labels directly to state attributes.
         ui.label().bind_text_from(app_state, "cpu", lambda v: f"CPU Usage: {v:.1f}%")
         ui.linear_progress().bind_value_from(app_state, "cpu", lambda v: v/100)
 

@@ -1,12 +1,12 @@
 /* engines/aiida/static/style.css */
 
-/* 1. 统一聊天卡片的边距和字体 */
+/* 1. Normalize spacing and typography for chat cards */
 .nicegui-card {
     line-height: 1.6;
     letter-spacing: 0.01em;
 }
 
-/* 2. 修正 Markdown 里的间距（防止表格或列表撑开容器） */
+/* 2. Tune markdown spacing to prevent layout expansion by tables/lists */
 .nicegui-markdown p {
     margin-bottom: 0.5rem;
 }
@@ -18,7 +18,7 @@
     border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-/* --- 1. 基础布局与变量 --- */
+/* --- 1. Base layout and variables --- */
 body {
     background-color: var(--main-bg);
     font-family: 'Inter', sans-serif;
@@ -26,7 +26,7 @@ body {
     overflow: hidden;
 }
 
-/* --- 2. 侧边栏与沉浸式处理 --- */
+/* --- 2. Sidebar and immersive behavior --- */
 .q-drawer {
     height: 100vh !important;
     width: 380px !important;
@@ -34,14 +34,14 @@ body {
     bottom: 0 !important;
 }
 
-/* 🚩 关键：将变量应用到侧边栏背景 */
+/* Key: bind CSS variables to the sidebar background */
 .q-drawer__content {
     background-color: var(--sidebar-bg) !important;
     color: var(--sidebar-text) !important;
     scrollbar-width: none !important; /* Firefox */
 }
 
-/* 隐藏所有滚动条 */
+/* Hide all scrollbars */
 .q-drawer__content::-webkit-scrollbar,
 .q-scrollarea__bar, 
 .q-scrollarea__thumb {
@@ -49,16 +49,16 @@ body {
 }
 
 .q-item.group:hover {
-    /* 给悬停项加一个极细的左侧发光边框 */
+    /* Add a subtle glowing left border on hover */
     border-left: 2px solid var(--primary);
     box-shadow: inset 10px 0 15px -10px rgba(var(--primary-rgb), 0.2);
 }
 
-/* --- 🚩 从 main 搬过来的“灵魂”样式 --- */
+/* --- Core styles migrated from main --- */
 .nicegui-chat-message { margin-bottom: 20px; }
 .q-message-text { border-radius: 18px !important; }
 
-/* 模仿 Gemini 的输入框阴影与圆角 */
+/* Gemini-style input shadow and corner radius */
 .q-field--outlined .q-field__control {
     border-radius: 28px !important;
     box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important;
@@ -75,11 +75,11 @@ body {
     100% { opacity: 1; transform: translateY(0); }
 }
 
-/* 覆盖 Python 中写死的 slate 文字颜色，使其跟随主题 */
+/* Override hardcoded slate text colors so they follow active theme variables */
 .text-slate-800 { color: var(--sidebar-text) !important; }
 .text-slate-400 { color: var(--sidebar-sub) !important; }
 
-/* --- 3. 建议卡片网格与染色 --- */
+/* --- 3. Suggestion-card grid and colorization --- */
 @keyframes fadeInUp {
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
@@ -91,7 +91,7 @@ body {
     width: 100%;
 }
 
-/* 🚩 关键：将变量应用到建议卡片 */
+/* Key: apply theme variables to suggestion cards */
 
 .suggestion-card { 
     background-color: var(--card-bg) !important; 
@@ -113,7 +113,7 @@ body {
     border-color: var(--accent-color) !important;
 }
 
-/* --- 4. 输入框 Pill 染色 --- */
+/* --- 4. Input-pill theming --- */
 .input-pill { 
     background-color: var(--card-bg) !important; 
     border: 1px solid var(--border-color) !important;
@@ -124,7 +124,7 @@ body {
     color: var(--text-main) !important;
 }
 
-/* 节点锚点样式 */
+/* Node anchor style */
 .node-anchor {
     color: var(--accent-color);
     text-decoration: none;
@@ -141,7 +141,7 @@ body {
     border-radius: 4px;
 }
 
-/* --- 5. Insight 区域 --- */
+/* --- 5. Insight panel --- */
 
 @keyframes highlight-fade {
     0% { background-color: rgba(var(--accent-rgb), 0.3); }
@@ -158,10 +158,10 @@ body {
     font-size: 12px !important;
     line-height: 1.6;
     padding: 16px !important;
-    /* 🚩 核心：强制换行，防止长路径溢出 */
+    /* Core behavior: force wrapping to prevent long-path overflow */
     word-break: break-all !important; 
     overflow-wrap: break-word !important;
-    white-space: pre-wrap !important; /* 保留换行符，但允许自动折行 */
+    white-space: pre-wrap !important; /* Preserve line breaks while allowing wrapping */
 
     animation: highlight-fade 2s ease-out;
 }
@@ -169,13 +169,13 @@ body {
 .insight-active {
     opacity: 1 !important;
     padding: 16px !important;
-    background-color: rgba(255, 255, 255, 0.03) !important; /* 极淡的底色 */
-    border: 1px solid rgba(255, 255, 255, 0.08) !important; /* 极细的微光边框 */
+    background-color: rgba(255, 255, 255, 0.03) !important; /* Ultra-light background tint */
+    border: 1px solid rgba(255, 255, 255, 0.08) !important; /* Subtle glow border */
     border-radius: 16px !important;
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.2) !important;
     margin: 10px;
 }
-/* 让 Insight 里的列表更有“仪表盘”感 */
+/* Give insight lists a dashboard-like structure */
 .insight-markdown li {
     list-style: none !important;
     border-left: 2px solid var(--accent-color);
@@ -183,14 +183,14 @@ body {
     margin-bottom: 8px;
     background: linear-gradient(90deg, rgba(var(--accent-rgb), 0.1) 0%, transparent 100%);
 }
-/* 优化 Insight 内部的代码块外观 */
+/* Improve code-block styling inside insight panel */
 .insight-markdown code {
     background-color: rgba(255, 255, 255, 0.1);
     /* padding: 2px 4px; */
     border-radius: 4px;
     color: var(--accent-color);
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
-    font-size: 11px !important;  /* 🚩 专门调代码块（如 JSON）的字号 */
+    font-size: 11px !important;  /* Dedicated code-font sizing (for example, JSON blocks) */
 }
 
 .history-container .q-scrollarea__bar,
@@ -199,18 +199,18 @@ body {
 }
 
 .thought-log-container {
-    color: #a0a0a0; /* 灰白色，不刺眼 */
+    color: #a0a0a0; /* Soft gray to reduce visual fatigue */
     font-family: 'Fira Code', 'JetBrains Mono', 'Menlo', monospace !important;
-    text-shadow: 0 0 5px rgba(255, 255, 255, 0.05); /* 微弱的文字发光 */
+    text-shadow: 0 0 5px rgba(255, 255, 255, 0.05); /* Subtle text glow */
 }
 
 .thought-log-container, 
 .q-log, 
 .q-textarea textarea {
-    scrollbar-width: none !important; /* Firefox */
+    scrollbar-width: none !important;  /* Firefox */
     -ms-overflow-style: none !important;  /* IE and Edge */
 }
-/* 针对 Webkit 浏览器 (Chrome, Safari, Edge) */
+/* WebKit-based browsers (Chrome, Safari, Edge) */
 .thought-log-container::-webkit-scrollbar,
 .q-log::-webkit-scrollbar,
 .q-textarea textarea::-webkit-scrollbar,
@@ -233,15 +233,15 @@ body {
 }
 
 .thought-log-container::-webkit-scrollbar-thumb:hover {
-    background: var(--primary); /* 鼠标放上去时滚动条变亮 */
+    background: var(--primary); /* Brighten thumb color on hover */
 }
-/* 确保 thought_log 内部容器也不显示滚动条 */
+/* Ensure nested thought-log elements also hide scrollbars */
 .thought-log-container div,
 .thought-log-container pre {
     scrollbar-width: none !important;
 }
 
-/* --- 6. 呼吸动画逻辑 --- */
+/* --- 6. Breathing animation --- */
 @keyframes pill-pulse {
     0% { box-shadow: 0 0 8px rgba(var(--accent-rgb), 0.2); border-color: var(--border-color); }
     50% { box-shadow: 0 0 20px rgba(var(--accent-rgb), 0.6); border-color: var(--accent-color); }
@@ -252,7 +252,7 @@ body {
     animation: pill-pulse 2s infinite ease-in-out !important;
 }
 
-/* --- 7. 聊天容器 --- */
+/* --- 7. Chat container --- */
 .chat-container {
     height: calc(100vh - 250px);
     overflow-y: auto;

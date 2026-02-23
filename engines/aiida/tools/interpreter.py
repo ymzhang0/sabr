@@ -1,11 +1,10 @@
 # examples/aiida/tools/interpreter.py
 import io
-import sys
 import traceback
 from contextlib import redirect_stdout, redirect_stderr
 
 def run_python_code(script: str):
-    """执行 Python 脚本与 AiiDA 交互。AI 专用。"""
+    """Execute Python code for advanced AiiDA interaction (AI-oriented utility)."""
     exec_globals = {}
     try:
         from aiida import orm, plugins, engine

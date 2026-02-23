@@ -2,10 +2,9 @@ from aiida import orm
 
 # engines/aiida/tools/base/node.py
 from aiida.orm import load_node
-import json
 
 def get_node_summary(node_pk: int) -> dict:
-    """获取节点的结构化摘要，用于 UI 展示或 Brain 分析"""
+    """Return a structured node summary for UI rendering or agent reasoning."""
     try:
         node = load_node(node_pk)
         return {
@@ -24,8 +23,8 @@ def get_node_summary(node_pk: int) -> dict:
         
 def serialize_node(node: orm.Node) -> dict:
     """
-    将任何 AiiDA 节点转化为 AI 可读的字典格式。
-    处理数据节点(Data)的 Payload 和 进程节点(Process)的状态。
+    Serialize any AiiDA node into an AI-friendly dictionary.
+    Handles data-node payloads and process-node runtime status.
     """
     info = {
         "pk": node.pk,
@@ -35,7 +34,7 @@ def serialize_node(node: orm.Node) -> dict:
         "ctime": node.ctime.strftime("%Y-%m-%d %H:%M:%S")
     }
 
-    # 处理数据内容 (原 calculation.py 逻辑)
+    # Handle data payload extraction (ported from earlier calculation helpers).
     if isinstance(node, orm.Dict):
         info["payload"] = node.get_dict()
     elif isinstance(node, orm.StructureData):

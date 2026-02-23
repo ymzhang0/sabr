@@ -1,11 +1,9 @@
 from nicegui import ui, app
-import os
 
 # Import SABR v2 logic and UI components
 from engines.aiida.ui.layout import create_aiida_layout
 from engines.aiida.ui.controller import RemoteAiiDAController
 from src.sab_core.memory.json_memory import JSONMemory
-from src.sab_core.config import settings
 
 # --- 1. Global Configuration ---
 API_URL = "http://localhost:8000"

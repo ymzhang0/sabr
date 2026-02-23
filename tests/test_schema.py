@@ -1,6 +1,5 @@
 """Tests for schema models."""
 
-import pytest
 from sab_core.schema.observation import Observation
 from sab_core.schema.action import Action
 

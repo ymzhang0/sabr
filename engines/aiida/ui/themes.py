@@ -18,10 +18,10 @@ THEMES = {
         '--sidebar-sub': '#9aa0a6',
         '--main-bg': '#131314',
         '--accent-color': '#8ab4f8',
-        '--accent-rgb': '138, 180, 248', # 呼吸动画需要
+        '--accent-rgb': '138, 180, 248',  # Used by breathing animation effects.
         '--card-bg': '#1e1f20',
         '--insight-bg': 'rgba(255, 255, 255, 0.04)',
-        '--text-main': '#e3e3e3',        # 🚩 必须有这个
-        '--border-color': '#444746'      # 🚩 必须有这个
+        '--text-main': '#e3e3e3',         # Required by themed text components.
+        '--border-color': '#444746'       # Required by bordered card/input components.
     },
 }

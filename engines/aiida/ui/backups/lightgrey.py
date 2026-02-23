@@ -2,13 +2,12 @@
 from fastui import AnyComponent
 from fastui import components as c
 from fastui import events as e
-from fastui import forms as f
 from sab_core.schema.response import SABRResponse
 from sab_core.schema.request import AgentRequest
 
 def get_aiida_sidebar() -> list[AnyComponent]:
     """
-    重构侧边栏：Gemini 风格的白色卡片组件化布局。
+    Refactor sidebar with Gemini-style white-card composition.
     """
     archives = ["initial_structure.aiida", "surface_relaxation.aiida"]
     processes = [
@@ -18,7 +17,7 @@ def get_aiida_sidebar() -> list[AnyComponent]:
 
     sidebar_content = []
     
-    # --- 组件 1: Archive 卡片 ---
+    # --- Component 1: archive card ---
     sidebar_content.append(
         c.Div(
             class_name="bg-white p-3 rounded-4 shadow-sm border-0 mb-4", 
@@ -37,7 +36,7 @@ def get_aiida_sidebar() -> list[AnyComponent]:
         )
     )
 
-    # --- 组件 2: 任务动态卡片 ---
+    # --- Component 2: recent-task card ---
     sidebar_content.append(
         c.Div(
             class_name="bg-white p-3 rounded-4 shadow-sm border-0 mb-4",
@@ -59,7 +58,7 @@ def get_aiida_sidebar() -> list[AnyComponent]:
         )
     )
 
-    # --- 组件 3: 系统监控卡片 ---
+    # --- Component 3: system-status card ---
     sidebar_content.append(
         c.Div(
             class_name="bg-primary text-white p-3 rounded-4 shadow-sm mt-auto",
@@ -74,8 +73,8 @@ def get_aiida_sidebar() -> list[AnyComponent]:
 
 def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent]:
     """
-    主布局：Gemini/Notion 风格。
-    侧边栏与主区背景一致，通过卡片阴影区分功能。
+    Main layout in Gemini/Notion style.
+    Sidebar and main area share the background; cards provide visual separation.
     """
     return [
         c.PageTitle(text="SABR v2 | AiiDA Dashboard"),
@@ -85,17 +84,17 @@ def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent
             class_name="sticky-top shadow-none border-bottom bg-white py-2",
         ),
         c.Div(
-            class_name="container-fluid bg-light", # 全局背景浅灰色
+            class_name="container-fluid bg-light",  # Global light-gray background.
             components=[
                 c.Div(
                     class_name="row g-0", 
                     components=[
-                        # 侧边栏：浅灰色背景，不与主区分割，靠卡片自成一体
+                        # Sidebar: same light background, cards define boundaries.
                         c.Div(
                             class_name="col-md-3 vh-100 p-4 d-flex flex-column sticky-top",
                             components=get_aiida_sidebar() 
                         ),
-                        # 主内容区
+                        # Main content area.
                         c.Div(
                             class_name="col-md-9 p-4",
                             components=[
@@ -111,7 +110,7 @@ def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent
         )
     ]
 
-# 其余渲染函数 (render_sabr_response, get_chat_interface) 保持 Pydantic 规范...
+# Keep remaining render helpers consistent with FastUI/Pydantic expectations.
 def get_chat_interface():
     return [
         c.Heading(text="Research Intelligence", level=2, class_name="mb-4"),

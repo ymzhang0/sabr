@@ -2,14 +2,13 @@
 from fastui import AnyComponent
 from fastui import components as c
 from fastui import events as e
-from fastui import forms as f
 from sab_core.schema.response import SABRResponse
 from sab_core.schema.request import AgentRequest
 
 def get_aiida_sidebar() -> list[AnyComponent]:
     """
-    重构侧边栏：工业控制台风格。
-    去掉了所有非标准的 style 属性。
+    Refactor sidebar to an industrial-console style.
+    Remove all non-standard inline style attributes.
     """
     archives = ["initial_structure.aiida", "surface_relaxation.aiida"]
     processes = [
@@ -71,7 +70,7 @@ def get_aiida_sidebar() -> list[AnyComponent]:
 
 def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent]:
     """
-    主布局：去掉了非法的 style 属性。
+    Main layout with invalid style attributes removed.
     """
     return [
         c.PageTitle(text="SABR v2 | AiiDA Expert"),
@@ -86,13 +85,12 @@ def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent
                 c.Div(
                     class_name="row",
                     components=[
-                        # 🚩 修正：移除了 style={"backgroundColor": ...}
-                        # 改用 bg-dark 和 border-info 的组合来模拟深色工业感
+                        # Use `bg-dark` + `border-info` to emulate industrial dark styling.
                         c.Div(
                             class_name="col-md-3 vh-100 p-4 d-flex flex-column sticky-top bg-dark border-end border-info border-opacity-10",
                             components=get_aiida_sidebar() 
                         ),
-                        # 主区域
+                        # Main area.
                         c.Div(
                             class_name="col-md-9 bg-secondary bg-opacity-10 p-5 min-vh-100",
                             components=[
@@ -108,7 +106,7 @@ def get_aiida_dashboard_layout(content: list[AnyComponent]) -> list[AnyComponent
         )
     ]
 
-# 其余渲染函数保持不变
+# Keep remaining render helpers unchanged.
 def get_chat_interface():
     return [
         c.Heading(text="Research Intelligence", level=2, class_name="mb-4 text-dark fw-bold"),

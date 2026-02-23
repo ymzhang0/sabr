@@ -3,22 +3,22 @@ Tools for inspecting the AiiDA profile (database statistics, groups).
 """
 import os
 import io
-import json      # 🚩 补上这个
-import zipfile   # 🚩 补上这个
 from pathlib import Path
 from aiida import load_profile, orm
-from aiida.orm import Group, Node, QueryBuilder, ProcessNode, Node
+from aiida.orm import Group, Node, QueryBuilder, ProcessNode
 from aiida.manage.configuration import get_config
 from aiida.manage.manager import get_manager
 from aiida.storage.sqlite_zip.backend import SqliteZipBackend
 from aiida.manage import Profile
 
 
-# --- 1. 资源列表工具 (Perceptor 强依赖) ---
+# --- 1. Resource-listing tools (required by the perceptor) ---
+_CURRENT_MOUNTED_ARCHIVE = None
 
 def ensure_environment(target: str):
     """
-    智能切换环境：自动识别是本地 Profile 还是 Archive 文件。
+    Smart environment switch:
+    detect whether `target` is a local profile or an archive file.
     """
     global _CURRENT_MOUNTED_ARCHIVE
 
@@ -29,17 +29,16 @@ def ensure_environment(target: str):
         return
 
     try:
-        # 1. 如果是文件路径且存在
+        # 1. If `target` is an existing archive file path, mount it temporarily.
         if os.path.isfile(target) and target.lower().endswith(('.aiida', '.zip')):
-            # 🚀 核心修复：将 Archive 文件路径包装成临时 Profile 对象
             archive_profile = SqliteZipBackend.create_profile(filepath=target,)
             load_profile(archive_profile, allow_switch=True)
-            _CURRENT_MOUNTED_ARCHIVE = target # 更新缓存
+            _CURRENT_MOUNTED_ARCHIVE = target  # Update cache.
             print(f"✅ Backend loaded archive as profile: {target}")
         else:
-            # 2. 否则按普通 Profile 名称加载
+            # 2. Otherwise treat `target` as a configured profile name.
             load_profile(target, allow_switch=True)
-            _CURRENT_MOUNTED_ARCHIVE = None # 切换回普通 Profile
+            _CURRENT_MOUNTED_ARCHIVE = None  # Reset archive cache for profile mode.
             print(f"✅ Backend switched to profile: {target}")
     except Exception as e:
         print(f"❌ DEBUG: Failed to switch AiiDA environment: {e}")
@@ -51,26 +50,28 @@ def get_default_profile() -> Profile:
     
 def list_system_profiles():
     """
-    获取系统中所有 AiiDA Profile 的名称列表。
-    (修复了感知器找不到该函数的问题)
+    Return all configured AiiDA profiles on the current system.
     """
     config = get_config()
     return config.profiles
 
 def list_local_archives():
     """
-    扫描当前目录下的 AiiDA 压缩包文件。
-    支持 .aiida 和 .zip 格式。
+    Scan the current directory for AiiDA archive files.
+    Supported extensions: .aiida and .zip.
     """
     return [f.name for f in Path('.').glob('*') if f.suffix in ['.aiida', '.zip']]
 
-# --- 2. 环境切换工具 ---
+# --- 2. Environment-switching tools ---
 
-def switch_profile(profile: Profile) -> str:
+def switch_profile(profile: str | Profile) -> str:
     """
-    切换当前的 AiiDA Profile。
+    Switch the active AiiDA profile.
     """
     try:
+        if isinstance(profile, str):
+            load_profile(profile, allow_switch=True)
+            return f"Successfully switched to profile '{profile}'."
         load_profile(profile, allow_switch=True)
         return f"Successfully switched to profile '{profile.name}'."
     except Exception as e:
@@ -78,26 +79,27 @@ def switch_profile(profile: Profile) -> str:
 
 def load_archive_profile(filepath: str):
     """
-    将压缩包作为临时 Profile 加载（主要用于 AiiDA 2.x 的只读探测）。
+    Load an archive as a temporary profile (primarily for AiiDA 2.x read-only inspection).
     """
     try:
         from aiida.storage.sqlite_zip.backend import SqliteZipBackend
         archive_profile = SqliteZipBackend.create_profile(filepath = filepath)
         profile = load_profile(archive_profile, allow_switch=True)
-        # 这里的实现取决于你的具体环境配置，通常建议直接通过 get_archive_info 探测
-        # 如果需要完整加载，通常使用临时存储后端
+        # Implementation depends on local environment configuration.
+        # For metadata-only checks, `get_archive_info` is usually preferred.
         return profile
     except Exception as e:
         raise Warning(f"Error loading archive: {e}")
 
-# --- 3. 深度感知工具 (Unified Map) ---
+# --- 3. Deep-perception tools (Unified Map) ---
 def get_unified_source_map(target: str):
     """
-    统一资源映射逻辑：先强制同步环境，再用 QueryBuilder 读取。
+    Unified resource mapping:
+    force environment sync first, then query groups via QueryBuilder.
     """
     ensure_environment(target)
     
-    # 🚩 修复 KeyError: 增加 'type' 键
+    # Include `type` to avoid downstream key assumptions.
     is_arch = target.lower().endswith(('.aiida', '.zip'))
     result = {
         "name": os.path.basename(target), 
@@ -105,20 +107,21 @@ def get_unified_source_map(target: str):
         "groups": []
     }
     try:
-        # 环境一旦同步，统一使用 ORM 查询
+        # Once synchronized, use ORM queries consistently.
         qb = orm.QueryBuilder().append(orm.Group, project=["label", "id"])
         for label, pk in qb.all():
-            if "import" in label.lower(): continue
+            if "import" in label.lower():
+                continue
             result["groups"].append({"label": label, "pk": pk})
     except Exception as e:
         result["error"] = str(e)
     return result
 
-# --- 4. 数据统计工具 ---
+# --- 4. Statistics tools ---
 
 def get_statistics(profile_name: str = None):
     """
-    获取数据库的高层统计信息。
+    Return high-level database statistics.
     """
     if profile_name:
         switch_profile(profile_name)
@@ -140,7 +143,7 @@ def get_statistics(profile_name: str = None):
 
 def list_groups(search_string: str = None):
     """
-    以 Markdown 表格形式列出所有组，对 AI 非常友好。
+    List all groups in a markdown table format that is AI-friendly.
     """
     qb = QueryBuilder()
     filters = {"label": {"like": f"%{search_string}%"}} if search_string else {}
@@ -150,21 +153,22 @@ def list_groups(search_string: str = None):
     lines = [f"**Groups in Profile: `{current}`**", "", "| PK | Label | Count |", "| :--- | :--- | :--- |"]
     
     for label, pk, group in qb.all():
-        if group.type_string == "core.import": continue
+        if group.type_string == "core.import":
+            continue
         lines.append(f"| {pk} | {label} | {len(group.nodes)} |")
     
     return "\n".join(lines)
 
 def get_database_summary():
     """
-    专门为 UI 迎宾界面设计的快速统计工具。
-    返回原始数据字典，供 UI 使用。
+    Lightweight summary for the UI welcome screen.
+    Returns a raw dictionary for UI rendering.
     """
     try:
         n_count = QueryBuilder().append(Node).count()
         p_count = QueryBuilder().append(ProcessNode).count()
         
-        # 还可以顺便统计一下失败的任务
+        # Include failed-process count for quick health checks.
         failed_count = orm.QueryBuilder().append(
             ProcessNode, 
             filters={'exit_status': {'!==': 0}}
@@ -181,8 +185,8 @@ def get_database_summary():
 
 def get_recent_processes(limit: int = 5):
     """
-    🚩 核心：封装 AiiDA 数据库查询逻辑。
-    这个函数既可以给 AI 当 Tool 用，也可以给 Controller 当内部数据源用。
+    Core query wrapper for recent AiiDA processes.
+    Used both as an AI tool and as a controller-side data source.
     """
     qb = QueryBuilder()
     qb.append(ProcessNode, project=['id', 'attributes.process_state', 'attributes.process_label', 'ctime'], tag='process')
@@ -190,7 +194,7 @@ def get_recent_processes(limit: int = 5):
     qb.limit(limit)
     
     results = []
-    for pk, state, label, ctime in qb.all():
+    for pk, state, label, _ctime in qb.all():
         results.append({
             'pk': pk,
             'state': state.value if hasattr(state, 'value') else str(state),

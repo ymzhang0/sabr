@@ -2,19 +2,18 @@
 from fastui import AnyComponent
 from fastui import components as c
 from fastui import events as e
-from fastui import forms as f
 from sab_core.schema.response import SABRResponse
 from sab_core.schema.request import AgentRequest
 from fastui import FastUI
 
 def get_process_panel(processes: list) -> list:
-    """渲染最近的任务列表"""
+    """Render the latest process list."""
     if not processes:
         return [c.Div(class_name="text-muted small px-2 py-3", components=[c.Text(text="No recent processes.")])]
 
     items = []
     for p in processes:
-        # 根据 AiiDA 的 process_state 分配颜色
+        # Map AiiDA process state to display color.
         state = p.get('state', '').lower()
         if state == 'finished':
             dot_style = "text-success"
@@ -29,9 +28,9 @@ def get_process_panel(processes: list) -> list:
             c.Div(
                 class_name="py-2 px-1 d-flex align-items-center gap-2 border-bottom border-light",
                 components=[
-                    # 🚩 状态圆点
+                    # State indicator dot.
                     c.Div(class_name=f"small {dot_style}", components=[c.Text(text="●")]),
-                    # 🚩 任务信息
+                    # Task metadata.
                     c.Div(components=[
                         c.Div(
                             class_name='text-dark small fw-bold text-truncate max-w-40', 
@@ -49,9 +48,9 @@ def get_process_panel(processes: list) -> list:
 
 def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> list[AnyComponent]:
     """
-    重构侧边栏：
-    途径 1: 系统 Profiles (Environment)
-    途径 2: 本地 Archives (File Browser)
+    Refactored sidebar with two entry paths:
+    1) configured system profiles
+    2) imported local archives
     """
 
     sidebar_content = []
@@ -71,7 +70,7 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
                     class_name="text-dark fw-bold opacity-50 small",
                     components=[c.Text(text="PROFILE")]
                 ),
-                # 🚩 只有图标的导入按钮
+                # Icon-only import button.
                 c.Link(
                     components=[c.Text(text="📂")],
                     on_click=e.GoToEvent(url='/aiida/archives/browse-local'),
@@ -80,9 +79,9 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
             ]
         )
     )
-    # --- 渲染 Profile 列表 (包含系统和导入的) ---
+    # --- Render profile list (configured + imported) ---
     for profile_name, display_name, is_active in profiles_display:
-        # 指示灯颜色：绿色(激活) vs 浅灰色(未激活)
+        # Indicator color: green (active) vs gray (inactive).
         dot_color = "bg-success" if is_active else "bg-secondary opacity-25"
         
 
@@ -90,19 +89,18 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
             c.Link(
                 components=[
                     c.Div(
-                        # 激活的项目背景加深
+                        # Darken background for active entries.
                         class_name=(
                             "py-2 px-3 mb-2 rounded-3 d-flex align-items-center gap-2 border shadow-sm "
                             f"{'bg-light' if is_active  else 'bg-white'}"
                         ),
                         components=[
                             c.Div(
-                                # 使用 p-1 (padding) 撑开 Div，rounded-circle 做成圆点
-                                # d-inline-block 确保它是一个行内块级元素
+                                # Use compact padding and rounded-circle to render a dot.
                                 class_name=f"rounded-circle {dot_color} p-1 d-inline-block",
-                                components=[] # 🚩 必须提供空列表，否则 Pydantic 会报错
+                                components=[]  # Required; Pydantic expects a list.
                             ),
-                            # 🚩 名字
+                            # Display label.
                             c.Div(
                                 class_name=f"small {'fw-bold text-black' if is_active else 'text-dark'}",
                                 components=[c.Text(text=display_name)]
@@ -114,7 +112,7 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
                 class_name="text-decoration-none"
             )
         )
-    # 🚩 插入任务面板区域
+    # Insert live process panel area.
     sidebar_content.append(
         c.Div(class_name="mt-5 px-2", components=[
             c.Div(
@@ -123,7 +121,7 @@ def get_aiida_sidebar(profiles_display: list = None, processes: list = None) -> 
             ),
             c.Sse(
                 source='/api/aiida/processes/stream',
-                components=[get_process_panel(processes)]
+                components=get_process_panel(processes)
             )
         ])
     )
@@ -134,7 +132,7 @@ def get_aiida_dashboard_layout(
     profiles_display: list = None, 
     processes: list = None) -> list[AnyComponent]:
     """
-    Claude 布局：象牙灰底色 + 纯白圆角卡片。
+    Claude-inspired layout: ivory-gray background with white rounded cards.
     """
     return FastUI([
         c.PageTitle(text="SABR | Claude Style"),
@@ -144,22 +142,22 @@ def get_aiida_dashboard_layout(
             class_name="sticky-top bg-white border-bottom border-dark border-opacity-10 py-1 shadow-none",
         ),
         c.Div(
-            # 🚩 重点：bg-body-tertiary 是一种比 light 深、比 secondary 浅的中性暖灰
+            # `bg-body-tertiary` gives a neutral warm gray between `light` and `secondary`.
             class_name="container-fluid bg-body-tertiary min-vh-100 p-0", 
             components=[
                 c.Div(
                     class_name="row g-0", 
                     components=[
-                        # 侧边栏
+                        # Sidebar.
                         c.Div(
                             class_name="col-md-3 vh-100 p-4 d-flex flex-column sticky-top border-end border-dark border-opacity-10",
                             components=get_aiida_sidebar(profiles_display=profiles_display, processes=processes)
                         ),
-                        # 主内容区
+                        # Main content.
                         c.Div(
                             class_name="col-md-9 p-4 p-md-5",
                             components=[
-                                # 核心：纯白大卡片，超大圆角，使用细边框代替深色阴影
+                                # Core content card: large radius, subtle border, no heavy shadow.
                                 c.Div(
                                     class_name="bg-white p-4 p-lg-5 rounded-5 border border-dark border-opacity-10 mx-auto w-100",
                                     components=content
@@ -199,7 +197,8 @@ def get_chat_interface():
 
 def render_explorer(profiles: list, archives: list):
     """
-    双面板浏览器：上方看 AiiDA Profiles，下方看本地 Archive 文件。
+    Dual-panel explorer:
+    AiiDA profiles on top, local archive files at the bottom.
     """
     return [
         c.Div(class_name="mb-5", components=[
@@ -211,7 +210,7 @@ def render_explorer(profiles: list, archives: list):
                     c.display.DisplayLookup(field='name', title='Profile Name'),
                     c.display.DisplayLookup(field='database_name', title='Database'),
                     c.display.DisplayLookup(field='repository', title='Repository Path'),
-                    # 可以在这里加一个 'Load' 按钮
+                    # Optional: add a dedicated "Load" action button here.
                 ],
             ),
         ]),

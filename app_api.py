@@ -3,13 +3,13 @@ from loguru import logger
 
 class InterceptHandler(logging.Handler):
     def emit(self, record):
-        # 尝试获取对应的 Loguru 级别
+        # Try to resolve the corresponding Loguru level.
         try:
             level = logger.level(record.levelname).name
         except ValueError:
             level = record.levelno
 
-        # 找到调用者的位置
+        # Find the original caller frame.
         frame, depth = logging.currentframe(), 2
         while frame.f_code.co_filename == logging.__file__:
             frame = frame.f_back
@@ -17,22 +17,22 @@ class InterceptHandler(logging.Handler):
 
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
-# 1. 先清除所有现有的 handler
+# 1. Clear all existing handlers first.
 logging.getLogger().handlers = [InterceptHandler()]
 
-# 2. 🚩 重点：显式地针对 uvicorn 的三个关键 logger 进行重定向
+# 2. Explicitly redirect the three critical Uvicorn loggers.
 for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
     mod_logger = logging.getLogger(logger_name)
     mod_logger.handlers = [InterceptHandler()]
-    mod_logger.propagate = False  # 禁止向上传递，防止重复打印
+    mod_logger.propagate = False  # Prevent propagation to avoid duplicate logs.
 
-# 3. 设置根日志级别
+# 3. Set the root log level.
 logging.getLogger().setLevel(logging.INFO)
 
 import importlib
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # 1. Load environment variables at the very beginning (Proxy, API Keys)
@@ -40,17 +40,13 @@ load_dotenv()
 
 from src.sab_core.config import settings
 from src.sab_core.memory.json_memory import JSONMemory
-from src.sab_core.schema import AgentRequest, SABRResponse
-from src.sab_core.schema.response import SABRResponse
 
 from fastui import prebuilt_html
 from fastapi.responses import HTMLResponse
 
-from engines.aiida.hub import hub as aiida_hub
-
 # Global state container for long-lived objects
 state = {}
-# 🚩 动态 Hub 注册表
+# Dynamic hub registry.
 ACTIVE_HUBS = []
 # ============================================================
 # 🧬 Lifespan Management
@@ -63,10 +59,12 @@ async def lifespan(app: FastAPI):
     logger.info(f"🚀 [SABR v2] Initializing Backend Hub...")
     
     # Initialize Global Memory
-    state["memory"] = JSONMemory(
+    memory = JSONMemory(
         namespace="sabr_v2_global",
         storage_path=settings.SABR_MEMORY_DIR  # Now it's dynamic!
         )
+    state["memory"] = memory
+    app.state.memory = memory
     
     # Dynamically load the engine-specific agent and deps
     engine_name = settings.ENGINE_TYPE  # e.g., 'aiida'
@@ -74,20 +72,24 @@ async def lifespan(app: FastAPI):
         # Load the Researcher Agent from the engine folder
         # e.g., from engines.aiida.agents.researcher import aiida_researcher
         agent_module = importlib.import_module(f"engines.{engine_name}.agents.researcher")
-        state["agent"] = getattr(agent_module, f"{engine_name}_researcher")
+        agent = getattr(agent_module, f"{engine_name}_researcher")
+        state["agent"] = agent
+        app.state.agent = agent
         
         # Load the specific Deps class
         # e.g., from engines.aiida.deps import AiiDADeps
         deps_module = importlib.import_module(f"engines.{engine_name}.deps")
-        state["deps_class"] = getattr(deps_module, settings.DEPS_CLASS)
+        deps_class = getattr(deps_module, settings.DEPS_CLASS)
+        state["deps_class"] = deps_class
+        app.state.deps_class = deps_class
         
         logger.info(f"✅ [Agent] '{engine_name}' expert agent is online.")
 
-        # 4. 🚩 动态挂载专属前端入口: http://localhost:8000/aiida/
+        # 4. Dynamically mount the engine-specific frontend entry point.
         @app.get(f"/{engine_name}/{{path:path}}", response_class=HTMLResponse)
-        async def engine_frontend(path: str):
+        async def engine_frontend(_path: str):
             return prebuilt_html(
-                api_root_url='/api',  # 保持 /api 根路径
+                api_root_url='/api',  # Keep the shared /api root path.
                 title=f"SABR | {engine_name.upper()}"
             )
             
@@ -102,8 +104,6 @@ async def lifespan(app: FastAPI):
   
     yield
     logger.info("🛑 [Framework] Shutting down active engines...")
-    
-    yield
     # Cleanup logic
     state.clear()
     logger.info("🛑 [SABR v2] Hub shut down.")
@@ -129,19 +129,19 @@ app.add_middleware(
 # ============================================================
 def mount_engine(app: FastAPI, engine_name: str):
     """
-    按需挂载引擎：
-    1. 挂载路由
-    2. 注册该引擎的 Hub 到启动列表
+    Mount an engine on demand:
+    1. Register routes.
+    2. Register the engine hub for startup.
     """
     try:
-        # 动态导入路由和 Hub
+        # Dynamically import router and hub modules.
         api_module = importlib.import_module(f"engines.{engine_name}.api")
         hub_module = importlib.import_module(f"engines.{engine_name}.hub")
         
-        # 1. 挂载路由
+        # 1. Mount routes.
         app.include_router(api_module.router, prefix=f"/api/{engine_name}")
         
-        # 2. 注册 Hub
+        # 2. Register hub.
         if hasattr(hub_module, 'hub'):
             ACTIVE_HUBS.append(hub_module.hub)
             logger.info(f"🔗 [Registry] Engine '{engine_name}' registered for startup.")
@@ -155,11 +155,11 @@ mount_engine(app, "aiida")
 # 🛣️ Core Agent Endpoint (The Cyclic Hub)
 # ============================================================
 
-# 外部仅放承载 FastUI 的路由
+# External-only route for hosting the FastUI shell.
 @app.get('/ui/{path:path}')
-async def fastui_frontend(path: str) -> HTMLResponse:
+async def fastui_frontend(_path: str) -> HTMLResponse:
     return HTMLResponse(prebuilt_html(
-        api_root_url='/api',  #
+        api_root_url='/api',
         title='SABR v2'
     ))
 # ============================================================

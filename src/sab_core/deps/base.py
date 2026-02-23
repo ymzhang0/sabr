@@ -1,6 +1,6 @@
 # src/sab_core/deps/base.py
 from dataclasses import dataclass, field
-from typing import Optional, List, Any
+from typing import Optional, List
 from src.sab_core.memory.json_memory import JSONMemory
 
 @dataclass
@@ -12,6 +12,6 @@ class BaseSABRDeps:
     step_history: List[str] = field(default_factory=list)
 
     def log_step(self, message: str):
-        """记录 Agent 的执行步骤，用于前端 Ticker 和 Thought Log"""
+        """Record agent execution steps for UI ticker and thought-log rendering."""
         self.step_history.append(message)
         print(f"⚙️ [Step]: {message}")

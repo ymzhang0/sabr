@@ -1,5 +1,5 @@
 import os
-from nicegui import app, ui
+from nicegui import ui
 from engines.aiida.ui.themes import THEMES
 
 def create_aiida_layout(theme_name='gemini_dark', available_models=["gemini-2.0-flash", "gemini-1.5-pro"]):
@@ -23,7 +23,7 @@ def create_aiida_layout(theme_name='gemini_dark', available_models=["gemini-2.0-
     ICON_W = "w-[40px]"
 
     # --- 1. Sidebar (Left Drawer) ---
-    with ui.left_drawer(value=True, fixed=True).props('width=380').classes('q-pa-none border-r') as drawer:
+    with ui.left_drawer(value=True, fixed=True).props('width=380').classes('q-pa-none border-r'):
         with ui.column().classes('w-full h-full no-wrap gap-0'):
             
             # [Section 1] Branding
@@ -108,7 +108,7 @@ def create_aiida_layout(theme_name='gemini_dark', available_models=["gemini-2.0-
                 process_ticker = ui.column().classes('w-full px-8 gap-2')
 
     # --- 2. Chat Container ---
-    with ui.column().classes('chat-container flex-grow w-full pb-64 items-center') as main_column:
+    with ui.column().classes('chat-container flex-grow w-full pb-64 items-center'):
         with ui.column().classes('w-full items-center justify-start pt-[20vh] flex-grow') as welcome_screen:
             welcome_title = ui.label('Hi, Where should we start?').classes('text-5xl font-light opacity-20 tracking-tight text-center')
             welcome_sub = ui.label('Select a shortcut or analyze your database below.').classes('text-sm text-slate-300 mt-4 uppercase tracking-widest text-center')

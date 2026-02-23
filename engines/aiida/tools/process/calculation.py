@@ -1,5 +1,5 @@
 """
-专精于 AiiDA 计算节点 (CalcJob, CalcFunction) 的深度审查工具。
+Deep inspection utilities for AiiDA calculation nodes (CalcJob, CalcFunction).
 """
 from typing import Union
 from aiida import orm
@@ -7,13 +7,13 @@ from engines.aiida.tools.base.node import serialize_node
 
 def inspect_calculation(identifier: Union[int, str, orm.ProcessNode]) -> dict:
     """
-    深入分析计算节点的输入输出、仓库文件以及调度状态。
+    Analyze a calculation node in depth, including IO links, repository files, and scheduler metadata.
     
     Args:
-        identifier: 节点的 PK, UUID 或 Node 对象。
+        identifier: Node PK, UUID, or a Node instance.
     """
     try:
-        # 统一加载节点
+        # Normalize and resolve the input node.
         if isinstance(identifier, (int, str)):
             node = orm.load_node(identifier)
         else:
@@ -22,7 +22,7 @@ def inspect_calculation(identifier: Union[int, str, orm.ProcessNode]) -> dict:
         if not isinstance(node, (orm.CalcJobNode, orm.CalcFunctionNode)):
             return {"error": f"Node {node.pk} is not a calculation node."}
 
-        # 1. 基础信息序列化 (调用通用工具)
+        # 1. Serialize core metadata with shared helpers.
         res = {
             "summary": serialize_node(node),
             "inputs": {},
@@ -30,22 +30,22 @@ def inspect_calculation(identifier: Union[int, str, orm.ProcessNode]) -> dict:
             "repository_files": []
         }
 
-        # 2. 解析输入输出链接 (使用统一的 serialize_node)
+        # 2. Resolve incoming/outgoing links with unified serialization.
         for link in node.base.links.get_incoming().all():
             res["inputs"][link.link_label] = serialize_node(link.node)
             
         for link in node.base.links.get_outgoing().all():
             res["outputs"][link.link_label] = serialize_node(link.node)
 
-        # 3. 提取仓库文件列表
+        # 3. Extract repository file names.
         try:
-            # 过滤掉 AiiDA 内部隐藏文件
+            # Filter out internal AiiDA hidden files.
             files = node.base.repository.list_object_names()
             res["repository_files"] = [f for f in files if not f.startswith('.aiida')]
         except Exception:
             pass
 
-        # 4. CalcJob 特化：获取调度器输出位置信息
+        # 4. CalcJob specialization: include scheduler output metadata.
         if isinstance(node, orm.CalcJobNode):
             res["scheduler_info"] = {
                 "remote_workdir": node.get_remote_workdir(),

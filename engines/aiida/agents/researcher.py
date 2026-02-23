@@ -1,8 +1,8 @@
-from pydantic_ai import Agent, RunContext, ModelRetry
+from pydantic_ai import Agent, RunContext
 from src.sab_core.schema.response import SABRResponse
 from engines.aiida.deps import AiiDADeps
 
-# 1. 严格按照 tools/__init__.py 中的 __all__ 列表导入所有函数
+# 1. Import tools aligned with `tools/__init__.py::__all__`.
 from engines.aiida.tools import (
     list_system_profiles,
     list_local_archives,
@@ -11,7 +11,6 @@ from engines.aiida.tools import (
     list_groups,
     get_unified_source_map,
     get_database_summary,
-    get_recent_processes,
     inspect_group,
     inspect_process,
     fetch_recent_processes,
@@ -24,11 +23,11 @@ from engines.aiida.tools import (
     get_remote_file_content,
     get_node_file_content
 )
-# 导入 node 摘要工具（用于深入查看节点细节）
+# Import node summary helper for detailed node inspection.
 from engines.aiida.tools.base.node import get_node_summary
 
     
-# 2. 设定增强版 System Prompt
+# 2. Define the enhanced system prompt.
 SYSTEM_PROMPT = """
 You are a proactive AiiDA Research Intelligence (SABR v2). 
 Your mission is to provide high-level scientific insights and automate complex data exploration.
@@ -54,7 +53,7 @@ aiida_researcher = Agent(
 )
 
  
-# --- 3. 注册所有工具 (与 tools/__init__.py 一一对应) ---
+# --- 3. Register tools (kept in sync with tools/__init__.py) ---
 
 # --- Profile & System Management ---
 @aiida_researcher.tool
