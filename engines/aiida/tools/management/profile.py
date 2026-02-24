@@ -10,10 +10,31 @@ from aiida.manage.configuration import get_config
 from aiida.manage.manager import get_manager
 from aiida.storage.sqlite_zip.backend import SqliteZipBackend
 from aiida.manage import Profile
+from typing import Any
 
 
 # --- 1. Resource-listing tools (required by the perceptor) ---
 _CURRENT_MOUNTED_ARCHIVE = None
+_NODE_CLASS_MAP: dict[str, type[Node]] = {
+    "ProcessNode": ProcessNode,
+    "WorkChainNode": orm.WorkChainNode,
+    "StructureData": orm.StructureData,
+}
+
+
+def _profile_to_dict(profile: Any, default_name: str | None = None) -> dict[str, Any]:
+    """Convert AiiDA Profile objects to JSON-serializable metadata."""
+    name = getattr(profile, "name", str(profile))
+    storage_backend = getattr(profile, "storage_backend", None)
+    process_control_backend = getattr(profile, "process_control_backend", None)
+    options = getattr(profile, "options", None)
+    return {
+        "name": name,
+        "is_default": bool(default_name and name == default_name),
+        "storage_backend": str(storage_backend) if storage_backend is not None else None,
+        "process_control_backend": str(process_control_backend) if process_control_backend is not None else None,
+        "options": dict(options) if isinstance(options, dict) else {},
+    }
 
 def ensure_environment(target: str):
     """
@@ -46,7 +67,6 @@ def ensure_environment(target: str):
 def get_default_profile() -> Profile:
     config = get_config()
     return config.get_profile(config.default_profile_name)
-    # return load_profile(config.default_profile_name, allow_switch=True)
     
 def list_system_profiles():
     """
@@ -85,9 +105,11 @@ def load_archive_profile(filepath: str):
         from aiida.storage.sqlite_zip.backend import SqliteZipBackend
         archive_profile = SqliteZipBackend.create_profile(filepath = filepath)
         profile = load_profile(archive_profile, allow_switch=True)
-        # Implementation depends on local environment configuration.
-        # For metadata-only checks, `get_archive_info` is usually preferred.
-        return profile
+        return {
+            "status": "loaded",
+            "source": filepath,
+            "profile": _profile_to_dict(profile),
+        }
     except Exception as e:
         raise Warning(f"Error loading archive: {e}")
 
@@ -200,4 +222,106 @@ def get_recent_processes(limit: int = 5):
             'state': state.value if hasattr(state, 'value') else str(state),
             'label': label or 'Unknown Task'
         })
+    return results
+
+
+def _resolve_node_class(node_type: str | None) -> type[Node]:
+    if not node_type or not str(node_type).strip():
+        return Node
+
+    normalized = str(node_type).strip()
+    if normalized in _NODE_CLASS_MAP:
+        return _NODE_CLASS_MAP[normalized]
+
+    for known_name, node_class in _NODE_CLASS_MAP.items():
+        if normalized.lower() == known_name.lower():
+            return node_class
+
+    dynamic_node_class = getattr(orm, normalized, None)
+    if isinstance(dynamic_node_class, type) and issubclass(dynamic_node_class, Node):
+        return dynamic_node_class
+
+    supported = ", ".join(_NODE_CLASS_MAP.keys())
+    raise ValueError(f"Unsupported node_type '{normalized}'. Supported values: {supported}")
+
+
+def list_group_labels(search_string: str | None = None) -> list[str]:
+    """
+    Return sorted AiiDA group labels for UI dropdowns.
+    """
+    qb = QueryBuilder()
+    filters = {"label": {"like": f"%{search_string}%"}} if search_string else {}
+    qb.append(Group, project=["label", "*"], filters=filters)
+
+    labels: list[str] = []
+    for label, group in qb.all():
+        if group.type_string == "core.import":
+            continue
+        labels.append(str(label))
+
+    return sorted(set(labels), key=str.lower)
+
+
+def get_recent_nodes(limit: int = 15, group_label: str | None = None, node_type: str | None = None):
+    """
+    Query recent AiiDA nodes with optional group and class filters.
+    """
+    node_class = _resolve_node_class(node_type)
+    qb = QueryBuilder()
+
+    if group_label and str(group_label).strip():
+        qb.append(Group, filters={"label": str(group_label).strip()}, tag="group")
+        qb.append(node_class, with_group="group", project=["*"], tag="node")
+    else:
+        qb.append(node_class, project=["*"], tag="node")
+
+    qb.order_by({"node": {"ctime": "desc"}})
+    qb.limit(limit)
+
+    def _get_structure_formula(node: orm.StructureData) -> str | None:
+        for method_name in ("get_formula", "get_chemical_formula"):
+            method = getattr(node, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                formula = method()
+            except TypeError:
+                # Some AiiDA versions require explicit mode in formula helpers.
+                formula = method(mode="hill")
+            except Exception:
+                continue
+            if formula:
+                return str(formula)
+        return None
+
+    results: list[dict[str, Any]] = []
+    for (node,) in qb.all():
+        process_state_value: str | None = None
+        if isinstance(node, ProcessNode):
+            process_state = getattr(node, "process_state", None)
+            process_state_value = (
+                process_state.value if hasattr(process_state, "value")
+                else (str(process_state) if process_state else "unknown")
+            )
+
+        formula_value: str | None = None
+        if isinstance(node, orm.StructureData):
+            formula_value = _get_structure_formula(node)
+
+        process_label = getattr(node, "process_label", None)
+        if isinstance(node, orm.StructureData):
+            label = node.label or formula_value or node.__class__.__name__
+        else:
+            label = process_label or node.label or node.__class__.__name__
+
+        results.append(
+            {
+                "pk": int(node.pk),
+                "state": process_state_value or "unknown",
+                "label": str(label),
+                "node_type": str(node.__class__.__name__),
+                "process_state": process_state_value,
+                "formula": formula_value,
+            }
+        )
     return results

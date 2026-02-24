@@ -23,7 +23,7 @@ from src.sab_core.config import settings
 from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event
 
 from .hub import hub
-from .tools import get_recent_processes
+from .tools import get_recent_nodes, get_recent_processes, list_group_labels
 from .ui import fastui as ui
 from .ui.legacy_fastui.fastui import get_aiida_dashboard_layout, get_chat_interface
 
@@ -104,17 +104,22 @@ def _serialize_profiles(profiles_display: list[tuple[str, str, bool]]) -> list[d
 def _serialize_processes(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for process in processes:
-        state = str(process.get("state") or "unknown")
+        process_state_raw = process.get("process_state")
+        state = str(process_state_raw or process.get("state") or "unknown")
         try:
             pk = int(process.get("pk", 0))
         except (TypeError, ValueError):
             pk = 0
+        formula = process.get("formula")
         payload.append(
             {
                 "pk": pk,
                 "label": str(process.get("label") or "Unknown Task"),
                 "state": state,
                 "status_color": _state_to_status_color(state),
+                "node_type": str(process.get("node_type") or "Node"),
+                "process_state": str(process_state_raw) if process_state_raw is not None else None,
+                "formula": str(formula) if formula else None,
             }
         )
     return payload
@@ -149,6 +154,22 @@ def _get_sidebar_state() -> tuple[list, list]:
         logger.error(log_event("aiida.processes.fetch.failed", error=str(e)))
         recent_procs = []
     return hub.get_display_list(), recent_procs
+
+
+def _get_frontend_group_labels() -> list[str]:
+    if not hub.current_profile:
+        hub.start()
+    return list_group_labels()
+
+
+def _get_frontend_nodes(
+    limit: int = 15,
+    group_label: str | None = None,
+    node_type: str | None = None,
+) -> list[dict[str, Any]]:
+    if not hub.current_profile:
+        hub.start()
+    return get_recent_nodes(limit=limit, group_label=group_label, node_type=node_type)
 
 
 def _get_chat_history(state) -> list[dict[str, str]]:
@@ -707,6 +728,23 @@ async def stream_processes(request: Request):
     return EventSourceResponse(event_generator())
 
 
+@router.get("/processes")
+@router.get("/processes/")
+async def list_processes(
+    limit: int = Query(default=15, ge=1, le=100),
+    group_label: str | None = Query(default=None),
+    node_type: str | None = Query(default=None),
+):
+    try:
+        nodes = _get_frontend_nodes(limit=limit, group_label=group_label, node_type=node_type)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+    except Exception as err:
+        logger.exception(log_event("aiida.processes.list.failed", error=str(err)))
+        nodes = []
+    return {"items": _serialize_processes(nodes)}
+
+
 @router.get("/chat/messages/stream")
 @router.get("/chat/messages/stream/")
 async def stream_chat_messages(request: Request):
@@ -797,7 +835,17 @@ async def stream_logs(request: Request):
 async def frontend_bootstrap(request: Request):
     """Initial payload for the React dashboard."""
     state = request.app.state
-    profiles_display, processes = _get_sidebar_state()
+    profiles_display, _recent_processes = _get_sidebar_state()
+    try:
+        processes = _get_frontend_nodes(limit=15)
+    except Exception as err:
+        logger.exception(log_event("aiida.frontend.bootstrap.processes.failed", error=str(err)))
+        processes = []
+    try:
+        groups = _get_frontend_group_labels()
+    except Exception as err:
+        logger.exception(log_event("aiida.frontend.bootstrap.groups.failed", error=str(err)))
+        groups = []
     available_models = _get_available_models(state)
     selected_model = _get_selected_model(state, available_models)
     log_version, log_lines = get_log_buffer_snapshot(limit=240)
@@ -807,6 +855,7 @@ async def frontend_bootstrap(request: Request):
         "profiles": _serialize_profiles(profiles_display),
         "current_profile": hub.current_profile,
         "processes": _serialize_processes(processes),
+        "groups": groups,
         "chat": {
             "messages": chat_history,
             "version": int(getattr(state, "chat_version", 0)),
@@ -828,6 +877,16 @@ async def frontend_profiles():
         "current_profile": hub.current_profile,
         "profiles": _serialize_profiles(profiles_display),
     }
+
+
+@router.get("/frontend/groups")
+async def frontend_groups():
+    try:
+        items = _get_frontend_group_labels()
+    except Exception as err:
+        logger.exception(log_event("aiida.frontend.groups.failed", error=str(err)))
+        items = []
+    return {"items": items}
 
 
 @router.post("/frontend/profiles/switch")
@@ -871,11 +930,15 @@ async def frontend_upload_archive(file: UploadFile = File(...)):
 
 
 @router.get("/frontend/processes")
-async def frontend_processes(limit: int = Query(default=15, ge=1, le=100)):
-    if not hub.current_profile:
-        hub.start()
+async def frontend_processes(
+    limit: int = Query(default=15, ge=1, le=100),
+    group_label: str | None = Query(default=None),
+    node_type: str | None = Query(default=None),
+):
     try:
-        processes = get_recent_processes(limit=limit)
+        processes = _get_frontend_nodes(limit=limit, group_label=group_label, node_type=node_type)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
     except Exception as err:
         logger.exception(log_event("aiida.frontend.processes.failed", error=str(err)))
         processes = []
@@ -883,7 +946,17 @@ async def frontend_processes(limit: int = Query(default=15, ge=1, le=100)):
 
 
 @router.get("/frontend/processes/stream")
-async def frontend_processes_stream(request: Request, limit: int = Query(default=15, ge=1, le=100)):
+async def frontend_processes_stream(
+    request: Request,
+    limit: int = Query(default=15, ge=1, le=100),
+    group_label: str | None = Query(default=None),
+    node_type: str | None = Query(default=None),
+):
+    try:
+        _get_frontend_nodes(limit=1, group_label=group_label, node_type=node_type)
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err)) from err
+
     async def event_generator():
         stream_id = id(request)
         last_digest = ""
@@ -895,7 +968,9 @@ async def frontend_processes_stream(request: Request, limit: int = Query(default
                 break
 
             try:
-                processes = _serialize_processes(get_recent_processes(limit=limit))
+                processes = _serialize_processes(
+                    _get_frontend_nodes(limit=limit, group_label=group_label, node_type=node_type)
+                )
                 digest = hashlib.sha1(json.dumps(processes, sort_keys=True).encode("utf-8")).hexdigest()
                 now = time.monotonic()
                 should_push = (digest != last_digest) or ((now - heartbeat_ts) >= 15)

@@ -10,6 +10,9 @@ export type ProcessItem = {
   label: string;
   state: string;
   status_color: "running" | "success" | "error" | "idle" | string;
+  node_type: string;
+  process_state: string | null;
+  formula: string | null;
 };
 
 export type ChatMessage = {
@@ -33,6 +36,7 @@ export type BootstrapResponse = {
   profiles: ProfileItem[];
   current_profile: string | null;
   processes: ProcessItem[];
+  groups: string[];
   chat: ChatSnapshot;
   logs: LogsSnapshot;
   models: string[];
@@ -42,6 +46,10 @@ export type BootstrapResponse = {
 
 export type ProcessesResponse = {
   items: ProcessItem[];
+};
+
+export type GroupsResponse = {
+  items: string[];
 };
 
 export type ProfilesResponse = {

@@ -3,6 +3,7 @@ import axios from "axios";
 import type {
   BootstrapResponse,
   ChatResponse,
+  GroupsResponse,
   LogsResponse,
   ProcessesResponse,
   ProfilesResponse,
@@ -47,10 +48,19 @@ export async function uploadArchive(file: File): Promise<UploadArchiveResponse> 
   return data;
 }
 
-export async function getProcesses(limit = 15): Promise<ProcessesResponse> {
+export async function getProcesses(
+  limit = 15,
+  groupLabel?: string,
+  nodeType?: string,
+): Promise<ProcessesResponse> {
   const { data } = await frontendApi.get<ProcessesResponse>("/processes", {
-    params: { limit },
+    params: { limit, group_label: groupLabel, node_type: nodeType },
   });
+  return data;
+}
+
+export async function getGroups(): Promise<GroupsResponse> {
+  const { data } = await frontendApi.get<GroupsResponse>("/groups");
   return data;
 }
 

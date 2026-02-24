@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   getBootstrap,
   getChatMessages,
+  getGroups,
   getLogs,
   getProcesses,
   getProfiles,
@@ -26,6 +27,10 @@ export default function App() {
   const queryClient = useQueryClient();
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
   const [selectedModel, setSelectedModel] = useState("");
+  const [selectedGroup, setSelectedGroup] = useState("");
+  const [selectedType, setSelectedType] = useState("");
+  const [processLimit, setProcessLimit] = useState(15);
+  const [pendingProcessLimit, setPendingProcessLimit] = useState<number | null>(null);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
@@ -46,10 +51,17 @@ export default function App() {
   });
 
   const processesQuery = useQuery({
-    queryKey: ["processes"],
-    queryFn: () => getProcesses(15),
+    queryKey: ["processes", selectedGroup, selectedType, processLimit],
+    queryFn: () => getProcesses(processLimit, selectedGroup || undefined, selectedType || undefined),
     enabled: bootstrapQuery.isSuccess,
     refetchInterval: 3_000,
+  });
+
+  const groupsQuery = useQuery({
+    queryKey: ["groups"],
+    queryFn: getGroups,
+    enabled: bootstrapQuery.isSuccess,
+    refetchInterval: 20_000,
   });
 
   const logsQuery = useQuery({
@@ -81,6 +93,7 @@ export default function App() {
     onSuccess: (data) => {
       queryClient.setQueryData(["profiles"], data);
       queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
       queryClient.invalidateQueries({ queryKey: ["chat"] });
     },
   });
@@ -89,6 +102,8 @@ export default function App() {
     mutationFn: uploadArchive,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["profiles"] });
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
     },
   });
 
@@ -109,12 +124,32 @@ export default function App() {
       : undefined);
 
   const processes = processesQuery.data?.items ?? bootstrapQuery.data?.processes ?? [];
+  const groups = groupsQuery.data?.items ?? bootstrapQuery.data?.groups ?? [];
   const logs = logsQuery.data?.lines ?? bootstrapQuery.data?.logs.lines ?? [];
   const chatMessages = chatQuery.data?.messages ?? bootstrapQuery.data?.chat.messages ?? [];
   const models = bootstrapQuery.data?.models ?? [];
   const quickPrompts = bootstrapQuery.data?.quick_prompts ?? [];
 
   const isReady = bootstrapQuery.isSuccess;
+
+  useEffect(() => {
+    if (!selectedGroup) {
+      return;
+    }
+    if (!groups.includes(selectedGroup)) {
+      setSelectedGroup("");
+    }
+  }, [groups, selectedGroup]);
+
+  useEffect(() => {
+    if (pendingProcessLimit === null) {
+      return;
+    }
+    if (!processesQuery.isFetching && !processesQuery.isPending) {
+      setPendingProcessLimit(null);
+    }
+  }, [pendingProcessLimit, processesQuery.isFetching, processesQuery.isPending]);
+
   const loadingMessage = useMemo(() => {
     if (bootstrapQuery.isLoading) {
       return "Initializing dashboard...";
@@ -132,10 +167,24 @@ export default function App() {
           profiles={profileData?.profiles ?? []}
           currentProfile={profileData?.current_profile ?? null}
           processes={processes}
+          groupOptions={groups}
+          selectedGroup={selectedGroup}
+          selectedType={selectedType}
+          processLimit={processLimit}
+          isUpdatingProcessLimit={pendingProcessLimit !== null}
           isSwitchingProfile={switchMutation.isPending}
           isUploadingArchive={uploadMutation.isPending}
           isDarkMode={theme === "dark"}
           onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
+          onGroupChange={setSelectedGroup}
+          onTypeChange={setSelectedType}
+          onProcessLimitChange={(nextLimit) => {
+            if (nextLimit === processLimit) {
+              return;
+            }
+            setProcessLimit(nextLimit);
+            setPendingProcessLimit(nextLimit);
+          }}
           onSwitchProfile={(profileName) => {
             if (switchMutation.isPending || profileName === profileData?.current_profile) {
               return;

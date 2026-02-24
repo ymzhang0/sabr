@@ -8,7 +8,9 @@ from .management.profile import (
     list_groups, 
     get_unified_source_map,
     get_database_summary,
-    get_recent_processes
+    get_recent_processes,
+    list_group_labels,
+    get_recent_nodes,
     )
 from .management.group import inspect_group
 from .process.process import inspect_process, fetch_recent_processes
@@ -29,6 +31,8 @@ __all__ = [
     "get_unified_source_map",
     "get_database_summary",
     "get_recent_processes",
+    "list_group_labels",
+    "get_recent_nodes",
     "inspect_group",
     "inspect_process",
     "fetch_recent_processes",
