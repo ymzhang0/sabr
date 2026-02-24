@@ -18,6 +18,7 @@ from .tools import get_recent_processes
 from sse_starlette.sse import EventSourceResponse
 import asyncio
 import time
+import hashlib
 from contextlib import suppress
 from typing import Any
 
@@ -189,14 +190,6 @@ def _update_assistant_message(state, turn_id: int, text: str, status: str = "thi
             msg["text"] = text
             msg["status"] = status
             _touch_chat(state)
-            logger.debug(
-                log_event(
-                    "aiida.chat_turn.message_update",
-                    turn_id=turn_id,
-                    status=status,
-                    chars=len(text),
-                )
-            )
             return
     logger.warning(log_event("aiida.chat_turn.message_update_missed", turn_id=turn_id, status=status))
 
@@ -416,6 +409,18 @@ def _first_value(value: Any) -> Any:
     return value
 
 
+def _debounce_request(state, key: str, window_seconds: float = 0.5) -> bool:
+    """Return True when the same action fires too frequently."""
+    now = time.monotonic()
+    cache = getattr(state, "request_debounce_cache", None)
+    if cache is None:
+        cache = {}
+        state.request_debounce_cache = cache
+    last_ts = float(cache.get(key, 0.0))
+    cache[key] = now
+    return (now - last_ts) < window_seconds
+
+
 def _history_digest(history: list[dict[str, Any]], tail: int = 6) -> str:
     if not history:
         return "empty"
@@ -485,6 +490,13 @@ def _history_ui_group_debug(history: list[dict[str, Any]]) -> str:
     return f"ui={','.join(parts) or '-'} | groups={len(grouped)}"
 
 
+def _profiles_digest(profiles_display: list[tuple[str, str, bool]]) -> str:
+    if not profiles_display:
+        return "empty"
+    raw = "|".join(f"{name}:{display}:{int(active)}" for name, display, active in profiles_display)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
 async def _parse_chat_payload(request: Request) -> tuple[str, str | None, str | None]:
     """
     Parse FastUI form payload safely to avoid 422 caused by strict model parsing.
@@ -517,7 +529,53 @@ async def _parse_chat_payload(request: Request) -> tuple[str, str | None, str | 
     )
     return intent, (str(model_name) if model_name else None), (str(context_archive) if context_archive else None)
 
+
+@router.get("/profiles/stream")
+@router.get("/profiles/stream/")
+async def stream_profiles(request: Request):
+    """SSE endpoint for profile/archive list updates."""
+
+    async def event_generator():
+        stream_id = id(request)
+        last_digest = ""
+        heartbeat_ts = time.monotonic()
+        logger.info(log_event("aiida.profile_stream.connected", stream_id=stream_id))
+        while True:
+            if await request.is_disconnected():
+                logger.info(log_event("aiida.profile_stream.disconnected", stream_id=stream_id))
+                break
+            try:
+                profiles_display, _ = _get_sidebar_state()
+                digest = _profiles_digest(profiles_display)
+                now = time.monotonic()
+                should_push = (digest != last_digest) or ((now - heartbeat_ts) >= 15)
+                if should_push:
+                    yield {"data": FastUI(root=ui.get_profile_panel(profiles_display)).model_dump_json()}
+                    last_digest = digest
+                    heartbeat_ts = now
+                    logger.debug(
+                        log_event(
+                            "aiida.profile_stream.push",
+                            stream_id=stream_id,
+                            profiles=len(profiles_display),
+                        )
+                    )
+            except Exception as err:
+                logger.exception(
+                    log_event("aiida.profile_stream.failed", stream_id=stream_id, error=str(err))
+                )
+                yield {
+                    "data": FastUI(
+                        root=[c.Div(class_name="text-muted small", components=[c.Text(text="Profile stream unavailable.")])]
+                    ).model_dump_json()
+                }
+            await asyncio.sleep(0.75)
+
+    return EventSourceResponse(event_generator())
+
+
 @router.get("/processes/stream")
+@router.get("/processes/stream/")
 async def stream_processes(request: Request):
     """
     SSE endpoint that pushes latest process status every 3 seconds.
@@ -567,6 +625,7 @@ async def stream_processes(request: Request):
 
 
 @router.get("/chat/messages/stream")
+@router.get("/chat/messages/stream/")
 async def stream_chat_messages(request: Request):
     """
     SSE endpoint to live-update chat messages (including thinking states).
@@ -597,9 +656,6 @@ async def stream_chat_messages(request: Request):
                             stream_id=stream_id,
                             version=version,
                             messages=len(history),
-                            digest=_history_digest(history),
-                            layout=_history_layout_debug(history),
-                            ui_groups=_history_ui_group_debug(history),
                         )
                     )
                     last_version = version
@@ -619,6 +675,7 @@ async def stream_chat_messages(request: Request):
 
 
 @router.get("/logs/stream")
+@router.get("/logs/stream/")
 async def stream_logs(request: Request):
     """SSE endpoint to stream recent backend logs into sidebar console."""
 
@@ -656,6 +713,10 @@ async def stream_logs(request: Request):
 @router.get("/", response_model=FastUI, response_model_exclude_none=True)
 async def aiida_ui_root(request: Request) -> FastUI:
     state = request.app.state
+    # Treat engine root as "home": show clean welcome state.
+    state.chat_history = []
+    _touch_chat(state)
+    logger.info(log_event("aiida.chat_history.reset_on_home"))
     return _render_chat_page(state)
  
 
@@ -719,7 +780,10 @@ async def quick_chat_prompt(request: Request, shortcut_id: int) -> FastUI:
             model=selected_model,
         )
     )
-    _start_chat_turn(
+    if _debounce_request(state, key=f"quick:{shortcut_id}", window_seconds=5.0):
+        logger.warning(log_event("aiida.quick_chat.debounced", shortcut_id=shortcut_id))
+        return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
+    turn_id = _start_chat_turn(
         state,
         user_intent=prompt,
         selected_model=selected_model,
@@ -727,6 +791,7 @@ async def quick_chat_prompt(request: Request, shortcut_id: int) -> FastUI:
         source=f"quick:{shortcut_id}",
     )
     logger.info(log_event("aiida.quick_chat.queued", shortcut_id=shortcut_id))
+    logger.debug(log_event("aiida.quick_chat.turn_created", shortcut_id=shortcut_id, turn_id=turn_id))
     return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
 
 # 3. Agent execution endpoint and response rendering.
@@ -753,9 +818,14 @@ async def aiida_chat_handler(request: Request):
     )
 
     if not user_intent:
-        return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
+        return _render_chat_page(state)
 
-    _start_chat_turn(
+    dedupe_key = f"form:{selected_model}:{context_archive or '-'}:{user_intent.strip().lower()}"
+    if _debounce_request(state, key=dedupe_key, window_seconds=0.8):
+        logger.warning(log_event("aiida.chat_handler.debounced", model=selected_model))
+        return _render_chat_page(state)
+
+    turn_id = _start_chat_turn(
         state,
         user_intent=user_intent,
         selected_model=selected_model,
@@ -763,4 +833,5 @@ async def aiida_chat_handler(request: Request):
         source="form",
     )
     logger.info(log_event("aiida.chat_handler.queued"))
-    return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
+    logger.debug(log_event("aiida.chat_handler.turn_created", turn_id=turn_id))
+    return _render_chat_page(state)

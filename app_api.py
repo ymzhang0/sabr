@@ -5,10 +5,11 @@ from contextlib import asynccontextmanager
 
 from loguru import logger
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
-from src.sab_core.logging_utils import log_event, setup_logging
+from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event, setup_logging
 
 # 1. Load environment variables at the very beginning (Proxy, API Keys)
 load_dotenv()
@@ -19,7 +20,7 @@ from src.sab_core.config import settings
 from src.sab_core.memory.json_memory import JSONMemory
 
 from fastui import prebuilt_html
-from fastapi.responses import HTMLResponse
+from html import escape
 
 FASTUI_INLINE_CSS = """
 <style>
@@ -124,6 +125,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # ============================================================
 # 🚩 Engine-Specific Route Mounting
 # ============================================================
@@ -150,6 +152,122 @@ def mount_engine(app: FastAPI, engine_name: str):
         logger.exception(log_event("engine.registry.failed", engine=engine_name, error=str(e)))
 
 mount_engine(app, "aiida")
+
+
+def _load_aiida_api_module():
+    """Lazy-load AiiDA API module to avoid import-order coupling during startup."""
+    return importlib.import_module("engines.aiida.api")
+
+
+# Compatibility routes for stream endpoints.
+# Some FastUI clients resolve ServerLoad paths against the browser URL,
+# while others resolve against APIRoot; expose both path styles.
+@app.get("/aiida/processes/stream")
+@app.get("/aiida/processes/stream/")
+async def aiida_processes_stream_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/aiida/processes/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_processes(request)
+
+
+@app.get("/aiida/profiles/stream")
+@app.get("/aiida/profiles/stream/")
+async def aiida_profiles_stream_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/aiida/profiles/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_profiles(request)
+
+
+@app.get("/api/api/aiida/processes/stream")
+@app.get("/api/api/aiida/processes/stream/")
+async def aiida_processes_stream_double_api_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/processes/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_processes(request)
+
+
+@app.get("/api/api/aiida/profiles/stream")
+@app.get("/api/api/aiida/profiles/stream/")
+async def aiida_profiles_stream_double_api_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/profiles/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_profiles(request)
+
+
+@app.get("/aiida/logs/stream")
+@app.get("/aiida/logs/stream/")
+async def aiida_logs_stream_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/aiida/logs/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_logs(request)
+
+
+@app.get("/api/api/aiida/logs/stream")
+@app.get("/api/api/aiida/logs/stream/")
+async def aiida_logs_stream_double_api_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/logs/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_logs(request)
+
+
+@app.get("/aiida/chat/messages/stream")
+@app.get("/aiida/chat/messages/stream/")
+async def aiida_chat_stream_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/aiida/chat/messages/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_chat_messages(request)
+
+
+@app.get("/aiida/logs/copy", response_class=HTMLResponse)
+async def aiida_logs_copy_page():
+    """Open a tiny helper page and copy latest runtime logs to clipboard."""
+    _, lines = get_log_buffer_snapshot(limit=240)
+    payload = "\n".join(lines[-120:]) if lines else "No logs yet."
+    safe_payload = escape(payload)
+    html = f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Copy Logs</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 24px; }}
+    textarea {{ width: 100%; height: 280px; }}
+    .muted {{ color: #666; font-size: 13px; }}
+  </style>
+</head>
+<body>
+  <p class="muted">Copying runtime logs… If browser blocks clipboard, use the textarea below.</p>
+  <textarea id="logs">{safe_payload}</textarea>
+  <script>
+    const text = document.getElementById('logs').value;
+    const done = () => {{ document.querySelector('.muted').textContent = 'Logs copied to clipboard.'; }};
+    const fail = () => {{ document.querySelector('.muted').textContent = 'Clipboard blocked. Press Cmd/Ctrl+C to copy.'; }};
+    (async () => {{
+      try {{
+        await navigator.clipboard.writeText(text);
+        done();
+      }} catch (e) {{
+        fail();
+      }}
+      const ta = document.getElementById('logs');
+      ta.focus();
+      ta.select();
+    }})();
+  </script>
+</body>
+</html>
+"""
+    return HTMLResponse(html)
+
+
+@app.get("/api/api/aiida/chat/messages/stream")
+@app.get("/api/api/aiida/chat/messages/stream/")
+async def aiida_chat_stream_double_api_compat(request: Request):
+    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/chat/messages/stream"))
+    aiida_api = _load_aiida_api_module()
+    return await aiida_api.stream_chat_messages(request)
 
 # ============================================================
 # 🛣️ Core Agent Endpoint (The Cyclic Hub)
@@ -192,10 +310,24 @@ if __name__ == "__main__":
             log_level=str(args.log_level).upper(),
         )
     )
+    reload_excludes: list[str] = []
+    if args.reload:
+        memory_dir = str(settings.SABR_MEMORY_DIR or "").strip()
+        if memory_dir:
+            cleaned = memory_dir.rstrip("/").rstrip("\\")
+            reload_excludes.extend([cleaned, f"{cleaned}/*"])
+        # Common local memory folders used in this repo.
+        reload_excludes.extend([
+            "engines/aiida/data/memories",
+            "engines/aiida/data/memories/*",
+            "default",
+            "default/*",
+        ])
     uvicorn.run(
         "app_api:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
+        reload_excludes=reload_excludes or None,
         log_config=None,
     )

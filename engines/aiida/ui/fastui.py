@@ -9,6 +9,7 @@ SIDEBAR_SHELL = "col-md-3 vh-100 p-3 p-lg-4 d-flex flex-column overflow-auto bor
 MAIN_SHELL = "col-md-9 vh-100 p-0 bg-white"
 PANEL_BORDER = "border border-dark border-opacity-10 rounded-4 bg-white"
 AIIDA_ICON_URL = "https://aiida.readthedocs.io/projects/aiida-core/en/stable/_images/aiida-icon.svg"
+STREAM_INIT_EVENT = "aiida-stream-init"
 
 def get_process_panel(processes: list) -> list:
     """Render the latest process list."""
@@ -65,7 +66,13 @@ def get_log_panel(lines: list[str]) -> list[AnyComponent]:
                 ],
             )
         ]
-    safe_lines = [str(line) for line in lines[-36:]]
+    max_line_chars = 220
+    safe_lines = []
+    for raw in lines[-36:]:
+        line = str(raw).replace("\n", " ")
+        if len(line) > max_line_chars:
+            line = line[:max_line_chars] + "..."
+        safe_lines.append(line)
     line_components: list[AnyComponent] = [
         c.Div(class_name="sabr-log-line", components=[c.Text(text=line)]) for line in safe_lines
     ]
@@ -78,6 +85,55 @@ def get_log_panel(lines: list[str]) -> list[AnyComponent]:
             components=line_components,
         )
     ]
+
+
+def get_profile_panel(profiles_display: list[tuple[str, str, bool]]) -> list[AnyComponent]:
+    """Render profile/archive entries as an independently refreshable panel."""
+    panel: list[AnyComponent] = [
+        c.Div(
+            class_name="d-flex justify-content-between align-items-center mb-3 mt-1 px-2",
+            components=[
+                c.Div(
+                    class_name="text-dark fw-semibold opacity-50 small",
+                    components=[c.Text(text="PROFILE")],
+                ),
+                c.Link(
+                    components=[c.Text(text="📂")],
+                    on_click=e.GoToEvent(url='/aiida/archives/browse-local'),
+                    class_name="btn btn-sm rounded-3 p-1 border border-dark border-opacity-10 shadow-none text-dark",
+                ),
+            ],
+        )
+    ]
+
+    for profile_name, display_name, is_active in profiles_display:
+        dot_color = "bg-success" if is_active else "bg-secondary opacity-25"
+        panel.append(
+            c.Link(
+                components=[
+                    c.Div(
+                        class_name=(
+                            "py-2 px-3 mb-2 rounded-3 d-flex align-items-center gap-2 border border-dark border-opacity-10 "
+                            f"{'bg-body-tertiary' if is_active else 'bg-white'}"
+                        ),
+                        components=[
+                            c.Div(
+                                class_name=f"rounded-circle {dot_color} p-1 d-inline-block",
+                                components=[],
+                            ),
+                            c.Div(
+                                class_name=f"small {'fw-semibold text-black' if is_active else 'text-dark'}",
+                                components=[c.Text(text=display_name)],
+                            ),
+                        ],
+                    )
+                ],
+                on_click=e.GoToEvent(url=f'/aiida/profiles/switch/{profile_name}'),
+                class_name="text-decoration-none",
+            )
+        )
+    return panel
+
 
 def get_aiida_sidebar(
     profiles_display: list = None,
@@ -100,57 +156,15 @@ def get_aiida_sidebar(
         ])
     )
 
-    # --- Header: Profile + Icon Button ---
     sidebar_content.append(
-        c.Div(
-            class_name="d-flex justify-content-between align-items-center mb-3 mt-1 px-2",
-            components=[
-                c.Div(
-                    class_name="text-dark fw-semibold opacity-50 small",
-                    components=[c.Text(text="PROFILE")]
-                ),
-                # Icon-only import button.
-                c.Link(
-                    components=[c.Text(text="📂")],
-                    on_click=e.GoToEvent(url='/aiida/archives/browse-local'),
-                    class_name="btn btn-sm rounded-3 p-1 border border-dark border-opacity-10 shadow-none text-dark",
-                )
-            ]
+        c.ServerLoad(
+            path='/aiida/profiles/stream',
+            load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
+            sse=True,
+            sse_retry=3000,
+            components=get_profile_panel(profiles_display),
         )
     )
-    # --- Render profile list (configured + imported) ---
-    for profile_name, display_name, is_active in profiles_display:
-        # Indicator color: green (active) vs gray (inactive).
-        dot_color = "bg-success" if is_active else "bg-secondary opacity-25"
-        
-
-        sidebar_content.append(
-            c.Link(
-                components=[
-                    c.Div(
-                        # Darken background for active entries.
-                        class_name=(
-                            "py-2 px-3 mb-2 rounded-3 d-flex align-items-center gap-2 border border-dark border-opacity-10 "
-                            f"{'bg-body-tertiary' if is_active  else 'bg-white'}"
-                        ),
-                        components=[
-                            c.Div(
-                                # Use compact padding and rounded-circle to render a dot.
-                                class_name=f"rounded-circle {dot_color} p-1 d-inline-block",
-                                components=[]  # Required; Pydantic expects a list.
-                            ),
-                            # Display label.
-                            c.Div(
-                                class_name=f"small {'fw-semibold text-black' if is_active else 'text-dark'}",
-                                components=[c.Text(text=display_name)]
-                            )
-                        ]
-                    )
-                ],
-                on_click=e.GoToEvent(url=f'/aiida/profiles/switch/{profile_name}'),
-                class_name="text-decoration-none"
-            )
-        )
     # Insert live process panel area.
     sidebar_content.append(
         c.Div(class_name=f"mt-4 px-2 py-3 {PANEL_BORDER}", components=[
@@ -160,6 +174,7 @@ def get_aiida_sidebar(
             ),
             c.ServerLoad(
                 path='/aiida/processes/stream',
+                load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
                 sse=True,
                 sse_retry=3000,
                 components=get_process_panel(processes)
@@ -171,11 +186,22 @@ def get_aiida_sidebar(
             class_name=f"mt-3 px-2 py-3 {PANEL_BORDER}",
             components=[
                 c.Div(
-                    class_name="text-dark fw-semibold opacity-75 small uppercase mb-2",
-                    components=[c.Text(text="Runtime Logs")],
+                    class_name="d-flex align-items-center justify-content-between mb-2",
+                    components=[
+                        c.Div(
+                            class_name="text-dark fw-semibold opacity-75 small uppercase",
+                            components=[c.Text(text="Runtime Logs")],
+                        ),
+                        c.Link(
+                            components=[c.Text(text="Copy")],
+                            on_click=e.GoToEvent(url='/aiida/logs/copy', target='_blank'),
+                            class_name="small text-decoration-none text-secondary",
+                        ),
+                    ],
                 ),
                 c.ServerLoad(
                     path="/aiida/logs/stream",
+                    load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
                     sse=True,
                     sse_retry=1200,
                     components=get_log_panel(log_lines),
@@ -194,6 +220,7 @@ def get_aiida_dashboard_layout(
     Claude-inspired layout: ivory-gray background with white rounded cards.
     """
     return FastUI([
+        c.FireEvent(event=e.PageEvent(name=STREAM_INIT_EVENT)),
         c.PageTitle(text="SABR | Claude Style"),
         c.Div(
             # `bg-body-tertiary` gives a neutral warm gray between `light` and `secondary`.
@@ -410,6 +437,7 @@ def get_chat_interface(
                                 c.Div(class_name="mx-auto h-100", components=[
                                     c.ServerLoad(
                                         path="/aiida/chat/messages/stream",
+                                        load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
                                         sse=True,
                                         sse_retry=1200,
                                         components=get_chat_messages_panel(chat_history),
@@ -428,8 +456,8 @@ def get_chat_interface(
                                 c.Div(
                                     class_name="d-flex flex-wrap gap-2 mb-2",
                                     components=[
-                                        c.Button(
-                                            text=item["label"],
+                                        c.Link(
+                                            components=[c.Text(text=item["label"])],
                                             on_click=e.GoToEvent(url=item["url"]),
                                             class_name="btn btn-sm btn-light border border-dark border-opacity-10 rounded-pill px-3",
                                         )
