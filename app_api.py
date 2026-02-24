@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import importlib
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from loguru import logger
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event, setup_logging
 
@@ -118,9 +121,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+STATIC_DIR = Path(__file__).resolve().parent / "engines" / "aiida" / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+def _get_cors_origins() -> list[str]:
+    raw = settings.SABR_FRONTEND_ORIGINS or ""
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    return values or ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_get_cors_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -285,7 +299,6 @@ async def fastui_frontend(_path: str = "") -> HTMLResponse:
 # ============================================================
 if __name__ == "__main__":
     import argparse
-    import os
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Run SABR API server.")

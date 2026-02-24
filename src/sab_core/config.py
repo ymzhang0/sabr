@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     # 📡 Network Configuration (If you need a proxy)
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")
     HTTP_PROXY: str = os.getenv("HTTP_PROXY", "")
+    SABR_FRONTEND_ORIGINS: str = os.getenv(
+        "SABR_FRONTEND_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    )
 
     # Tell pydantic to look for these in the .env file
     model_config = SettingsConfigDict(

@@ -1,8 +1,8 @@
 from nicegui import ui, app
 
 # Import SABR v2 logic and UI components
-from engines.aiida.ui.layout import create_aiida_layout
-from engines.aiida.ui.controller import RemoteAiiDAController
+from engines.aiida.ui.legacy_nicegui.layout import create_aiida_layout
+from engines.aiida.ui.legacy_nicegui.controller import RemoteAiiDAController
 from src.sab_core.memory.json_memory import JSONMemory
 
 # --- 1. Global Configuration ---

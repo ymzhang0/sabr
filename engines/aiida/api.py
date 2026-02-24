@@ -1,26 +1,31 @@
 # engines/aiida/api.py
-from fastapi import APIRouter, Request
+import asyncio
+import hashlib
+import json
+import tempfile
+import time
+from contextlib import suppress
+from pathlib import Path
+from typing import Any
+
+import tkinter as tk
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastui import FastUI
 from fastui import components as c
 from fastui import events as e
-from .ui.fastui import get_aiida_dashboard_layout, get_chat_interface
-from src.sab_core.config import settings
-from .ui import fastui as ui
-from loguru import logger
 from google import genai
+from loguru import logger
+from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
+from tkinter import filedialog
+
+from src.sab_core.config import settings
 from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event
 
-import tkinter as tk
-from tkinter import filedialog
 from .hub import hub
-from pathlib import Path
 from .tools import get_recent_processes
-from sse_starlette.sse import EventSourceResponse
-import asyncio
-import time
-import hashlib
-from contextlib import suppress
-from typing import Any
+from .ui import fastui as ui
+from .ui.legacy_fastui.fastui import get_aiida_dashboard_layout, get_chat_interface
 
 def ask_for_folder_path():
     """
@@ -54,6 +59,84 @@ QUICK_PROMPTS: list[tuple[str, str]] = [
     ("List Groups", "list all groups in current profile"),
     ("DB Summary", "show database summary"),
 ]
+ARCHIVE_EXTENSIONS = {".aiida", ".zip"}
+
+
+class FrontendChatRequest(BaseModel):
+    intent: str = Field(..., min_length=1, max_length=12000)
+    model_name: str | None = None
+    context_archive: str | None = None
+
+
+class FrontendSwitchProfileRequest(BaseModel):
+    profile_name: str = Field(..., min_length=1)
+
+
+def _normalize_process_state(state: str | None) -> str:
+    return str(state or "unknown").strip().lower()
+
+
+def _state_to_status_color(state: str | None) -> str:
+    normalized = _normalize_process_state(state)
+    if normalized in {"running", "created", "waiting"}:
+        return "running"
+    if normalized in {"finished", "completed"}:
+        return "success"
+    if normalized in {"failed", "excepted", "killed"}:
+        return "error"
+    return "idle"
+
+
+def _serialize_profiles(profiles_display: list[tuple[str, str, bool]]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for name, display_name, is_active in profiles_display:
+        items.append(
+            {
+                "name": str(name),
+                "display_name": str(display_name),
+                "is_active": bool(is_active),
+                "type": "imported" if str(display_name).endswith("(imported)") else "configured",
+            }
+        )
+    return items
+
+
+def _serialize_processes(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for process in processes:
+        state = str(process.get("state") or "unknown")
+        try:
+            pk = int(process.get("pk", 0))
+        except (TypeError, ValueError):
+            pk = 0
+        payload.append(
+            {
+                "pk": pk,
+                "label": str(process.get("label") or "Unknown Task"),
+                "state": state,
+                "status_color": _state_to_status_color(state),
+            }
+        )
+    return payload
+
+
+def _serialize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for message in history:
+        payload.append(
+            {
+                "role": str(message.get("role", "assistant")),
+                "text": str(message.get("text", "")),
+                "status": str(message.get("status", "done")),
+                "turn_id": int(message.get("turn_id") or 0),
+            }
+        )
+    return payload
+
+
+def _sanitize_upload_name(filename: str) -> str:
+    safe = Path(filename).name.replace(" ", "_")
+    return "".join(ch for ch in safe if ch.isalnum() or ch in {"-", "_", "."}) or "archive.aiida"
 
 
 def _get_sidebar_state() -> tuple[list, list]:
@@ -708,7 +791,243 @@ async def stream_logs(request: Request):
             await asyncio.sleep(0.5)
 
     return EventSourceResponse(event_generator())
-      
+
+
+@router.get("/frontend/bootstrap")
+async def frontend_bootstrap(request: Request):
+    """Initial payload for the React dashboard."""
+    state = request.app.state
+    profiles_display, processes = _get_sidebar_state()
+    available_models = _get_available_models(state)
+    selected_model = _get_selected_model(state, available_models)
+    log_version, log_lines = get_log_buffer_snapshot(limit=240)
+    chat_history = _serialize_chat_history(_get_chat_history(state))
+
+    return {
+        "profiles": _serialize_profiles(profiles_display),
+        "current_profile": hub.current_profile,
+        "processes": _serialize_processes(processes),
+        "chat": {
+            "messages": chat_history,
+            "version": int(getattr(state, "chat_version", 0)),
+        },
+        "logs": {
+            "version": log_version,
+            "lines": log_lines[-160:],
+        },
+        "models": available_models,
+        "selected_model": selected_model,
+        "quick_prompts": [{"label": label, "prompt": prompt} for label, prompt in QUICK_PROMPTS],
+    }
+
+
+@router.get("/frontend/profiles")
+async def frontend_profiles():
+    profiles_display, _ = _get_sidebar_state()
+    return {
+        "current_profile": hub.current_profile,
+        "profiles": _serialize_profiles(profiles_display),
+    }
+
+
+@router.post("/frontend/profiles/switch")
+async def frontend_switch_profile(payload: FrontendSwitchProfileRequest):
+    profiles_display, _ = _get_sidebar_state()
+    profile_names = {name for name, _display_name, _active in profiles_display}
+    if payload.profile_name not in profile_names:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    hub.switch_profile(payload.profile_name)
+    profiles_display, _ = _get_sidebar_state()
+    return {
+        "current_profile": hub.current_profile,
+        "profiles": _serialize_profiles(profiles_display),
+    }
+
+
+@router.post("/frontend/archives/upload")
+async def frontend_upload_archive(file: UploadFile = File(...)):
+    filename = file.filename or "archive.aiida"
+    extension = Path(filename).suffix.lower()
+    if extension not in ARCHIVE_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported archive format")
+
+    upload_root = Path(tempfile.gettempdir()) / "sabr-aiida-uploads"
+    upload_root.mkdir(parents=True, exist_ok=True)
+    target_name = f"{int(time.time() * 1000)}-{_sanitize_upload_name(filename)}"
+    target_path = upload_root / target_name
+    payload = await file.read()
+    target_path.write_bytes(payload)
+    await file.close()
+
+    profile_name = hub.import_archive(target_path)
+    profiles_display, _ = _get_sidebar_state()
+    return {
+        "status": "uploaded",
+        "profile_name": profile_name,
+        "stored_path": str(target_path),
+        "profiles": _serialize_profiles(profiles_display),
+    }
+
+
+@router.get("/frontend/processes")
+async def frontend_processes(limit: int = Query(default=15, ge=1, le=100)):
+    if not hub.current_profile:
+        hub.start()
+    try:
+        processes = get_recent_processes(limit=limit)
+    except Exception as err:
+        logger.exception(log_event("aiida.frontend.processes.failed", error=str(err)))
+        processes = []
+    return {"items": _serialize_processes(processes)}
+
+
+@router.get("/frontend/processes/stream")
+async def frontend_processes_stream(request: Request, limit: int = Query(default=15, ge=1, le=100)):
+    async def event_generator():
+        stream_id = id(request)
+        last_digest = ""
+        heartbeat_ts = time.monotonic()
+        logger.info(log_event("aiida.frontend.process_stream.connected", stream_id=stream_id))
+        while True:
+            if await request.is_disconnected():
+                logger.info(log_event("aiida.frontend.process_stream.disconnected", stream_id=stream_id))
+                break
+
+            try:
+                processes = _serialize_processes(get_recent_processes(limit=limit))
+                digest = hashlib.sha1(json.dumps(processes, sort_keys=True).encode("utf-8")).hexdigest()
+                now = time.monotonic()
+                should_push = (digest != last_digest) or ((now - heartbeat_ts) >= 15)
+                if should_push:
+                    yield {"event": "processes", "data": json.dumps({"items": processes})}
+                    last_digest = digest
+                    heartbeat_ts = now
+            except Exception as err:
+                logger.exception(
+                    log_event("aiida.frontend.process_stream.failed", stream_id=stream_id, error=str(err))
+                )
+                yield {"event": "processes", "data": json.dumps({"items": []})}
+
+            await asyncio.sleep(1.5)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/frontend/logs")
+async def frontend_logs(limit: int = Query(default=240, ge=20, le=1000)):
+    version, lines = get_log_buffer_snapshot(limit=limit)
+    return {"version": version, "lines": lines}
+
+
+@router.get("/frontend/logs/stream")
+async def frontend_logs_stream(request: Request, limit: int = Query(default=240, ge=20, le=1000)):
+    async def event_generator():
+        stream_id = id(request)
+        last_version = -1
+        heartbeat_ts = time.monotonic()
+        logger.info(log_event("aiida.frontend.log_stream.connected", stream_id=stream_id))
+        while True:
+            if await request.is_disconnected():
+                logger.info(log_event("aiida.frontend.log_stream.disconnected", stream_id=stream_id))
+                break
+
+            try:
+                version, lines = get_log_buffer_snapshot(limit=limit)
+                now = time.monotonic()
+                should_push = (version != last_version) or ((now - heartbeat_ts) >= 8.0)
+                if should_push:
+                    yield {"event": "logs", "data": json.dumps({"version": version, "lines": lines})}
+                    last_version = version
+                    heartbeat_ts = now
+            except Exception as err:
+                logger.exception(
+                    log_event("aiida.frontend.log_stream.failed", stream_id=stream_id, error=str(err))
+                )
+                yield {"event": "logs", "data": json.dumps({"version": -1, "lines": []})}
+
+            await asyncio.sleep(0.75)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/frontend/chat/messages")
+async def frontend_chat_messages(request: Request):
+    state = request.app.state
+    history = _serialize_chat_history(_get_chat_history(state))
+    return {
+        "version": int(getattr(state, "chat_version", 0)),
+        "messages": history,
+    }
+
+
+@router.get("/frontend/chat/stream")
+async def frontend_chat_stream(request: Request):
+    state = request.app.state
+
+    async def event_generator():
+        stream_id = id(request)
+        last_version = -1
+        heartbeat_ts = time.monotonic()
+        logger.info(log_event("aiida.frontend.chat_stream.connected", stream_id=stream_id))
+        while True:
+            if await request.is_disconnected():
+                logger.info(log_event("aiida.frontend.chat_stream.disconnected", stream_id=stream_id))
+                break
+
+            try:
+                version = int(getattr(state, "chat_version", 0))
+                history = _serialize_chat_history(_get_chat_history(state))
+                now = time.monotonic()
+                should_push = (version != last_version) or ((now - heartbeat_ts) >= 10)
+                if should_push:
+                    yield {
+                        "event": "chat",
+                        "data": json.dumps({"version": version, "messages": history}),
+                    }
+                    last_version = version
+                    heartbeat_ts = now
+            except Exception as err:
+                logger.exception(
+                    log_event("aiida.frontend.chat_stream.failed", stream_id=stream_id, error=str(err))
+                )
+                yield {"event": "chat", "data": json.dumps({"version": -1, "messages": []})}
+
+            await asyncio.sleep(0.4)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/frontend/chat")
+async def frontend_chat_submit(request: Request, payload: FrontendChatRequest):
+    state = request.app.state
+    user_intent = payload.intent.strip()
+    if not user_intent:
+        raise HTTPException(status_code=422, detail="Message cannot be empty")
+
+    available_models = _get_available_models(state)
+    selected_model = (
+        payload.model_name
+        if payload.model_name and payload.model_name in available_models
+        else _get_selected_model(state, available_models)
+    )
+    state.selected_model = selected_model
+
+    turn_id = _start_chat_turn(
+        state,
+        user_intent=user_intent,
+        selected_model=selected_model,
+        context_archive=payload.context_archive,
+        source="frontend",
+    )
+    return {
+        "status": "queued",
+        "turn_id": turn_id,
+        "selected_model": selected_model,
+        "version": int(getattr(state, "chat_version", 0)),
+    }
+
+
 # 1. Dashboard page (http://localhost:8000/ui/)
 @router.get("/", response_model=FastUI, response_model_exclude_none=True)
 async def aiida_ui_root(request: Request) -> FastUI:

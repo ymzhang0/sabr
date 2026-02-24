@@ -1,0 +1,79 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: 0 0% 100%;
+  --ring: 212 13% 50%;
+}
+
+.dark {
+  --surface: 222 47% 8%;
+  --ring: 210 40% 80%;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  overflow: hidden;
+  font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+  color: rgb(17 24 39);
+  background:
+    radial-gradient(circle at 12% 16%, rgba(56, 189, 248, 0.2), transparent 36%),
+    radial-gradient(circle at 85% 14%, rgba(16, 185, 129, 0.18), transparent 35%),
+    radial-gradient(circle at 72% 86%, rgba(59, 130, 246, 0.16), transparent 32%),
+    linear-gradient(145deg, #f4f6fb 0%, #ecf1f6 48%, #e6edf5 100%);
+}
+
+.dark body {
+  color: rgb(244 244 245);
+  background:
+    radial-gradient(circle at 15% 15%, rgba(56, 189, 248, 0.16), transparent 35%),
+    radial-gradient(circle at 90% 15%, rgba(16, 185, 129, 0.12), transparent 36%),
+    radial-gradient(circle at 74% 85%, rgba(147, 197, 253, 0.11), transparent 34%),
+    linear-gradient(145deg, #0a0d12 0%, #0f141c 42%, #10131b 100%);
+}
+
+.dashboard-shell {
+  position: relative;
+}
+
+.font-mono {
+  font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+}
+
+.minimal-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(113, 113, 122, 0.35) transparent;
+}
+
+.minimal-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.minimal-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.minimal-scrollbar::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: rgba(113, 113, 122, 0.35);
+}
+
+.minimal-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(113, 113, 122, 0.55);
+}
