@@ -66,6 +66,11 @@ class FrontendChatRequest(BaseModel):
     intent: str = Field(..., min_length=1, max_length=12000)
     model_name: str | None = None
     context_archive: str | None = None
+    context_node_ids: list[int] | None = None
+
+
+class FrontendStopChatRequest(BaseModel):
+    turn_id: int | None = None
 
 
 class FrontendSwitchProfileRequest(BaseModel):
@@ -137,6 +142,113 @@ def _serialize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, Any
             }
         )
     return payload
+
+
+def _normalize_context_node_ids(raw: Any) -> list[int]:
+    if raw is None:
+        return []
+
+    values: list[Any]
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return []
+
+        values = []
+        with suppress(json.JSONDecodeError):
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                values = parsed
+            else:
+                values = [parsed]
+        if not values:
+            values = [part.strip() for part in stripped.split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = [raw]
+
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        try:
+            pk = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if pk <= 0 or pk in seen:
+            continue
+        seen.add(pk)
+        deduped.append(pk)
+        if len(deduped) >= 30:
+            break
+    return deduped
+
+
+def _get_structure_formula(node: Any) -> str | None:
+    for method_name in ("get_formula", "get_chemical_formula"):
+        method = getattr(node, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            formula = method()
+        except TypeError:
+            formula = method(mode="hill")
+        except Exception:
+            continue
+        if formula:
+            return str(formula)
+    return None
+
+
+def _fetch_context_nodes(context_node_ids: list[int]) -> list[dict[str, Any]]:
+    if not context_node_ids:
+        return []
+
+    if not hub.current_profile:
+        hub.start()
+
+    from aiida import orm
+
+    context_nodes: list[dict[str, Any]] = []
+    for pk in context_node_ids:
+        try:
+            node = orm.load_node(pk)
+        except Exception as err:
+            context_nodes.append({"pk": pk, "error": str(err)})
+            continue
+
+        process_state_value: str | None = None
+        if isinstance(node, orm.ProcessNode):
+            process_state = getattr(node, "process_state", None)
+            process_state_value = (
+                process_state.value if hasattr(process_state, "value")
+                else (str(process_state) if process_state else None)
+            )
+
+        context_nodes.append(
+            {
+                "pk": int(node.pk),
+                "uuid": str(getattr(node, "uuid", "")),
+                "label": str(
+                    getattr(node, "label", None)
+                    or getattr(node, "process_label", None)
+                    or node.__class__.__name__
+                ),
+                "node_type": str(node.__class__.__name__),
+                "process_state": process_state_value,
+                "formula": _get_structure_formula(node) if isinstance(node, orm.StructureData) else None,
+                "ctime": (
+                    node.ctime.strftime("%Y-%m-%d %H:%M:%S")
+                    if getattr(node, "ctime", None) is not None
+                    else None
+                ),
+            }
+        )
+    return context_nodes
 
 
 def _sanitize_upload_name(filename: str) -> str:
@@ -287,6 +399,14 @@ def _ensure_chat_lock(state) -> asyncio.Lock:
     return lock
 
 
+def _ensure_chat_task_registry(state) -> dict[int, asyncio.Task]:
+    tasks = getattr(state, "chat_turn_tasks", None)
+    if tasks is None:
+        tasks = {}
+        state.chat_turn_tasks = tasks
+    return tasks
+
+
 def _update_assistant_message(state, turn_id: int, text: str, status: str = "thinking") -> None:
     chat_history = _get_chat_history(state)
     for msg in reversed(chat_history):
@@ -335,14 +455,42 @@ async def _thinking_status_ticker(state, turn_id: int, stop_event: asyncio.Event
         await asyncio.sleep(0.9)
 
 
+def _cancel_chat_turn(state, turn_id: int | None = None) -> int | None:
+    tasks = _ensure_chat_task_registry(state)
+    if turn_id is not None:
+        candidates = [(turn_id, tasks.get(turn_id))]
+    else:
+        candidates = sorted(tasks.items(), key=lambda item: item[0], reverse=True)
+
+    for candidate_turn_id, task in candidates:
+        if task is None:
+            continue
+        if task.done():
+            tasks.pop(candidate_turn_id, None)
+            continue
+        task.cancel()
+        _update_assistant_message(
+            state,
+            candidate_turn_id,
+            "Response stopped by user.",
+            status="error",
+        )
+        logger.info(log_event("aiida.chat_turn.cancel.requested", turn_id=candidate_turn_id))
+        return candidate_turn_id
+
+    return None
+
+
 def _start_chat_turn(
     state,
     user_intent: str,
     selected_model: str,
     context_archive: str | None = None,
+    context_node_ids: list[int] | None = None,
     source: str = "form",
 ) -> int:
     chat_history = _get_chat_history(state)
+    normalized_node_ids = _normalize_context_node_ids(context_node_ids)
     turn_id = getattr(state, "chat_turn_seq", 0) + 1
     state.chat_turn_seq = turn_id
     chat_history.append({"role": "user", "text": user_intent, "turn_id": turn_id})
@@ -361,6 +509,7 @@ def _start_chat_turn(
             model=selected_model,
             intent=user_intent[:120],
             context=context_archive,
+            context_node_ids=",".join(str(pk) for pk in normalized_node_ids) or None,
         )
     )
     logger.debug(
@@ -370,14 +519,19 @@ def _start_chat_turn(
             digest=_history_digest(chat_history),
         )
     )
-    asyncio.create_task(
+    task = asyncio.create_task(
         _execute_chat_turn(
             state=state,
             turn_id=turn_id,
             user_intent=user_intent,
             selected_model=selected_model,
             context_archive=context_archive,
+            context_node_ids=normalized_node_ids,
         )
+    )
+    _ensure_chat_task_registry(state)[turn_id] = task
+    task.add_done_callback(
+        lambda _task, _state=state, _turn_id=turn_id: _ensure_chat_task_registry(_state).pop(_turn_id, None)
     )
     return turn_id
 
@@ -388,6 +542,7 @@ async def _execute_chat_turn(
     user_intent: str,
     selected_model: str,
     context_archive: str | None = None,
+    context_node_ids: list[int] | None = None,
 ) -> None:
     """Run one chat turn asynchronously and update the assistant placeholder."""
     agent = getattr(state, "agent", None)
@@ -405,6 +560,7 @@ async def _execute_chat_turn(
                 model=selected_model,
                 intent=user_intent[:120],
                 context=context_archive,
+                context_node_ids=",".join(str(pk) for pk in _normalize_context_node_ids(context_node_ids)) or None,
             )
         )
 
@@ -412,9 +568,23 @@ async def _execute_chat_turn(
             _update_assistant_message(
                 state, turn_id, "Thinking: 正在初始化 AiiDA 依赖...", status="thinking"
             )
+            normalized_node_ids = _normalize_context_node_ids(context_node_ids)
+            context_nodes = _fetch_context_nodes(normalized_node_ids)
+            if context_nodes:
+                _update_assistant_message(
+                    state,
+                    turn_id,
+                    f"Thinking: 已加载 {len(context_nodes)} 个参考节点，正在准备上下文...",
+                    status="thinking",
+                )
+            deps_kwargs: dict[str, Any] = {
+                "archive_path": context_archive,
+                "memory": getattr(state, "memory", None),
+            }
+            if "context_nodes" in getattr(DepsClass, "__annotations__", {}):
+                deps_kwargs["context_nodes"] = context_nodes
             current_deps = DepsClass(
-                archive_path=context_archive,
-                memory=state.memory
+                **deps_kwargs
             )
 
             _update_assistant_message(
@@ -471,7 +641,10 @@ async def _execute_chat_turn(
                     state.memory.add_turn(
                         intent=user_intent,
                         response=answer_text,
-                        metadata={"context_archive": context_archive},
+                        metadata={
+                            "context_archive": context_archive,
+                            "context_node_ids": normalized_node_ids,
+                        },
                     )
                 except Exception as mem_e:
                     logger.warning(
@@ -482,6 +655,25 @@ async def _execute_chat_turn(
                         )
                     )
 
+        except asyncio.CancelledError:
+            elapsed = time.perf_counter() - t0
+            _update_assistant_message(
+                state,
+                turn_id,
+                "Response stopped by user.",
+                status="error",
+            )
+            state.chat_history = _get_chat_history(state)[-200:]
+            _touch_chat(state)
+            logger.info(
+                log_event(
+                    "aiida.chat_turn.cancelled",
+                    turn_id=turn_id,
+                    elapsed=f"{elapsed:.2f}s",
+                    model=selected_model,
+                )
+            )
+            raise
         except Exception as err:
             elapsed = time.perf_counter() - t0
             logger.exception(
@@ -601,10 +793,10 @@ def _profiles_digest(profiles_display: list[tuple[str, str, bool]]) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
-async def _parse_chat_payload(request: Request) -> tuple[str, str | None, str | None]:
+async def _parse_chat_payload(request: Request) -> tuple[str, str | None, str | None, list[int]]:
     """
     Parse FastUI form payload safely to avoid 422 caused by strict model parsing.
-    Returns (intent, model_name, context_archive).
+    Returns (intent, model_name, context_archive, context_node_ids).
     """
     raw: dict[str, Any] = {}
     content_type = (request.headers.get("content-type") or "").lower()
@@ -622,6 +814,7 @@ async def _parse_chat_payload(request: Request) -> tuple[str, str | None, str | 
     intent = str(_first_value(raw.get("intent")) or "").strip()
     model_name = _first_value(raw.get("model_name"))
     context_archive = _first_value(raw.get("context_archive"))
+    context_node_ids = _normalize_context_node_ids(raw.get("context_node_ids"))
     logger.debug(
         log_event(
             "aiida.chat_payload.parsed",
@@ -629,9 +822,15 @@ async def _parse_chat_payload(request: Request) -> tuple[str, str | None, str | 
             intent_len=len(intent),
             model=model_name,
             context=context_archive,
+            context_node_ids=",".join(str(pk) for pk in context_node_ids) or None,
         )
     )
-    return intent, (str(model_name) if model_name else None), (str(context_archive) if context_archive else None)
+    return (
+        intent,
+        (str(model_name) if model_name else None),
+        (str(context_archive) if context_archive else None),
+        context_node_ids,
+    )
 
 
 @router.get("/profiles/stream")
@@ -1087,18 +1286,31 @@ async def frontend_chat_submit(request: Request, payload: FrontendChatRequest):
         else _get_selected_model(state, available_models)
     )
     state.selected_model = selected_model
+    context_node_ids = _normalize_context_node_ids(payload.context_node_ids)
 
     turn_id = _start_chat_turn(
         state,
         user_intent=user_intent,
         selected_model=selected_model,
         context_archive=payload.context_archive,
+        context_node_ids=context_node_ids,
         source="frontend",
     )
     return {
         "status": "queued",
         "turn_id": turn_id,
         "selected_model": selected_model,
+        "version": int(getattr(state, "chat_version", 0)),
+    }
+
+
+@router.post("/frontend/chat/stop")
+async def frontend_chat_stop(request: Request, payload: FrontendStopChatRequest):
+    state = request.app.state
+    cancelled_turn_id = _cancel_chat_turn(state, payload.turn_id)
+    return {
+        "status": "stopped" if cancelled_turn_id is not None else "idle",
+        "turn_id": cancelled_turn_id,
         "version": int(getattr(state, "chat_version", 0)),
     }
 
@@ -1196,7 +1408,7 @@ async def aiida_chat_handler(request: Request):
     Core handler: run PydanticAI on form input and return rendered UI.
     """
     state = request.app.state
-    user_intent, submitted_model, context_archive = await _parse_chat_payload(request)
+    user_intent, submitted_model, context_archive, context_node_ids = await _parse_chat_payload(request)
 
     available_models = _get_available_models(state)
     selected_model = submitted_model if submitted_model in available_models else _get_selected_model(state, available_models)
@@ -1208,13 +1420,15 @@ async def aiida_chat_handler(request: Request):
             selected_model=selected_model,
             submitted_model=submitted_model,
             context=context_archive,
+            context_node_ids=",".join(str(pk) for pk in context_node_ids) or None,
         )
     )
 
     if not user_intent:
         return _render_chat_page(state)
 
-    dedupe_key = f"form:{selected_model}:{context_archive or '-'}:{user_intent.strip().lower()}"
+    context_ids_key = ",".join(str(pk) for pk in context_node_ids) or "-"
+    dedupe_key = f"form:{selected_model}:{context_archive or '-'}:{context_ids_key}:{user_intent.strip().lower()}"
     if _debounce_request(state, key=dedupe_key, window_seconds=0.8):
         logger.warning(log_event("aiida.chat_handler.debounced", model=selected_model))
         return _render_chat_page(state)
@@ -1224,6 +1438,7 @@ async def aiida_chat_handler(request: Request):
         user_intent=user_intent,
         selected_model=selected_model,
         context_archive=context_archive,
+        context_node_ids=context_node_ids,
         source="form",
     )
     logger.info(log_event("aiida.chat_handler.queued"))

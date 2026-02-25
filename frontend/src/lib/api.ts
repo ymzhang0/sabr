@@ -76,7 +76,17 @@ export async function getChatMessages(): Promise<ChatResponse> {
   return data;
 }
 
-export async function sendChat(payload: SendChatRequest): Promise<{ turn_id: number }> {
-  const { data } = await frontendApi.post<{ turn_id: number }>("/chat", payload);
+export async function sendChat(
+  payload: SendChatRequest,
+  signal?: AbortSignal,
+): Promise<{ turn_id: number }> {
+  const { data } = await frontendApi.post<{ turn_id: number }>("/chat", payload, { signal });
+  return data;
+}
+
+export async function stopChat(turnId?: number): Promise<{ status: string; turn_id: number | null }> {
+  const { data } = await frontendApi.post<{ status: string; turn_id: number | null }>("/chat/stop", {
+    turn_id: turnId,
+  });
   return data;
 }

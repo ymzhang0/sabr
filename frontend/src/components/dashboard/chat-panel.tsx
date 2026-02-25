@@ -1,10 +1,10 @@
-import { Bot, ChevronDown, Paperclip, SendHorizontal } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Bot, ChevronDown, Paperclip, SendHorizontal, Square } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { cn } from "@/lib/utils";
-import type { ChatMessage } from "@/types/aiida";
+import type { ChatMessage, ReferenceNode } from "@/types/aiida";
 
 type ChatTurn = {
   turnId: number;
@@ -41,10 +41,14 @@ type ChatPanelProps = {
   models: string[];
   selectedModel: string;
   quickPrompts: Array<{ label: string; prompt: string }>;
-  isSending: boolean;
+  selectedReferences: ReferenceNode[];
+  isLoading: boolean;
+  activeTurnId: number | null;
   onSendMessage: (text: string) => void;
+  onStopResponse: () => void;
   onModelChange: (model: string) => void;
   onAttachFile: (file: File) => void;
+  onRemoveReference: (pk: number) => void;
 };
 
 export function ChatPanel({
@@ -52,19 +56,61 @@ export function ChatPanel({
   models,
   selectedModel,
   quickPrompts,
-  isSending,
+  selectedReferences,
+  isLoading,
+  activeTurnId,
   onSendMessage,
+  onStopResponse,
   onModelChange,
   onAttachFile,
+  onRemoveReference,
 }: ChatPanelProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const scrollRafRef = useRef<number | null>(null);
   const [draft, setDraft] = useState("");
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
+  const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
 
   const turns = useMemo(() => groupMessages(messages), [messages]);
+  const latestTurnId = turns.length > 0 ? turns[turns.length - 1].turnId : null;
+  const latestTurnSignature = useMemo(() => {
+    if (turns.length === 0) {
+      return "empty";
+    }
+    const latestTurn = turns[turns.length - 1];
+    return [
+      turns.length,
+      latestTurn.turnId,
+      latestTurn.thinkingText ?? "",
+      latestTurn.assistantText ?? "",
+      latestTurn.assistantStatus ?? "",
+    ].join("|");
+  }, [turns]);
+  const isNearBottom = useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container) {
+      return true;
+    }
+    const remainingDistance = container.scrollHeight - container.scrollTop - container.clientHeight;
+    return remainingDistance <= 96;
+  }, []);
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
+    if (!messagesEndRef.current) {
+      return;
+    }
+    if (scrollRafRef.current !== null) {
+      window.cancelAnimationFrame(scrollRafRef.current);
+    }
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior, block: "end" });
+      scrollRafRef.current = null;
+    });
+  }, []);
 
   useEffect(() => {
     const handleOutside = (event: MouseEvent) => {
@@ -80,16 +126,45 @@ export function ChatPanel({
     return () => window.removeEventListener("mousedown", handleOutside);
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollRafRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAutoScrollEnabled) {
+      return;
+    }
+    scrollToBottom("smooth");
+  }, [isAutoScrollEnabled, isLoading, latestTurnSignature, scrollToBottom]);
+
+  useEffect(() => {
+    if (!isLoading) {
+      return;
+    }
+    if (isNearBottom()) {
+      setIsAutoScrollEnabled(true);
+    }
+  }, [isLoading, isNearBottom]);
+
   const updateTextareaHeight = (target: HTMLTextAreaElement) => {
     target.style.height = "0px";
     target.style.height = `${Math.min(target.scrollHeight, 220)}px`;
   };
 
   const handleSubmit = () => {
+    if (isLoading) {
+      return;
+    }
     const text = draft.trim();
     if (!text) {
       return;
     }
+    setIsAutoScrollEnabled(true);
+    scrollToBottom("smooth");
     onSendMessage(text);
     setDraft("");
     if (textareaRef.current) {
@@ -97,9 +172,18 @@ export function ChatPanel({
     }
   };
 
+  const isDraftEmpty = !draft.trim();
+
   return (
     <Panel className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden p-0">
-      <div className="minimal-scrollbar min-h-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto px-5 pb-6 pt-5 md:px-8">
+      <div
+        ref={messagesContainerRef}
+        className="minimal-scrollbar min-h-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto px-5 pb-6 pt-5 md:px-8"
+        onScroll={() => {
+          const nearBottom = isNearBottom();
+          setIsAutoScrollEnabled((current) => (current === nearBottom ? current : nearBottom));
+        }}
+      >
         {turns.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center text-center">
             <p className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
@@ -110,64 +194,85 @@ export function ChatPanel({
             </p>
           </div>
         ) : (
-          turns.map((turn) => (
-            <article key={turn.turnId} className="space-y-3">
-              {turn.userText ? (
-                <div className="flex justify-end">
-                  <div className="max-w-[78%] rounded-2xl border border-zinc-200/80 bg-white/90 px-4 py-3 text-sm leading-6 text-zinc-900 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100">
-                    <p className="whitespace-pre-wrap">{turn.userText}</p>
-                  </div>
-                </div>
-              ) : null}
+          turns.map((turn) => {
+            const hasAssistantText = Boolean(turn.assistantText?.trim());
+            const hasFinalAssistantState =
+              Boolean(turn.assistantStatus) && turn.assistantStatus !== "thinking";
+            const hasAssistantOutput = hasAssistantText || hasFinalAssistantState;
+            const thinkingTurnId = activeTurnId ?? latestTurnId;
+            const showThinking =
+              Boolean(turn.thinkingText) &&
+              isLoading &&
+              turn.turnId === thinkingTurnId &&
+              !hasAssistantOutput;
+            const showAssistant = hasAssistantText || turn.assistantStatus === "error";
 
-              {turn.thinkingText || turn.assistantText ? (
-                <div className="flex items-start gap-3">
-                  {avatarFailed ? (
-                    <div className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-full border border-zinc-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900">
-                      <Bot className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+            return (
+              <article key={turn.turnId} className="space-y-3">
+                {turn.userText ? (
+                  <div className="flex justify-end">
+                    <div className="max-w-[78%] rounded-2xl border border-zinc-200/80 bg-white/90 px-4 py-3 text-sm leading-6 text-zinc-900 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100">
+                      <p className="whitespace-pre-wrap">{turn.userText}</p>
                     </div>
-                  ) : (
-                    <img
-                      src="/static/image/aiida-icon.svg"
-                      alt="AiiDA"
-                      className="mt-0.5 h-7 w-7 rounded-full border border-zinc-200/80 bg-white object-contain p-1 dark:border-zinc-800 dark:bg-zinc-900"
-                      onError={() => setAvatarFailed(true)}
-                    />
-                  )}
-
-                  <div className="min-w-0 max-w-[86%] space-y-2">
-                    {turn.thinkingText ? (
-                      <details className="rounded-xl border border-zinc-200/80 bg-zinc-50/85 px-3 py-2 text-xs transition-colors duration-200 dark:border-zinc-800 dark:bg-zinc-900/70">
-                        <summary className="cursor-pointer select-none uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
-                          Thinking...
-                        </summary>
-                        <p className="mt-2 whitespace-pre-wrap leading-5 text-zinc-600 dark:text-zinc-300">
-                          {turn.thinkingText}
-                        </p>
-                      </details>
-                    ) : null}
-
-                    {turn.assistantText ? (
-                      <div
-                        className={cn(
-                          "rounded-2xl border bg-zinc-50/80 px-4 py-3 text-sm leading-6 text-zinc-800 transition-colors duration-200 dark:bg-zinc-900/60 dark:text-zinc-100",
-                          turn.assistantStatus === "error"
-                            ? "border-rose-200/80 dark:border-rose-800/60"
-                            : "border-zinc-200/80 dark:border-zinc-800",
-                        )}
-                      >
-                        <p className="whitespace-pre-wrap">{turn.assistantText}</p>
-                        {turn.assistantStatus === "error" ? (
-                          <p className="mt-2 text-xs text-rose-500">Response ended with error.</p>
-                        ) : null}
-                      </div>
-                    ) : null}
                   </div>
-                </div>
-              ) : null}
-            </article>
-          ))
+                ) : null}
+
+                {showThinking || showAssistant ? (
+                  <div className="flex items-start gap-3">
+                    {avatarFailed ? (
+                      <div className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-full border border-zinc-200/80 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+                        <Bot className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+                      </div>
+                    ) : (
+                      <img
+                        src="/static/image/aiida-icon.svg"
+                        alt="AiiDA"
+                        className="mt-0.5 h-7 w-7 rounded-full border border-zinc-200/80 bg-white object-contain p-1 dark:border-zinc-800 dark:bg-zinc-900"
+                        onError={() => setAvatarFailed(true)}
+                      />
+                    )}
+
+                    <div className="min-w-0 max-w-[86%] space-y-2">
+                      {showThinking ? (
+                        <details className="rounded-xl border border-zinc-200/80 bg-zinc-50/85 px-3 py-2 text-xs transition-colors duration-200 dark:border-zinc-800 dark:bg-zinc-900/70">
+                          <summary className="cursor-pointer select-none uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+                            <span className="inline-flex items-center gap-2">
+                              <span>Thinking...</span>
+                              <span
+                                aria-hidden
+                                className="h-3 w-3 animate-spin rounded-full border border-zinc-400 border-t-transparent dark:border-zinc-500 dark:border-t-transparent"
+                              />
+                            </span>
+                          </summary>
+                          <p className="mt-2 whitespace-pre-wrap leading-5 text-zinc-600 dark:text-zinc-300">
+                            {turn.thinkingText}
+                          </p>
+                        </details>
+                      ) : null}
+
+                      {showAssistant ? (
+                        <div
+                          className={cn(
+                            "rounded-2xl border bg-zinc-50/80 px-4 py-3 text-sm leading-6 text-zinc-800 transition-colors duration-200 dark:bg-zinc-900/60 dark:text-zinc-100",
+                            turn.assistantStatus === "error"
+                              ? "border-rose-200/80 dark:border-rose-800/60"
+                              : "border-zinc-200/80 dark:border-zinc-800",
+                          )}
+                        >
+                          <p className="whitespace-pre-wrap">{turn.assistantText}</p>
+                          {turn.assistantStatus === "error" ? (
+                            <p className="mt-2 text-xs text-rose-500">Response ended with error.</p>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+              </article>
+            );
+          })
         )}
+        <div ref={messagesEndRef} className="h-2" aria-hidden />
       </div>
 
       <div className="bg-white/75 px-4 pb-4 pt-3 backdrop-blur dark:bg-zinc-950/35 md:px-6">
@@ -179,10 +284,37 @@ export function ChatPanel({
                 variant="ghost"
                 size="sm"
                 className="rounded-full border border-zinc-300/70 px-3 transition-colors duration-200 dark:border-white/10"
-                onClick={() => onSendMessage(prompt.prompt)}
+                onClick={() => {
+                  setIsAutoScrollEnabled(true);
+                  scrollToBottom("smooth");
+                  onSendMessage(prompt.prompt);
+                }}
+                disabled={isLoading}
               >
                 {prompt.label}
               </Button>
+            ))}
+          </div>
+        ) : null}
+
+        {selectedReferences.length > 0 ? (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {selectedReferences.map((reference) => (
+              <span
+                key={reference.pk}
+                className="inline-flex max-w-full items-center gap-1 rounded-full bg-zinc-200/60 px-2 py-1 text-xs text-zinc-700 dark:bg-zinc-800/80 dark:text-zinc-200"
+              >
+                <span className="font-mono text-[11px]">#{reference.pk}</span>
+                <span className="max-w-[13rem] truncate">{reference.formula || reference.label}</span>
+                <button
+                  type="button"
+                  className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[10px] leading-none transition-colors duration-200 hover:bg-zinc-300/70 hover:text-zinc-900 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                  onClick={() => onRemoveReference(reference.pk)}
+                  aria-label={`Remove reference node ${reference.pk}`}
+                >
+                  x
+                </button>
+              </span>
             ))}
           </div>
         ) : null}
@@ -194,6 +326,7 @@ export function ChatPanel({
             value={draft}
             placeholder="Message SABR..."
             className="max-h-[220px] min-h-[56px] w-full resize-none border-none bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100"
+            disabled={isLoading}
             onChange={(event) => {
               setDraft(event.target.value);
               updateTextareaHeight(event.currentTarget);
@@ -206,7 +339,7 @@ export function ChatPanel({
             }}
           />
 
-          <div className="mt-3 flex flex-row items-center justify-between gap-3">
+          <div className="mt-3 flex flex-row items-center justify-between gap-2">
             <div className="flex flex-row items-center gap-2">
               <Button
                 variant="outline"
@@ -270,8 +403,24 @@ export function ChatPanel({
               </div>
             </div>
 
-            <Button onClick={handleSubmit} disabled={isSending || !draft.trim()}>
-              <SendHorizontal className="h-4 w-4" /> Send
+            <Button
+              size="icon"
+              onClick={() => {
+                if (isLoading) {
+                  onStopResponse();
+                  return;
+                }
+                handleSubmit();
+              }}
+              disabled={!isLoading && isDraftEmpty}
+              className={cn(
+                "transition-all duration-200",
+                isLoading &&
+                  "bg-rose-600 text-white hover:bg-rose-500 dark:bg-rose-500 dark:text-white dark:hover:bg-rose-400",
+              )}
+              aria-label={isLoading ? "Stop response" : "Send message"}
+            >
+              {isLoading ? <Square className="h-4 w-4" /> : <SendHorizontal className="h-4 w-4" />}
             </Button>
           </div>
         </div>
