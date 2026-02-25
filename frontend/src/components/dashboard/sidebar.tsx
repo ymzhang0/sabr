@@ -47,6 +47,7 @@ type SidebarProps = {
   selectedGroup: string;
   selectedType: string;
   processLimit: number;
+  referencedNodeIds: number[];
   isUpdatingProcessLimit: boolean;
   isSwitchingProfile: boolean;
   isUploadingArchive: boolean;
@@ -57,6 +58,7 @@ type SidebarProps = {
   onProcessLimitChange: (limit: number) => void;
   onSwitchProfile: (profileName: string) => void;
   onUploadArchive: (file: File) => void;
+  onReferenceNode: (process: ProcessItem) => void;
 };
 
 const NODE_TYPE_OPTIONS = ["ProcessNode", "WorkChainNode", "StructureData"] as const;
@@ -69,6 +71,7 @@ export function Sidebar({
   selectedGroup,
   selectedType,
   processLimit,
+  referencedNodeIds,
   isUpdatingProcessLimit,
   isSwitchingProfile,
   isUploadingArchive,
@@ -79,6 +82,7 @@ export function Sidebar({
   onProcessLimitChange,
   onSwitchProfile,
   onUploadArchive,
+  onReferenceNode,
 }: SidebarProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const groupMenuRef = useRef<HTMLDivElement | null>(null);
@@ -104,6 +108,10 @@ export function Sidebar({
   const sortedGroups = useMemo(
     () => [...groupOptions].sort((a, b) => a.localeCompare(b)),
     [groupOptions],
+  );
+  const referencedNodeSet = useMemo(
+    () => new Set(referencedNodeIds),
+    [referencedNodeIds],
   );
 
   useEffect(() => {
@@ -424,29 +432,47 @@ export function Sidebar({
                   No matching nodes found.
                 </p>
               ) : (
-                processes.map((process) => (
-                  <div
-                    key={`${process.pk}-${process.state}-${process.formula ?? ""}`}
-                    className="grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded-xl border border-zinc-200/80 bg-white/55 px-3 py-2 dark:border-white/10 dark:bg-zinc-900/45"
-                  >
-                    <span className={cn("h-2.5 w-2.5 rounded-full", stateDotClass(process.status_color))} />
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">
-                        {process.label}
-                      </p>
-                      <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">#{process.pk}</p>
+                processes.map((process) => {
+                  const isReferenced = referencedNodeSet.has(process.pk);
+                  return (
+                    <div
+                      key={`${process.pk}-${process.state}-${process.formula ?? ""}`}
+                      className={cn(
+                        "grid grid-cols-[auto_1fr_auto] items-center gap-2 rounded-xl border px-3 py-2 transition-colors duration-200",
+                        isReferenced
+                          ? "border-zinc-300/85 bg-zinc-100/55 dark:border-zinc-700/85 dark:bg-zinc-800/50"
+                          : "border-zinc-200/80 bg-white/55 dark:border-white/10 dark:bg-zinc-900/45",
+                      )}
+                    >
+                      <span className={cn("h-2.5 w-2.5 rounded-full", stateDotClass(process.status_color))} />
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">
+                          {process.label}
+                        </p>
+                        <button
+                          type="button"
+                          className={cn(
+                            "truncate text-xs transition-colors duration-200 hover:text-zinc-700 dark:hover:text-zinc-200",
+                            isReferenced ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-500 dark:text-zinc-400",
+                          )}
+                          onClick={() => onReferenceNode(process)}
+                          aria-label={`Reference node #${process.pk} in chat`}
+                        >
+                          #{process.pk}
+                        </button>
+                      </div>
+                      {isStructureNode(process) ? (
+                        <p className="max-w-[9.5rem] truncate rounded-md bg-zinc-200/50 px-2 py-1 text-right font-mono text-[11px] text-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-200">
+                          {process.formula || "N/A"}
+                        </p>
+                      ) : (
+                        <p className="max-w-[9.5rem] truncate rounded-md border border-zinc-300/70 bg-zinc-100/65 px-2 py-1 text-right text-[10px] uppercase tracking-[0.12em] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900/75 dark:text-zinc-300">
+                          {toDisplayStatus(process.process_state || process.state)}
+                        </p>
+                      )}
                     </div>
-                    {isStructureNode(process) ? (
-                      <p className="max-w-[9.5rem] truncate rounded-md bg-zinc-200/50 px-2 py-1 text-right font-mono text-[11px] text-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-200">
-                        {process.formula || "N/A"}
-                      </p>
-                    ) : (
-                      <p className="max-w-[9.5rem] truncate rounded-md border border-zinc-300/70 bg-zinc-100/65 px-2 py-1 text-right text-[10px] uppercase tracking-[0.12em] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900/75 dark:text-zinc-300">
-                        {toDisplayStatus(process.process_state || process.state)}
-                      </p>
-                    )}
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

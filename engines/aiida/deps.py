@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from src.sab_core.deps.base import BaseSABRDeps
 from src.sab_core.config import settings
 
@@ -22,6 +22,7 @@ class AiiDADeps(BaseSABRDeps):
     # Dictionary to store intermediate AiiDA objects or PKs 
     # that need to be shared between different tools in the same loop
     registry: Dict[str, Any] = field(default_factory=dict)
+    context_nodes: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
         """

@@ -1,6 +1,9 @@
+from typing import Any
+
 from pydantic_ai import Agent, RunContext
 from src.sab_core.schema.response import SABRResponse
 from engines.aiida.deps import AiiDADeps
+from aiida.manage.configuration import get_config
 
 # 1. Import tools aligned with `tools/__init__.py::__all__`.
 from engines.aiida.tools import (
@@ -52,6 +55,44 @@ aiida_researcher = Agent(
     retries=3
 )
 
+
+def _format_context_node_line(node: dict[str, Any]) -> str:
+    pk = node.get("pk", "?")
+    error = node.get("error")
+    if error:
+        return f"- PK {pk}: unavailable ({error})"
+
+    details = [
+        f"PK {pk}",
+        f"type={node.get('node_type') or 'Unknown'}",
+        f"label={node.get('label') or 'N/A'}",
+    ]
+    if node.get("formula"):
+        details.append(f"formula={node['formula']}")
+    if node.get("process_state"):
+        details.append(f"process_state={node['process_state']}")
+    if node.get("ctime"):
+        details.append(f"ctime={node['ctime']}")
+    return "- " + " | ".join(details)
+
+
+@aiida_researcher.system_prompt(dynamic=True)
+def add_referenced_nodes_prompt(ctx: RunContext[AiiDADeps]) -> str:
+    context_nodes = getattr(ctx.deps, "context_nodes", None) or []
+    if not context_nodes:
+        return ""
+
+    max_items = 12
+    lines = [
+        "### REFERENCED AiiDA NODES",
+        "Treat these user-selected nodes as first-class context for this turn:",
+    ]
+    for node in context_nodes[:max_items]:
+        lines.append(_format_context_node_line(node))
+    if len(context_nodes) > max_items:
+        lines.append(f"- ... {len(context_nodes) - max_items} more referenced nodes omitted.")
+    return "\n".join(lines)
+
  
 # --- 3. Register tools (kept in sync with tools/__init__.py) ---
 
@@ -59,7 +100,26 @@ aiida_researcher = Agent(
 @aiida_researcher.tool
 async def list_profiles(ctx: RunContext[AiiDADeps]):
     """List all available AiiDA profiles on this system."""
-    return list_system_profiles()
+    profiles = list_system_profiles()
+    config = get_config()
+    default_name = config.default_profile_name
+
+    # Serialize Profile objects to plain dict for model/tool transport.
+    if isinstance(profiles, dict):
+        values = profiles.values()
+    else:
+        values = profiles
+
+    result = []
+    for p in values:
+        name = getattr(p, "name", str(p))
+        result.append(
+            {
+                "name": name,
+                "is_default": bool(default_name and name == default_name),
+            }
+        )
+    return result
 
 @aiida_researcher.tool
 async def list_archives(ctx: RunContext[AiiDADeps]):

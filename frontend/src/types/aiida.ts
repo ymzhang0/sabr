@@ -15,6 +15,12 @@ export type ProcessItem = {
   formula: string | null;
 };
 
+export type ReferenceNode = {
+  pk: number;
+  label: string;
+  formula: string | null;
+};
+
 export type ChatMessage = {
   role: "user" | "assistant" | string;
   text: string;
@@ -72,4 +78,5 @@ export type SendChatRequest = {
   intent: string;
   model_name?: string;
   context_archive?: string | null;
+  context_node_ids?: number[];
 };
