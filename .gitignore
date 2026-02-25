@@ -45,3 +45,6 @@ __pycache__/
 
 # 如果有自动生成的文档
 site/
+
+# Runtime memory snapshots (do not track)
+engines/aiida/data/memories/history_sabr_v2_global.json

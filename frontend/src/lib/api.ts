@@ -1,6 +1,7 @@
 import axios from "axios";
 
 import type {
+  BridgeStatusResponse,
   BootstrapResponse,
   ChatResponse,
   GroupsResponse,
@@ -13,7 +14,9 @@ import type {
 
 const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
 const FRONTEND_API_PREFIX = "/api/aiida/frontend";
-const baseURL = `${API_BASE_URL}${FRONTEND_API_PREFIX}`;
+const AIIDA_API_PREFIX = "/api/aiida";
+const frontendBaseURL = `${API_BASE_URL}${FRONTEND_API_PREFIX}`;
+const aiidaBaseURL = `${API_BASE_URL}${AIIDA_API_PREFIX}`;
 
 function resolveHttpOrigin(): string {
   if (import.meta.env.DEV) {
@@ -50,8 +53,13 @@ export const LOGS_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/logs
 export const TERMINAL_WS_URL = getTerminalWsUrl("/api/terminal");
 
 export const frontendApi = axios.create({
-  baseURL,
+  baseURL: frontendBaseURL,
   timeout: 15000,
+});
+
+const aiidaApi = axios.create({
+  baseURL: aiidaBaseURL,
+  timeout: 5000,
 });
 
 export async function getBootstrap(): Promise<BootstrapResponse> {
@@ -124,4 +132,28 @@ export async function stopChat(turnId?: number): Promise<{ status: string; turn_
     turn_id: turnId,
   });
   return data;
+}
+
+const DEFAULT_BRIDGE_STATUS: BridgeStatusResponse = {
+  status: "offline",
+  url: "http://127.0.0.1:8001",
+  environment: "Local Sandbox",
+};
+
+export async function getBridgeStatus(): Promise<BridgeStatusResponse> {
+  try {
+    const { data } = await aiidaApi.get<BridgeStatusResponse>("/status");
+    return data;
+  } catch {
+    return DEFAULT_BRIDGE_STATUS;
+  }
+}
+
+export async function getBridgePlugins(): Promise<string[]> {
+  try {
+    const { data } = await aiidaApi.get<string[]>("/plugins");
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 }

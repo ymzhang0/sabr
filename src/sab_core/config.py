@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     # 📡 Network Configuration (If you need a proxy)
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")
     HTTP_PROXY: str = os.getenv("HTTP_PROXY", "")
+    AIIDA_BRIDGE_URL: str = os.getenv("AIIDA_BRIDGE_URL", "http://127.0.0.1:8001")
     SABR_FRONTEND_ORIGINS: str = os.getenv(
         "SABR_FRONTEND_ORIGINS",
         "http://localhost:5173,http://127.0.0.1:5173,https://sabr.yiming-zhang.com",

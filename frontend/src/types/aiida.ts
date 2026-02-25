@@ -80,3 +80,9 @@ export type SendChatRequest = {
   context_archive?: string | null;
   context_node_ids?: number[];
 };
+
+export type BridgeStatusResponse = {
+  status: "online" | "offline";
+  url: string;
+  environment: string;
+};

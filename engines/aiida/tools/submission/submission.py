@@ -1,31 +1,106 @@
-# engines/aiida/tools/submission/builder.py
-from aiida.plugins import WorkflowFactory
-from aiida.common.exceptions import MissingEntryPointError
+from __future__ import annotations
+
+from typing import Any
+from urllib.parse import quote
+
+import httpx
 from aiida.engine import submit
 from aiida import orm
+from aiida.plugins import WorkflowFactory
 
-def inspect_workchain_spec(entry_point_name: str):
+from src.sab_core.config import settings
+
+DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001"
+OFFLINE_WORKER_MESSAGE = (
+    "AiiDA Worker is offline, please ensure the bridge is running on port 8001."
+)
+
+
+def _bridge_url() -> str:
+    raw = (settings.AIIDA_BRIDGE_URL or DEFAULT_BRIDGE_URL).strip()
+    return raw.rstrip("/")
+
+
+def _normalize_plugins_payload(payload: Any) -> list[str]:
+    if isinstance(payload, list):
+        values = payload
+    elif isinstance(payload, dict):
+        if isinstance(payload.get("plugins"), list):
+            values = payload["plugins"]
+        elif isinstance(payload.get("items"), list):
+            values = payload["items"]
+        else:
+            values = []
+    else:
+        values = []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        value = str(item).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return sorted(normalized)
+
+
+async def list_remote_plugins() -> list[str] | str:
     """
-    Inspect a WorkChain input spec and report required ports and protocol support.
+    Source of truth for "Available WorkChains": query the active AiiDA Worker Bridge `/plugins`.
     """
+    bridge_url = _bridge_url()
+    endpoint = f"{bridge_url}/plugins"
+
     try:
-        WC = WorkflowFactory(entry_point_name)
-    except MissingEntryPointError:
-        return f"❌ Error: WorkChain '{entry_point_name}' not found."
+        async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.RequestError:
+        return OFFLINE_WORKER_MESSAGE
+    except httpx.HTTPStatusError as exc:
+        return f"Failed to fetch plugins from bridge: HTTP {exc.response.status_code}."
 
-    has_protocol = hasattr(WC, 'get_builder_from_protocol')
-    spec = WC.spec()
-    
-    # Extract required inputs.
-    required = [f"{k} ({v.valid_type.__name__ if v.valid_type else 'Any'})" 
-                for k, v in spec.inputs.items() if v.required]
-    
-    summary = (
-        f"**WorkChain:** `{entry_point_name}`\n"
-        f"**Supports Protocols:** {'✅ YES' if has_protocol else '❌ NO'}\n"
-        f"**Required Inputs:** {', '.join(required) if required else 'None'}"
-    )
-    return summary
+    return _normalize_plugins_payload(payload)
+
+
+async def get_remote_workchain_spec(entry_point: str) -> dict[str, Any] | str:
+    """
+    Fetch the WorkChain "Instruction Manual" from the active bridge via `/spec/{entry_point}`.
+    """
+    cleaned_entry_point = (entry_point or "").strip()
+    if not cleaned_entry_point:
+        return "Please provide a valid WorkChain entry point name."
+
+    bridge_url = _bridge_url()
+    endpoint = f"{bridge_url}/spec/{quote(cleaned_entry_point, safe='')}"
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
+            response = await client.get(endpoint)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.RequestError:
+        return OFFLINE_WORKER_MESSAGE
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return f"WorkChain '{cleaned_entry_point}' was not found on the active AiiDA Worker."
+        return f"Failed to fetch WorkChain spec from bridge: HTTP {exc.response.status_code}."
+    except ValueError:
+        return "Bridge returned an invalid WorkChain spec payload."
+
+    if not isinstance(payload, dict):
+        return "Bridge returned an invalid WorkChain spec payload."
+
+    return payload
+
+
+async def inspect_workchain_spec(entry_point_name: str):
+    """
+    Inspect a WorkChain input spec from the remote AiiDA Worker Bridge.
+    """
+    return await get_remote_workchain_spec(entry_point_name)
 
 def draft_workchain_builder(workchain_label: str, structure_pk: int, code_label: str, protocol: str = 'moderate', overrides: dict = None):
     """

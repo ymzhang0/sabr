@@ -20,6 +20,7 @@ logger.info(log_event("logging.ready"))
 
 from src.sab_core.config import settings
 from src.sab_core.memory.json_memory import JSONMemory
+from src.sab_core.api.aiida import router as aiida_bridge_router
 
 from fastui import prebuilt_html
 from html import escape
@@ -170,6 +171,7 @@ def mount_engine(app: FastAPI, engine_name: str):
         logger.exception(log_event("engine.registry.failed", engine=engine_name, error=str(e)))
 
 mount_engine(app, "aiida")
+app.include_router(aiida_bridge_router)
 
 
 @app.get("/api/health")

@@ -18,6 +18,8 @@ from engines.aiida.tools import (
     inspect_process,
     fetch_recent_processes,
     inspect_workchain_spec,
+    list_remote_plugins as list_remote_plugins_via_bridge,
+    get_remote_workchain_spec as get_remote_workchain_spec_via_bridge,
     draft_workchain_builder,
     submit_workchain_builder,
     run_python_code,
@@ -43,7 +45,8 @@ Your mission is to provide high-level scientific insights and automate complex d
 ### TOOLBOX USAGE
 - DB Analysis: Use 'get_database_statistics' and 'list_groups' to navigate.
 - Deep Dive: Use 'inspect_group' to see attributes of many nodes, or 'inspect_node' for one.
-- Submission: Always 'inspect_workchain_spec' before drafting a builder to ensure inputs are correct.
+- Available WorkChains: When asked about plugins/workchains, call 'list_remote_plugins' first; this is the source of truth from the active worker bridge.
+- WorkChain Spec: Use 'get_remote_workchain_spec' (or 'check_workflow_spec') before drafting a builder.
 - Custom Logic: If standard tools fail, write custom QueryBuilder code using 'run_aiida_code'.
 """
 
@@ -166,6 +169,22 @@ async def inspect_node_details(ctx: RunContext[AiiDADeps], pk: int):
 
 # --- Process & Submission ---
 @aiida_researcher.tool
+async def list_remote_plugins(ctx: RunContext[AiiDADeps]):
+    """
+    Source of truth for Available WorkChains. Query the active AiiDA Worker Bridge `/plugins`.
+    """
+    ctx.deps.log_step("Fetching remote plugin list from worker bridge")
+    return await list_remote_plugins_via_bridge()
+
+@aiida_researcher.tool
+async def get_remote_workchain_spec(ctx: RunContext[AiiDADeps], entry_point: str):
+    """
+    Read the WorkChain "Instruction Manual" from the active worker bridge `/spec/{entry_point}`.
+    """
+    ctx.deps.log_step(f"Fetching remote WorkChain spec: {entry_point}")
+    return await get_remote_workchain_spec_via_bridge(entry_point)
+
+@aiida_researcher.tool
 async def inspect_process_details(ctx: RunContext[AiiDADeps], identifier: str):
     """Analyze a process (calculation or workchain), including logs and exit status."""
     ctx.deps.log_step(f"Inspecting process logs: {identifier}")
@@ -178,8 +197,8 @@ async def get_recent_aiida_processes(ctx: RunContext[AiiDADeps], limit: int = 15
 
 @aiida_researcher.tool
 async def check_workflow_spec(ctx: RunContext[AiiDADeps], entry_point: str):
-    """Inspect the required inputs and protocols for a WorkChain."""
-    return inspect_workchain_spec(entry_point)
+    """Inspect WorkChain inputs from the remote worker bridge spec endpoint."""
+    return await inspect_workchain_spec(entry_point)
 
 @aiida_researcher.tool
 async def submit_new_workflow(ctx: RunContext[AiiDADeps], workchain: str, structure_pk: int, code: str, protocol: str = 'moderate'):

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
+import { BridgeStatus } from "@/components/dashboard/bridge-status";
 import { cn } from "@/lib/utils";
 import type { ProcessItem, ProfileItem } from "@/types/aiida";
 
@@ -158,6 +159,8 @@ export function Sidebar({
           {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
         </Button>
       </header>
+
+      <BridgeStatus />
 
       <Panel
         className={cn(

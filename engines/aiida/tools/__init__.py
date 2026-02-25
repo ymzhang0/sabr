@@ -14,7 +14,13 @@ from .management.profile import (
     )
 from .management.group import inspect_group
 from .process.process import inspect_process, fetch_recent_processes
-from .submission.submission import inspect_workchain_spec, draft_workchain_builder, submit_workchain_builder
+from .submission.submission import (
+    inspect_workchain_spec,
+    list_remote_plugins,
+    get_remote_workchain_spec,
+    draft_workchain_builder,
+    submit_workchain_builder,
+)
 from .interpreter import run_python_code
 from .data.bands import get_bands_plot_data
 from .data.remote import list_remote_files, get_remote_file_content
@@ -37,6 +43,8 @@ __all__ = [
     "inspect_process",
     "fetch_recent_processes",
     "inspect_workchain_spec",
+    "list_remote_plugins",
+    "get_remote_workchain_spec",
     "draft_workchain_builder",
     "submit_workchain_builder",
     "run_python_code",
