@@ -53,6 +53,7 @@ def ask_for_folder_path():
 
 
 router = APIRouter()
+API_ROUTE_ROOT = "/api/aiida"
 DEFAULT_MODELS = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
 QUICK_PROMPTS: list[tuple[str, str]] = [
     ("Check Profile", "check the current profile"),
@@ -368,7 +369,7 @@ def _get_selected_model(state, available_models: list[str]) -> str:
 
 def _get_quick_shortcuts() -> list[dict[str, str]]:
     return [
-        {"label": label, "url": f"/aiida/chat/quick/{idx}"}
+        {"label": label, "url": f"{API_ROUTE_ROOT}/chat/quick/{idx}"}
         for idx, (label, _prompt) in enumerate(QUICK_PROMPTS)
     ]
 
@@ -1341,13 +1342,13 @@ async def trigger_native_browse():
         logger.info(log_event("aiida.archive.imported", path=selected_file))
     
     # 2. Force page refresh to reload the dashboard.
-    return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/'))])
+    return FastUI(root=[c.FireEvent(event=e.GoToEvent(url=f"{API_ROUTE_ROOT}/"))])
 
 @router.get("/profiles/switch/{name}", response_model=FastUI)
 async def handle_switch(name: str):
     # Switch profile in hub state.
     hub.switch_profile(name)
-    return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/'))])
+    return FastUI(root=[c.FireEvent(event=e.GoToEvent(url=f"{API_ROUTE_ROOT}/"))])
 
 # 2. Chat input page (http://localhost:8000/aiida/chat)
 # Triggered by "Start New Analysis" or direct navigation.
@@ -1374,7 +1375,7 @@ async def quick_chat_prompt(request: Request, shortcut_id: int) -> FastUI:
 
     if shortcut_id < 0 or shortcut_id >= len(QUICK_PROMPTS):
         logger.warning(log_event("aiida.quick_chat.invalid_shortcut", shortcut_id=shortcut_id))
-        return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
+        return FastUI(root=[c.FireEvent(event=e.GoToEvent(url=f"{API_ROUTE_ROOT}/chat"))])
 
     label, prompt = QUICK_PROMPTS[shortcut_id]
     logger.info(
@@ -1388,7 +1389,7 @@ async def quick_chat_prompt(request: Request, shortcut_id: int) -> FastUI:
     )
     if _debounce_request(state, key=f"quick:{shortcut_id}", window_seconds=5.0):
         logger.warning(log_event("aiida.quick_chat.debounced", shortcut_id=shortcut_id))
-        return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
+        return FastUI(root=[c.FireEvent(event=e.GoToEvent(url=f"{API_ROUTE_ROOT}/chat"))])
     turn_id = _start_chat_turn(
         state,
         user_intent=prompt,
@@ -1398,7 +1399,7 @@ async def quick_chat_prompt(request: Request, shortcut_id: int) -> FastUI:
     )
     logger.info(log_event("aiida.quick_chat.queued", shortcut_id=shortcut_id))
     logger.debug(log_event("aiida.quick_chat.turn_created", shortcut_id=shortcut_id, turn_id=turn_id))
-    return FastUI(root=[c.FireEvent(event=e.GoToEvent(url='/aiida/chat'))])
+    return FastUI(root=[c.FireEvent(event=e.GoToEvent(url=f"{API_ROUTE_ROOT}/chat"))])
 
 # 3. Agent execution endpoint and response rendering.
 # FastUI automatically posts here on ModelForm submission.

@@ -99,7 +99,7 @@ def get_profile_panel(profiles_display: list[tuple[str, str, bool]]) -> list[Any
                 ),
                 c.Link(
                     components=[c.Text(text="📂")],
-                    on_click=e.GoToEvent(url='/aiida/archives/browse-local'),
+                    on_click=e.GoToEvent(url='/api/aiida/archives/browse-local'),
                     class_name="btn btn-sm rounded-3 p-1 border border-dark border-opacity-10 shadow-none text-dark",
                 ),
             ],
@@ -128,7 +128,7 @@ def get_profile_panel(profiles_display: list[tuple[str, str, bool]]) -> list[Any
                         ],
                     )
                 ],
-                on_click=e.GoToEvent(url=f'/aiida/profiles/switch/{profile_name}'),
+                on_click=e.GoToEvent(url=f'/api/aiida/profiles/switch/{profile_name}'),
                 class_name="text-decoration-none",
             )
         )
@@ -158,7 +158,7 @@ def get_aiida_sidebar(
 
     sidebar_content.append(
         c.ServerLoad(
-            path='/aiida/profiles/stream',
+            path='/api/aiida/profiles/stream',
             load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
             sse=True,
             sse_retry=3000,
@@ -173,7 +173,7 @@ def get_aiida_sidebar(
                 components=[c.Text(text="Recent Tasks")]
             ),
             c.ServerLoad(
-                path='/aiida/processes/stream',
+                path='/api/aiida/processes/stream',
                 load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
                 sse=True,
                 sse_retry=3000,
@@ -194,13 +194,13 @@ def get_aiida_sidebar(
                         ),
                         c.Link(
                             components=[c.Text(text="Copy")],
-                            on_click=e.GoToEvent(url='/aiida/logs/copy', target='_blank'),
+                            on_click=e.GoToEvent(url='/api/aiida/logs/copy', target='_blank'),
                             class_name="small text-decoration-none text-secondary",
                         ),
                     ],
                 ),
                 c.ServerLoad(
-                    path="/aiida/logs/stream",
+                    path="/api/aiida/logs/stream",
                     load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
                     sse=True,
                     sse_retry=1200,
@@ -436,7 +436,7 @@ def get_chat_interface(
                             components=[
                                 c.Div(class_name="mx-auto h-100", components=[
                                     c.ServerLoad(
-                                        path="/aiida/chat/messages/stream",
+                                        path="/api/aiida/chat/messages/stream",
                                         load_trigger=e.PageEvent(name=STREAM_INIT_EVENT),
                                         sse=True,
                                         sse_retry=1200,
@@ -486,7 +486,7 @@ def get_chat_interface(
                                                     components=[
                                                         c.Link(
                                                             components=[c.Text(text="Clear chat")],
-                                                            on_click=e.GoToEvent(url='/aiida/chat/clear'),
+                                                            on_click=e.GoToEvent(url='/api/aiida/chat/clear'),
                                                             class_name="small text-decoration-none text-secondary pb-1",
                                                         ),
                                                         c.Div(
@@ -554,7 +554,7 @@ def render_explorer(profiles: list, archives: list):
                     c.display.DisplayLink(
                         field='name',
                         title='Action',
-                        link='/aiida/archive/{name}',
+                        link='/api/aiida/archive/{name}',
                         label='View Content'
                     ),
                 ],
@@ -563,7 +563,7 @@ def render_explorer(profiles: list, archives: list):
         
         c.Div(class_name="p-4 bg-body-tertiary rounded-4 border border-dashed text-center", components=[
             c.Text(text="Scan new directory for archives? "),
-            c.Button(text="Trigger Scan", on_click=e.GoToEvent(url='/aiida/explorer?refresh=true'), 
+            c.Button(text="Trigger Scan", on_click=e.GoToEvent(url='/api/aiida/explorer?refresh=true'), 
                      class_name="btn btn-sm btn-dark ms-2")
         ])
     ]

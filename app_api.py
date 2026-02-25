@@ -3,13 +3,12 @@ from __future__ import annotations
 import importlib
 import os
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from loguru import logger
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event, setup_logging
@@ -89,16 +88,6 @@ async def lifespan(app: FastAPI):
         
         logger.info(log_event("engine.agent.online"))
 
-        # 4. Dynamically mount the engine-specific frontend entry point.
-        @app.get(f"/{engine_name}/{{_path:path}}", response_class=HTMLResponse)
-        async def engine_frontend(_path: str = ""):
-            return _prebuilt_html_with_styles(
-                api_root_url='/api',  # Keep the shared /api root path.
-                title=f"SABR | {engine_name.upper()}"
-            )
-            
-        logger.info(log_event("engine.frontend.mounted", path=f"/{engine_name}"))
-
         for hub in ACTIVE_HUBS:
             if hasattr(hub, 'start'):
                 hub.start()
@@ -121,14 +110,29 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-STATIC_DIR = Path(__file__).resolve().parent / "engines" / "aiida" / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+LEGACY_STATIC_DIR = os.path.join(os.getcwd(), "engines", "aiida", "static")
+FRONTEND_DIST_DIR = settings.FRONTEND_DIST_DIR
+FRONTEND_ASSETS_DIR = settings.FRONTEND_ASSETS_DIR
+FRONTEND_INDEX_FILE = settings.FRONTEND_INDEX_FILE
+
+if os.path.isdir(LEGACY_STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=LEGACY_STATIC_DIR), name="static")
+
+if os.path.isdir(FRONTEND_ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="assets")
+else:
+    logger.warning(log_event("frontend.assets.missing", path=FRONTEND_ASSETS_DIR))
 
 
 def _get_cors_origins() -> list[str]:
+    required = {
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://sabr.yiming-zhang.com",
+    }
     raw = settings.SABR_FRONTEND_ORIGINS or ""
-    values = [item.strip() for item in raw.split(",") if item.strip()]
-    return values or ["http://localhost:5173", "http://127.0.0.1:5173"]
+    values = {item.strip() for item in raw.split(",") if item.strip()}
+    return sorted(values | required)
 
 
 app.add_middleware(
@@ -168,71 +172,12 @@ def mount_engine(app: FastAPI, engine_name: str):
 mount_engine(app, "aiida")
 
 
-def _load_aiida_api_module():
-    """Lazy-load AiiDA API module to avoid import-order coupling during startup."""
-    return importlib.import_module("engines.aiida.api")
+@app.get("/api/health")
+async def healthcheck():
+    return {"status": "ok"}
 
 
-# Compatibility routes for stream endpoints.
-# Some FastUI clients resolve ServerLoad paths against the browser URL,
-# while others resolve against APIRoot; expose both path styles.
-@app.get("/aiida/processes/stream")
-@app.get("/aiida/processes/stream/")
-async def aiida_processes_stream_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/aiida/processes/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_processes(request)
-
-
-@app.get("/aiida/profiles/stream")
-@app.get("/aiida/profiles/stream/")
-async def aiida_profiles_stream_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/aiida/profiles/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_profiles(request)
-
-
-@app.get("/api/api/aiida/processes/stream")
-@app.get("/api/api/aiida/processes/stream/")
-async def aiida_processes_stream_double_api_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/processes/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_processes(request)
-
-
-@app.get("/api/api/aiida/profiles/stream")
-@app.get("/api/api/aiida/profiles/stream/")
-async def aiida_profiles_stream_double_api_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/profiles/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_profiles(request)
-
-
-@app.get("/aiida/logs/stream")
-@app.get("/aiida/logs/stream/")
-async def aiida_logs_stream_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/aiida/logs/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_logs(request)
-
-
-@app.get("/api/api/aiida/logs/stream")
-@app.get("/api/api/aiida/logs/stream/")
-async def aiida_logs_stream_double_api_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/logs/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_logs(request)
-
-
-@app.get("/aiida/chat/messages/stream")
-@app.get("/aiida/chat/messages/stream/")
-async def aiida_chat_stream_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/aiida/chat/messages/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_chat_messages(request)
-
-
-@app.get("/aiida/logs/copy", response_class=HTMLResponse)
+@app.get("/api/aiida/logs/copy", response_class=HTMLResponse)
 async def aiida_logs_copy_page():
     """Open a tiny helper page and copy latest runtime logs to clipboard."""
     _, lines = get_log_buffer_snapshot(limit=240)
@@ -276,13 +221,6 @@ async def aiida_logs_copy_page():
     return HTMLResponse(html)
 
 
-@app.get("/api/api/aiida/chat/messages/stream")
-@app.get("/api/api/aiida/chat/messages/stream/")
-async def aiida_chat_stream_double_api_compat(request: Request):
-    logger.debug(log_event("aiida.stream.compat", path="/api/api/aiida/chat/messages/stream"))
-    aiida_api = _load_aiida_api_module()
-    return await aiida_api.stream_chat_messages(request)
-
 # ============================================================
 # 🛣️ Core Agent Endpoint (The Cyclic Hub)
 # ============================================================
@@ -294,6 +232,24 @@ async def fastui_frontend(_path: str = "") -> HTMLResponse:
         api_root_url='/api',
         title='SABR v2'
     ))
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_catch_all(full_path: str = ""):
+    if full_path.startswith("api") or full_path.startswith("assets") or full_path.startswith("static"):
+        return HTMLResponse("Not Found", status_code=404)
+
+    if not os.path.isfile(FRONTEND_INDEX_FILE):
+        logger.warning(
+            log_event(
+                "frontend.index.missing",
+                path=FRONTEND_INDEX_FILE,
+                dist=FRONTEND_DIST_DIR,
+            )
+        )
+        return HTMLResponse("Frontend build not found.", status_code=404)
+
+    return FileResponse(FRONTEND_INDEX_FILE)
 # ============================================================
 # 🏁 Execution Entry
 # ============================================================

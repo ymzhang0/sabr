@@ -11,8 +11,43 @@ import type {
   UploadArchiveResponse,
 } from "@/types/aiida";
 
-const baseURL =
-  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/aiida/frontend";
+const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
+const FRONTEND_API_PREFIX = "/api/aiida/frontend";
+const baseURL = `${API_BASE_URL}${FRONTEND_API_PREFIX}`;
+
+function resolveHttpOrigin(): string {
+  if (import.meta.env.DEV) {
+    return "http://localhost:8000";
+  }
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return `${window.location.protocol}//${window.location.host}`;
+}
+
+function resolveWsOrigin(): string {
+  if (import.meta.env.DEV) {
+    return "ws://localhost:8000";
+  }
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}`;
+}
+
+export function getFrontendStreamUrl(path: string): string {
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  return `${resolveHttpOrigin()}${cleanPath}`;
+}
+
+export function getTerminalWsUrl(path = "/api/terminal"): string {
+  const cleanPath = path.startsWith("/") ? path : `/${path}`;
+  return `${resolveWsOrigin()}${cleanPath}`;
+}
+
+export const LOGS_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/logs/stream`);
+export const TERMINAL_WS_URL = getTerminalWsUrl("/api/terminal");
 
 export const frontendApi = axios.create({
   baseURL,

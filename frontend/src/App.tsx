@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  LOGS_STREAM_URL,
   getBootstrap,
   getChatMessages,
   getGroups,
@@ -67,6 +68,7 @@ export default function App() {
   const [selectedReferences, setSelectedReferences] = useState<ReferenceNode[]>([]);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<number | null>(null);
+  const [streamedLogs, setStreamedLogs] = useState<string[] | null>(null);
   const sendAbortControllerRef = useRef<AbortController | null>(null);
   const requestInFlightRef = useRef(false);
 
@@ -117,6 +119,36 @@ export default function App() {
   });
 
   useEffect(() => {
+    if (!bootstrapQuery.isSuccess) {
+      return;
+    }
+
+    const source = new EventSource(LOGS_STREAM_URL);
+
+    const applySnapshot = (payload: string) => {
+      try {
+        const parsed = JSON.parse(payload) as { lines?: string[] };
+        if (Array.isArray(parsed.lines)) {
+          setStreamedLogs(parsed.lines);
+        }
+      } catch (error) {
+        console.error("Failed to parse runtime log stream payload", error);
+      }
+    };
+
+    source.addEventListener("logs", (event) => {
+      applySnapshot((event as MessageEvent<string>).data);
+    });
+    source.onmessage = (event) => {
+      applySnapshot(event.data);
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [bootstrapQuery.isSuccess]);
+
+  useEffect(() => {
     if (selectedModel) {
       return;
     }
@@ -156,7 +188,7 @@ export default function App() {
 
   const processes = processesQuery.data?.items ?? bootstrapQuery.data?.processes ?? [];
   const groups = groupsQuery.data?.items ?? bootstrapQuery.data?.groups ?? [];
-  const logs = logsQuery.data?.lines ?? bootstrapQuery.data?.logs.lines ?? [];
+  const logs = streamedLogs ?? logsQuery.data?.lines ?? bootstrapQuery.data?.logs.lines ?? [];
   const chatMessages = chatQuery.data?.messages ?? bootstrapQuery.data?.chat.messages ?? [];
   const models = bootstrapQuery.data?.models ?? [];
   const quickPrompts = bootstrapQuery.data?.quick_prompts ?? [];
