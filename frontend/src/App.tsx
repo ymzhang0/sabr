@@ -8,10 +8,8 @@ import {
   getGroups,
   getLogs,
   getProcesses,
-  getProfiles,
   sendChat,
   stopChat,
-  switchProfile,
   uploadArchive,
 } from "@/lib/api";
 import { ChatPanel } from "@/components/dashboard/chat-panel";
@@ -83,13 +81,6 @@ export default function App() {
     refetchOnWindowFocus: false,
   });
 
-  const profilesQuery = useQuery({
-    queryKey: ["profiles"],
-    queryFn: getProfiles,
-    enabled: bootstrapQuery.isSuccess,
-    refetchInterval: 20_000,
-  });
-
   const processesQuery = useQuery({
     queryKey: ["processes", selectedGroup, selectedType, processLimit],
     queryFn: () => getProcesses(processLimit, selectedGroup || undefined, selectedType || undefined),
@@ -158,33 +149,13 @@ export default function App() {
     }
   }, [bootstrapQuery.data, selectedModel]);
 
-  const switchMutation = useMutation({
-    mutationFn: switchProfile,
-    onSuccess: (data) => {
-      queryClient.setQueryData(["profiles"], data);
-      queryClient.invalidateQueries({ queryKey: ["processes"] });
-      queryClient.invalidateQueries({ queryKey: ["groups"] });
-      queryClient.invalidateQueries({ queryKey: ["chat"] });
-    },
-  });
-
   const uploadMutation = useMutation({
     mutationFn: uploadArchive,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["profiles"] });
       queryClient.invalidateQueries({ queryKey: ["groups"] });
       queryClient.invalidateQueries({ queryKey: ["processes"] });
     },
   });
-
-  const profileData =
-    profilesQuery.data ??
-    (bootstrapQuery.data
-      ? {
-          current_profile: bootstrapQuery.data.current_profile,
-          profiles: bootstrapQuery.data.profiles,
-        }
-      : undefined);
 
   const processes = processesQuery.data?.items ?? bootstrapQuery.data?.processes ?? [];
   const groups = groupsQuery.data?.items ?? bootstrapQuery.data?.groups ?? [];
@@ -351,8 +322,6 @@ export default function App() {
     <main className="dashboard-shell h-screen overflow-hidden p-2">
       <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col gap-2 xl:flex-row">
         <Sidebar
-          profiles={profileData?.profiles ?? []}
-          currentProfile={profileData?.current_profile ?? null}
           processes={processes}
           groupOptions={groups}
           selectedGroup={selectedGroup}
@@ -360,8 +329,6 @@ export default function App() {
           processLimit={processLimit}
           referencedNodeIds={referencedNodeIds}
           isUpdatingProcessLimit={pendingProcessLimit !== null}
-          isSwitchingProfile={switchMutation.isPending}
-          isUploadingArchive={uploadMutation.isPending}
           isDarkMode={theme === "dark"}
           onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
           onGroupChange={setSelectedGroup}
@@ -373,13 +340,6 @@ export default function App() {
             setProcessLimit(nextLimit);
             setPendingProcessLimit(nextLimit);
           }}
-          onSwitchProfile={(profileName) => {
-            if (switchMutation.isPending || profileName === profileData?.current_profile) {
-              return;
-            }
-            switchMutation.mutate(profileName);
-          }}
-          onUploadArchive={(file) => uploadMutation.mutate(file)}
           onReferenceNode={handleReferenceNode}
         />
 

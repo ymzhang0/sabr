@@ -1,15 +1,15 @@
 import axios from "axios";
 
 import type {
+  BridgeProfilesResponse,
   BridgeResourcesResponse,
   BridgeStatusResponse,
-  BridgeSystemInfoResponse,
+  BridgeSwitchProfileResponse,
   BootstrapResponse,
   ChatResponse,
   GroupsResponse,
   LogsResponse,
   ProcessesResponse,
-  ProfilesResponse,
   SendChatRequest,
   UploadArchiveResponse,
 } from "@/types/aiida";
@@ -66,18 +66,6 @@ const aiidaApi = axios.create({
 
 export async function getBootstrap(): Promise<BootstrapResponse> {
   const { data } = await frontendApi.get<BootstrapResponse>("/bootstrap");
-  return data;
-}
-
-export async function getProfiles(): Promise<ProfilesResponse> {
-  const { data } = await frontendApi.get<ProfilesResponse>("/profiles");
-  return data;
-}
-
-export async function switchProfile(profileName: string): Promise<ProfilesResponse> {
-  const { data } = await frontendApi.post<ProfilesResponse>("/profiles/switch", {
-    profile_name: profileName,
-  });
   return data;
 }
 
@@ -139,17 +127,21 @@ export async function stopChat(turnId?: number): Promise<{ status: string; turn_
 const DEFAULT_BRIDGE_STATUS: BridgeStatusResponse = {
   status: "offline",
   url: "http://127.0.0.1:8001",
-  environment: "Local Sandbox",
-};
-
-const DEFAULT_BRIDGE_SYSTEM_INFO: BridgeSystemInfoResponse = {
+  environment: "Remote Bridge",
   profile: "unknown",
-  counts: {
+  daemon_status: false,
+  resources: {
     computers: 0,
     codes: 0,
     workchains: 0,
   },
-  daemon_status: false,
+  plugins: [],
+};
+
+const DEFAULT_BRIDGE_PROFILES: BridgeProfilesResponse = {
+  current_profile: null,
+  default_profile: null,
+  profiles: [],
 };
 
 const DEFAULT_BRIDGE_RESOURCES: BridgeResourcesResponse = {
@@ -166,22 +158,18 @@ export async function getBridgeStatus(): Promise<BridgeStatusResponse> {
   }
 }
 
-export async function getBridgePlugins(): Promise<string[]> {
+export async function getBridgeProfiles(): Promise<BridgeProfilesResponse> {
   try {
-    const { data } = await aiidaApi.get<string[]>("/plugins");
-    return Array.isArray(data) ? data : [];
+    const { data } = await aiidaApi.get<BridgeProfilesResponse>("/profiles");
+    return data;
   } catch {
-    return [];
+    return DEFAULT_BRIDGE_PROFILES;
   }
 }
 
-export async function getBridgeSystemInfo(): Promise<BridgeSystemInfoResponse> {
-  try {
-    const { data } = await aiidaApi.get<BridgeSystemInfoResponse>("/system");
-    return data;
-  } catch {
-    return DEFAULT_BRIDGE_SYSTEM_INFO;
-  }
+export async function switchBridgeProfile(profile: string): Promise<BridgeSwitchProfileResponse> {
+  const { data } = await aiidaApi.post<BridgeSwitchProfileResponse>("/profiles/switch", { profile });
+  return data;
 }
 
 export async function getBridgeResources(): Promise<BridgeResourcesResponse> {

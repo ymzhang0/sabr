@@ -79,10 +79,6 @@ class FrontendStopChatRequest(BaseModel):
     turn_id: int | None = None
 
 
-class FrontendSwitchProfileRequest(BaseModel):
-    profile_name: str = Field(..., min_length=1)
-
-
 def _normalize_process_state(state: str | None) -> str:
     return str(state or "unknown").strip().lower()
 
@@ -96,20 +92,6 @@ def _state_to_status_color(state: str | None) -> str:
     if normalized in {"failed", "excepted", "killed"}:
         return "error"
     return "idle"
-
-
-def _serialize_profiles(profiles_display: list[tuple[str, str, bool]]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for name, display_name, is_active in profiles_display:
-        items.append(
-            {
-                "name": str(name),
-                "display_name": str(display_name),
-                "is_active": bool(is_active),
-                "type": "imported" if str(display_name).endswith("(imported)") else "configured",
-            }
-        )
-    return items
 
 
 def _serialize_processes(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1003,7 +985,6 @@ async def stream_logs(request: Request):
 async def frontend_bootstrap(request: Request):
     """Initial payload for the React dashboard."""
     state = request.app.state
-    profiles_display, _recent_processes = _get_sidebar_state()
     try:
         processes = _get_frontend_nodes(limit=15)
     except Exception as err:
@@ -1020,8 +1001,6 @@ async def frontend_bootstrap(request: Request):
     chat_history = _serialize_chat_history(_get_chat_history(state))
 
     return {
-        "profiles": _serialize_profiles(profiles_display),
-        "current_profile": hub.current_profile,
         "processes": _serialize_processes(processes),
         "groups": groups,
         "chat": {
@@ -1038,15 +1017,6 @@ async def frontend_bootstrap(request: Request):
     }
 
 
-@router.get("/frontend/profiles")
-async def frontend_profiles():
-    profiles_display, _ = _get_sidebar_state()
-    return {
-        "current_profile": hub.current_profile,
-        "profiles": _serialize_profiles(profiles_display),
-    }
-
-
 @router.get("/frontend/groups")
 async def frontend_groups():
     try:
@@ -1055,21 +1025,6 @@ async def frontend_groups():
         logger.exception(log_event("aiida.frontend.groups.failed", error=str(err)))
         items = []
     return {"items": items}
-
-
-@router.post("/frontend/profiles/switch")
-async def frontend_switch_profile(payload: FrontendSwitchProfileRequest):
-    profiles_display, _ = _get_sidebar_state()
-    profile_names = {name for name, _display_name, _active in profiles_display}
-    if payload.profile_name not in profile_names:
-        raise HTTPException(status_code=404, detail="Profile not found")
-
-    hub.switch_profile(payload.profile_name)
-    profiles_display, _ = _get_sidebar_state()
-    return {
-        "current_profile": hub.current_profile,
-        "profiles": _serialize_profiles(profiles_display),
-    }
 
 
 @router.post("/frontend/archives/upload")
@@ -1088,12 +1043,10 @@ async def frontend_upload_archive(file: UploadFile = File(...)):
     await file.close()
 
     profile_name = hub.import_archive(target_path)
-    profiles_display, _ = _get_sidebar_state()
     return {
         "status": "uploaded",
         "profile_name": profile_name,
         "stored_path": str(target_path),
-        "profiles": _serialize_profiles(profiles_display),
     }
 
 

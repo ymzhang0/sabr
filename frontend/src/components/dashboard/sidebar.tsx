@@ -1,11 +1,11 @@
-import { ChevronDown, FileUp, Loader2, Moon, Sun } from "lucide-react";
+import { ChevronDown, Loader2, Moon, Sun } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
 import { cn } from "@/lib/utils";
-import type { ProcessItem, ProfileItem } from "@/types/aiida";
+import type { ProcessItem } from "@/types/aiida";
 
 function stateDotClass(state: ProcessItem["status_color"]): string {
   if (state === "running") {
@@ -41,8 +41,6 @@ function toDisplayStatus(state: string | null): string {
 }
 
 type SidebarProps = {
-  profiles: ProfileItem[];
-  currentProfile: string | null;
   processes: ProcessItem[];
   groupOptions: string[];
   selectedGroup: string;
@@ -50,23 +48,17 @@ type SidebarProps = {
   processLimit: number;
   referencedNodeIds: number[];
   isUpdatingProcessLimit: boolean;
-  isSwitchingProfile: boolean;
-  isUploadingArchive: boolean;
   isDarkMode: boolean;
   onToggleTheme: () => void;
   onGroupChange: (groupLabel: string) => void;
   onTypeChange: (nodeType: string) => void;
   onProcessLimitChange: (limit: number) => void;
-  onSwitchProfile: (profileName: string) => void;
-  onUploadArchive: (file: File) => void;
   onReferenceNode: (process: ProcessItem) => void;
 };
 
 const NODE_TYPE_OPTIONS = ["ProcessNode", "WorkChainNode", "StructureData"] as const;
 
 export function Sidebar({
-  profiles,
-  currentProfile,
   processes,
   groupOptions,
   selectedGroup,
@@ -74,38 +66,23 @@ export function Sidebar({
   processLimit,
   referencedNodeIds,
   isUpdatingProcessLimit,
-  isSwitchingProfile,
-  isUploadingArchive,
   isDarkMode,
   onToggleTheme,
   onGroupChange,
   onTypeChange,
   onProcessLimitChange,
-  onSwitchProfile,
-  onUploadArchive,
   onReferenceNode,
 }: SidebarProps) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const groupMenuRef = useRef<HTMLDivElement | null>(null);
   const typeMenuRef = useRef<HTMLDivElement | null>(null);
-  const [selectedProfile, setSelectedProfile] = useState(currentProfile ?? "");
-  const [dragActive, setDragActive] = useState(false);
   const [isGroupMenuOpen, setIsGroupMenuOpen] = useState(false);
   const [isTypeMenuOpen, setIsTypeMenuOpen] = useState(false);
   const [limitInput, setLimitInput] = useState(String(processLimit));
 
   useEffect(() => {
-    setSelectedProfile(currentProfile ?? "");
-  }, [currentProfile]);
-
-  useEffect(() => {
     setLimitInput(String(processLimit));
   }, [processLimit]);
 
-  const sortedProfiles = useMemo(
-    () => [...profiles].sort((a, b) => a.display_name.localeCompare(b.display_name)),
-    [profiles],
-  );
   const sortedGroups = useMemo(
     () => [...groupOptions].sort((a, b) => a.localeCompare(b)),
     [groupOptions],
@@ -144,7 +121,7 @@ export function Sidebar({
   };
 
   return (
-    <aside className="flex h-full min-h-0 w-full shrink-0 flex-col gap-2 lg:w-[320px]">
+    <aside className="flex h-full min-h-0 w-full shrink-0 flex-col gap-2 lg:w-[360px]">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
           AiiDA Dashboard
@@ -163,110 +140,7 @@ export function Sidebar({
       <BridgeStatus />
 
       <Panel
-        className={cn(
-          "space-y-3 border-zinc-100/90 p-3 transition-opacity duration-300 dark:border-zinc-800/80",
-          (isSwitchingProfile || isUploadingArchive) && "opacity-70",
-        )}
-      >
-        <div className="mx-auto w-[90%] space-y-2">
-          <div className="flex items-center justify-between">
-            <label className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-              Profile
-            </label>
-            {isSwitchingProfile ? (
-              <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-[0.15em] text-zinc-500 dark:text-zinc-400">
-                <Loader2 className="h-3 w-3 animate-spin" />
-                Switching
-              </span>
-            ) : null}
-          </div>
-
-          <div className="grid w-full grid-cols-[minmax(0,1fr)_36px] items-center gap-2">
-            <select
-              className="h-9 w-full truncate rounded-lg border border-zinc-200/70 bg-zinc-50/80 px-3 pr-8 text-sm text-zinc-800 outline-none transition-all duration-200 focus:border-zinc-400 focus:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-200 dark:hover:border-zinc-700 dark:focus:border-zinc-600 dark:focus:bg-zinc-900/60"
-              value={selectedProfile}
-              disabled={isSwitchingProfile}
-              onChange={(event) => {
-                const nextProfile = event.target.value;
-                setSelectedProfile(nextProfile);
-                if (nextProfile && nextProfile !== currentProfile) {
-                  onSwitchProfile(nextProfile);
-                }
-              }}
-              aria-label="Select AiiDA profile"
-            >
-              <option value="">Select profile</option>
-              {sortedProfiles.map((profile) => (
-                <option key={profile.name} value={profile.name}>
-                  {profile.display_name}
-                </option>
-              ))}
-            </select>
-
-            <Button
-              variant="outline"
-              size="icon"
-              className="h-9 w-9 shrink-0 border-zinc-200/80 bg-transparent transition-colors duration-200 hover:bg-zinc-100/70 dark:border-zinc-800 dark:hover:bg-zinc-900/70"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isUploadingArchive}
-              aria-label="Upload archive"
-            >
-              <FileUp className="h-4 w-4" />
-            </Button>
-          </div>
-
-          <div
-            className={cn(
-              "w-full rounded-lg border border-dashed px-3 py-2 text-[11px] text-zinc-500 transition-colors dark:text-zinc-400",
-              dragActive
-                ? "border-emerald-400/80 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                : "border-zinc-200/80 dark:border-zinc-800",
-            )}
-            onDragEnter={(event) => {
-              event.preventDefault();
-              setDragActive(true);
-            }}
-            onDragOver={(event) => {
-              event.preventDefault();
-              setDragActive(true);
-            }}
-            onDragLeave={(event) => {
-              event.preventDefault();
-              setDragActive(false);
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              setDragActive(false);
-              const file = event.dataTransfer.files?.[0];
-              if (file) {
-                onUploadArchive(file);
-              }
-            }}
-          >
-            Drop `.aiida` or `.zip` archive
-          </div>
-        </div>
-
-        <input
-          ref={fileInputRef}
-          type="file"
-          className="hidden"
-          accept=".aiida,.zip"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) {
-              onUploadArchive(file);
-            }
-            event.target.value = "";
-          }}
-        />
-      </Panel>
-
-      <Panel
-        className={cn(
-          "flex min-h-0 flex-1 flex-col border-zinc-100/90 p-4 transition-opacity duration-300 dark:border-zinc-800/80",
-          isSwitchingProfile && "opacity-75",
-        )}
+        className="relative z-10 flex min-h-0 flex-1 flex-col border-zinc-100/90 p-4 transition-opacity duration-300 dark:border-zinc-800/80"
       >
         <div className="mx-auto flex h-full min-h-0 w-[90%] flex-col">
           <div className="mb-3 flex items-center justify-between gap-2">

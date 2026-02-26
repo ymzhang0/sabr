@@ -1,10 +1,3 @@
-export type ProfileItem = {
-  name: string;
-  display_name: string;
-  is_active: boolean;
-  type: "configured" | "imported" | string;
-};
-
 export type ProcessItem = {
   pk: number;
   label: string;
@@ -39,8 +32,6 @@ export type LogsSnapshot = {
 };
 
 export type BootstrapResponse = {
-  profiles: ProfileItem[];
-  current_profile: string | null;
   processes: ProcessItem[];
   groups: string[];
   chat: ChatSnapshot;
@@ -58,16 +49,10 @@ export type GroupsResponse = {
   items: string[];
 };
 
-export type ProfilesResponse = {
-  current_profile: string | null;
-  profiles: ProfileItem[];
-};
-
 export type UploadArchiveResponse = {
   status: string;
   profile_name: string;
   stored_path: string;
-  profiles: ProfileItem[];
 };
 
 export type LogsResponse = LogsSnapshot;
@@ -85,6 +70,27 @@ export type BridgeStatusResponse = {
   status: "online" | "offline";
   url: string;
   environment: string;
+  profile: string;
+  daemon_status: boolean;
+  resources: BridgeSystemCounts;
+  plugins: string[];
+};
+
+export type BridgeProfileItem = {
+  name: string;
+  is_default: boolean;
+  is_active: boolean;
+};
+
+export type BridgeProfilesResponse = {
+  current_profile: string | null;
+  default_profile: string | null;
+  profiles: BridgeProfileItem[];
+};
+
+export type BridgeSwitchProfileResponse = {
+  status: string;
+  current_profile: string | null;
 };
 
 export type BridgeSystemCounts = {

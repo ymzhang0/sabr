@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from src.sab_core.deps.base import BaseSABRDeps
-from src.sab_core.engines.aiida.config import aiida_engine_settings
 
 @dataclass
 class AiiDADeps(BaseSABRDeps):
@@ -12,9 +11,8 @@ class AiiDADeps(BaseSABRDeps):
     with necessary context such as archive paths and database profiles.
     """
     
-    # The absolute path to the .aiida archive or the profile name
+    # The absolute path to a .aiida archive mounted by the remote worker.
     archive_path: Optional[str] = None
-    profile_name: str = aiida_engine_settings.profile_name
     
     # Metadata for the current research session
     session_id: Optional[str] = None
