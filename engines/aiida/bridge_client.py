@@ -5,7 +5,7 @@ from typing import Any, Mapping
 
 import httpx
 
-from src.sab_core.config import settings
+from src.sab_core.engines.aiida.config import aiida_engine_settings
 
 DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001"
 OFFLINE_WORKER_MESSAGE = "AiiDA Worker is offline, please ensure the bridge is running on port 8001."
@@ -27,7 +27,7 @@ class BridgeOfflineError(Exception):
 
 
 def bridge_url() -> str:
-    raw = str(settings.AIIDA_BRIDGE_URL or DEFAULT_BRIDGE_URL).strip()
+    raw = str(aiida_engine_settings.bridge_url or DEFAULT_BRIDGE_URL).strip()
     return raw.rstrip("/")
 
 

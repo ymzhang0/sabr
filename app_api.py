@@ -20,7 +20,7 @@ logger.info(log_event("logging.ready"))
 
 from src.sab_core.config import settings
 from src.sab_core.memory.json_memory import JSONMemory
-from src.sab_core.api.aiida import router as aiida_bridge_router
+from src.sab_core.engines.aiida.aiida_router import router as aiida_bridge_router
 
 from fastui import prebuilt_html
 from html import escape

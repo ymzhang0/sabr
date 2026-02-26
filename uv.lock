@@ -3327,7 +3327,6 @@ name = "sab-core"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "aiida-core" },
     { name = "fastapi" },
     { name = "fastui" },
     { name = "google-genai" },
@@ -3362,8 +3361,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiida-core", specifier = "==2.6.4" },
-    { name = "aiida-core", marker = "extra == 'aiida'", specifier = ">=2.0.0" },
+    { name = "aiida-core", marker = "extra == 'aiida'", specifier = "==2.6.4" },
     { name = "fastapi", specifier = ">=0.129.0" },
     { name = "fastui", specifier = ">=0.9.0" },
     { name = "google-genai", specifier = ">=1.0" },

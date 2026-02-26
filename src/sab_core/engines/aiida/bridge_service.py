@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 
-from src.sab_core.config import settings
+from src.sab_core.engines.aiida.config import aiida_engine_settings
 from src.sab_core.logging_utils import log_event
 
 BridgeConnectionState = Literal["online", "offline"]
@@ -170,4 +170,4 @@ class AiiDABridgeService:
         return str(item).strip()
 
 
-bridge_service = AiiDABridgeService(bridge_url=settings.AIIDA_BRIDGE_URL)
+bridge_service = AiiDABridgeService(bridge_url=aiida_engine_settings.bridge_url)

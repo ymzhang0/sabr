@@ -1,4 +1,4 @@
-# src/sab_core/api/schemas.py
+# src/sab_core/schema/request.py
 from pydantic import BaseModel, Field
 from typing import Optional
 
@@ -6,13 +6,13 @@ class AgentRequest(BaseModel):
     """
     The schema for incoming chat requests from the frontend.
     """
-    # The user's natural language input (e.g., "Calculate Band Structure for Silicon")
+    # The user's natural language input (e.g., "analyze this material workflow")
     intent: str = Field(..., description="The user's query or command.")
     
-    # The currently selected AiiDA archive path or profile name
+    # Optional engine-specific context handle (profile/archive/project id, etc.)
     context_archive: Optional[str] = Field(
         default=None, 
-        description="The active AiiDA context (profile or archive path)."
+        description="The active engine context identifier."
     )
 
     # Optional: The specific model to use (if the user switches it in the UI)

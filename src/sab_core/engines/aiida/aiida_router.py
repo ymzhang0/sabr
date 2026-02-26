@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from src.sab_core.services.bridge_service import bridge_service
+from src.sab_core.engines.aiida.bridge_service import bridge_service
 
 router = APIRouter(prefix="/api/aiida", tags=["aiida-bridge"])
 
