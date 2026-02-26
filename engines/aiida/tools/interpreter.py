@@ -1,21 +1,34 @@
-# examples/aiida/tools/interpreter.py
-import io
-import traceback
-from contextlib import redirect_stdout, redirect_stderr
+"""Async bridge proxy for worker-side Python execution helpers."""
 
-def run_python_code(script: str):
-    """Execute Python code for advanced AiiDA interaction (AI-oriented utility)."""
-    exec_globals = {}
-    try:
-        from aiida import orm, plugins, engine
-        exec_globals.update({"orm": orm, "plugins": plugins, "engine": engine})
-    except ImportError:
-        pass
+from __future__ import annotations
 
-    output_buffer = io.StringIO()
+from typing import Any
+
+from engines.aiida.bridge_client import (
+    OFFLINE_WORKER_MESSAGE,
+    BridgeOfflineError,
+    format_bridge_error,
+    request_json,
+)
+
+
+async def run_python_code(script: str) -> str | dict[str, Any]:
+    """
+    Execute ad-hoc Python/AiiDA logic on the worker (`POST /management/run-python`).
+
+    Returns stdout/stderr capture on success and structured bridge errors otherwise.
+    """
     try:
-        with redirect_stdout(output_buffer), redirect_stderr(output_buffer):
-            exec(script, exec_globals)
-        return output_buffer.getvalue() or "Code executed successfully (No output)."
-    except Exception:
-        return f"Error executing code:\n{traceback.format_exc()}"
+        payload = await request_json("POST", "/management/run-python", json={"script": script})
+        if isinstance(payload, dict):
+            if payload.get("success"):
+                return str(payload.get("output") or "Code executed successfully (No output).")
+            return {
+                "error": str(payload.get("error") or "Worker script execution failed"),
+                "output": payload.get("output"),
+            }
+        return str(payload)
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)

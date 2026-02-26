@@ -86,3 +86,32 @@ export type BridgeStatusResponse = {
   url: string;
   environment: string;
 };
+
+export type BridgeSystemCounts = {
+  computers: number;
+  codes: number;
+  workchains: number;
+};
+
+export type BridgeSystemInfoResponse = {
+  profile: string;
+  counts: BridgeSystemCounts;
+  daemon_status: boolean;
+};
+
+export type BridgeComputerResource = {
+  label: string;
+  hostname: string;
+  description: string | null;
+};
+
+export type BridgeCodeResource = {
+  label: string;
+  default_plugin: string | null;
+  computer_label: string | null;
+};
+
+export type BridgeResourcesResponse = {
+  computers: BridgeComputerResource[];
+  codes: BridgeCodeResource[];
+};

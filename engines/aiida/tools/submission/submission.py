@@ -1,24 +1,16 @@
+"""Async submission/introspection proxies for the aiida-worker bridge."""
+
 from __future__ import annotations
 
 from typing import Any
 from urllib.parse import quote
 
-import httpx
-from aiida.engine import submit
-from aiida import orm
-from aiida.plugins import WorkflowFactory
-
-from src.sab_core.config import settings
-
-DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001"
-OFFLINE_WORKER_MESSAGE = (
-    "AiiDA Worker is offline, please ensure the bridge is running on port 8001."
+from engines.aiida.bridge_client import (
+    OFFLINE_WORKER_MESSAGE,
+    BridgeOfflineError,
+    format_bridge_error,
+    request_json,
 )
-
-
-def _bridge_url() -> str:
-    raw = (settings.AIIDA_BRIDGE_URL or DEFAULT_BRIDGE_URL).strip()
-    return raw.rstrip("/")
 
 
 def _normalize_plugins_payload(payload: Any) -> list[str]:
@@ -46,118 +38,108 @@ def _normalize_plugins_payload(payload: Any) -> list[str]:
 
 
 async def list_remote_plugins() -> list[str] | str:
-    """
-    Source of truth for "Available WorkChains": query the active AiiDA Worker Bridge `/plugins`.
-    """
-    bridge_url = _bridge_url()
-    endpoint = f"{bridge_url}/plugins"
-
+    """Source of truth for available WorkChains (`GET /submission/plugins`)."""
     try:
-        async with httpx.AsyncClient(timeout=8.0, trust_env=False) as client:
-            response = await client.get(endpoint)
-            response.raise_for_status()
-            payload = response.json()
-    except httpx.RequestError:
+        payload = await request_json("GET", "/submission/plugins")
+        return _normalize_plugins_payload(payload)
+    except BridgeOfflineError:
         return OFFLINE_WORKER_MESSAGE
-    except httpx.HTTPStatusError as exc:
-        return f"Failed to fetch plugins from bridge: HTTP {exc.response.status_code}."
-
-    return _normalize_plugins_payload(payload)
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
 
 
 async def get_remote_workchain_spec(entry_point: str) -> dict[str, Any] | str:
-    """
-    Fetch the WorkChain "Instruction Manual" from the active bridge via `/spec/{entry_point}`.
-    """
-    cleaned_entry_point = (entry_point or "").strip()
-    if not cleaned_entry_point:
+    """Fetch WorkChain input spec (`GET /submission/spec/{entry_point}`)."""
+    cleaned = (entry_point or "").strip()
+    if not cleaned:
         return "Please provide a valid WorkChain entry point name."
 
-    bridge_url = _bridge_url()
-    endpoint = f"{bridge_url}/spec/{quote(cleaned_entry_point, safe='')}"
-
     try:
-        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-            response = await client.get(endpoint)
-            response.raise_for_status()
-            payload = response.json()
-    except httpx.RequestError:
+        payload = await request_json("GET", f"/submission/spec/{quote(cleaned, safe='')}")
+        return payload if isinstance(payload, dict) else {"spec": payload}
+    except BridgeOfflineError:
         return OFFLINE_WORKER_MESSAGE
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
-            return f"WorkChain '{cleaned_entry_point}' was not found on the active AiiDA Worker."
-        return f"Failed to fetch WorkChain spec from bridge: HTTP {exc.response.status_code}."
-    except ValueError:
-        return "Bridge returned an invalid WorkChain spec payload."
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
 
-    if not isinstance(payload, dict):
-        return "Bridge returned an invalid WorkChain spec payload."
 
-    return payload
+async def inspect_lab_infrastructure() -> dict[str, Any] | str:
+    """Inspect worker profile/daemon/computers/codes before submission."""
+    try:
+        system_payload = await request_json("GET", "/system/info")
+        resources_payload = await request_json("GET", "/resources")
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
+
+    if not isinstance(system_payload, dict) or not isinstance(resources_payload, dict):
+        return {"error": "Bridge returned invalid infrastructure payload"}
+
+    computers = resources_payload.get("computers") if isinstance(resources_payload.get("computers"), list) else []
+    codes = resources_payload.get("codes") if isinstance(resources_payload.get("codes"), list) else []
+
+    return {
+        "profile": str(system_payload.get("profile") or "unknown"),
+        "daemon_status": bool(system_payload.get("daemon_status", False)),
+        "counts": system_payload.get("counts") if isinstance(system_payload.get("counts"), dict) else {},
+        "computers": computers,
+        "codes": codes,
+        "code_targets": [
+            f"{code.get('label')}@{code.get('computer_label')}"
+            if isinstance(code, dict) and code.get("computer_label")
+            else str(code.get("label") if isinstance(code, dict) else code)
+            for code in codes
+        ],
+    }
 
 
 async def inspect_workchain_spec(entry_point_name: str):
-    """
-    Inspect a WorkChain input spec from the remote AiiDA Worker Bridge.
-    """
+    """Inspect WorkChain spec by delegating to `get_remote_workchain_spec`."""
     return await get_remote_workchain_spec(entry_point_name)
 
-def draft_workchain_builder(workchain_label: str, structure_pk: int, code_label: str, protocol: str = 'moderate', overrides: dict = None):
-    """
-    Draft a WorkChain builder from protocol without submitting it.
-    Returns a confirmation-ready draft payload.
-    """
+
+async def draft_workchain_builder(
+    workchain_label: str,
+    structure_pk: int,
+    code_label: str,
+    protocol: str = "moderate",
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any] | str:
+    """Request builder draft creation from worker (`POST /submission/draft-builder`)."""
+    body = {
+        "workchain": workchain_label,
+        "structure_pk": int(structure_pk),
+        "code": code_label,
+        "protocol": protocol,
+        "overrides": overrides or {},
+    }
+
     try:
-        # 1. Validate resources.
-        WC = WorkflowFactory(workchain_label)
-        if not hasattr(WC, 'get_builder_from_protocol'):
-            return "❌ Error: This WorkChain does not support protocols."
+        payload = await request_json("POST", "/submission/draft-builder", json=body)
+        return payload if isinstance(payload, dict) else {"draft": payload}
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
 
-        # 2. Dry-run builder construction to validate parameters.
-        _ = WC.get_builder_from_protocol(
-            code=orm.load_code(code_label),
-            structure=orm.load_node(structure_pk),
-            protocol=protocol,
-            overrides=overrides or {}
-        )
 
-        # 3. Return structured payload for AI/UI confirmation.
-        return {
-            "status": "DRAFT_READY",
-            "workchain": workchain_label,
-            "structure_pk": structure_pk,
-            "code": code_label,
-            "protocol": protocol,
-            "overrides": overrides or {},
-            "preview": f"Ready to submit {workchain_label} using {protocol} protocol."
-        }
-        
-    except Exception as e:
-        return f"❌ Builder Draft Failed: {str(e)}"
-
-def submit_workchain_builder(draft_data: dict):
-    """
-    Submit a WorkChain from draft payload generated by `draft_workchain_builder`.
-    """
+async def submit_workchain_builder(draft_data: dict[str, Any]) -> dict[str, Any] | str:
+    """Submit a previously drafted builder (`POST /submission/submit`)."""
     try:
-        # Read all required values from the draft payload.
-        wc_name = draft_data.get('workchain')
-        struct_pk = draft_data.get('structure_pk')
-        code_label = draft_data.get('code')
-        protocol = draft_data.get('protocol', 'moderate')
-        overrides = draft_data.get('overrides', {})
+        payload = await request_json("POST", "/submission/submit", json={"draft": draft_data})
+        return payload if isinstance(payload, dict) else {"result": payload}
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
 
-        # Reload AiiDA resources and submit.
-        WorkChain = WorkflowFactory(wc_name)
-        builder = WorkChain.get_builder_from_protocol(
-            code=orm.load_code(code_label),
-            structure=orm.load_node(struct_pk),
-            protocol=protocol,
-            overrides=overrides
-        )
-        
-        node = submit(builder)
-        return f"✅ Success! WorkChain submitted. PK: {node.pk}"
-        
-    except Exception as e:
-        return f"❌ Submission failed: {str(e)}"
+
+async def submit_workflow(draft_data: dict[str, Any]) -> dict[str, Any] | str:
+    """
+    Consistent submission interface for agents.
+
+    Calls `POST /submission/submit` with a builder draft payload and returns
+    the worker submission receipt (`pk`, `uuid`, `state`) on success.
+    """
+    return await submit_workchain_builder(draft_data)

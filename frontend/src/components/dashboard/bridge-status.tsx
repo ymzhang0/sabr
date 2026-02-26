@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, PlugZap } from "lucide-react";
+import { AlertTriangle, Code2, Cpu, PlugZap } from "lucide-react";
 
-import { getBridgePlugins, getBridgeStatus } from "@/lib/api";
+import { getBridgeResources, getBridgeStatus, getBridgeSystemInfo } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const STATUS_POLL_INTERVAL_MS = 10_000;
-const PLUGIN_REFRESH_INTERVAL_MS = 30_000;
+const DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001";
 const DEFAULT_ENVIRONMENT = "Local Sandbox";
 
@@ -49,15 +49,27 @@ export function BridgeStatus() {
   const isOnline = status === "online";
   const portLabel = useMemo(() => resolvePortLabel(bridgeUrl), [bridgeUrl]);
 
-  const pluginsQuery = useQuery({
-    queryKey: ["aiida-bridge-plugins"],
-    queryFn: getBridgePlugins,
+  const systemInfoQuery = useQuery({
+    queryKey: ["aiida-bridge-system-info"],
+    queryFn: getBridgeSystemInfo,
     enabled: isOnline || isPopoverOpen,
     refetchOnWindowFocus: false,
-    refetchInterval: isOnline ? PLUGIN_REFRESH_INTERVAL_MS : false,
+    refetchInterval: isOnline ? DASHBOARD_REFRESH_INTERVAL_MS : false,
   });
 
-  const plugins = pluginsQuery.data ?? [];
+  const resourcesQuery = useQuery({
+    queryKey: ["aiida-bridge-resources"],
+    queryFn: getBridgeResources,
+    enabled: isOnline || isPopoverOpen,
+    refetchOnWindowFocus: false,
+    refetchInterval: isOnline ? DASHBOARD_REFRESH_INTERVAL_MS : false,
+  });
+
+  const profileName = systemInfoQuery.data?.profile ?? "unknown";
+  const workchainCount = systemInfoQuery.data?.counts.workchains ?? 0;
+  const computerCount = resourcesQuery.data?.computers.length ?? systemInfoQuery.data?.counts.computers ?? 0;
+  const codeCount = resourcesQuery.data?.codes.length ?? systemInfoQuery.data?.counts.codes ?? 0;
+  const isDashboardLoading = isOnline && (systemInfoQuery.isLoading || resourcesQuery.isLoading);
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -122,32 +134,46 @@ export function BridgeStatus() {
         <div className="absolute left-0 right-0 top-[calc(100%+0.45rem)] z-30 rounded-2xl border border-zinc-200/80 bg-zinc-50/95 p-3 shadow-lg backdrop-blur-xl dark:border-zinc-800/85 dark:bg-zinc-900/95">
           <div className="mb-2 flex items-center justify-between gap-2">
             <p className="text-[10px] font-semibold uppercase tracking-[0.15em] text-zinc-500 dark:text-zinc-400">
-              Installed Plugins
+              Lab Dashboard
             </p>
             <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">{environment}</p>
           </div>
 
-          <div className="minimal-scrollbar max-h-28 overflow-y-auto pr-1">
-            {pluginsQuery.isLoading ? (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">Loading plugin list...</p>
-            ) : plugins.length === 0 ? (
-              <p className="text-xs text-zinc-500 dark:text-zinc-400">
-                {isOnline ? "No plugin entries returned." : "Bridge offline. Plugin list unavailable."}
-              </p>
-            ) : (
-              <ul className="flex flex-wrap gap-1.5">
-                {plugins.map((plugin) => (
-                  <li
-                    key={plugin}
-                    className="max-w-full truncate rounded-full border border-zinc-300/75 bg-white/80 px-2 py-0.5 text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/70 dark:text-zinc-200"
-                    title={plugin}
-                  >
-                    {plugin}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+          {isDashboardLoading ? (
+            <p className="text-xs text-zinc-500 dark:text-zinc-400">Loading infrastructure metadata...</p>
+          ) : (
+            <div className="space-y-2 text-xs text-zinc-700 dark:text-zinc-200">
+              <div className="flex items-center justify-between rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-2 dark:border-zinc-700/80 dark:bg-zinc-800/65">
+                <span className="text-zinc-500 dark:text-zinc-400">Profile</span>
+                <span className="max-w-[70%] truncate font-medium text-zinc-800 dark:text-zinc-100" title={profileName}>
+                  {profileName}
+                </span>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-2 dark:border-zinc-700/80 dark:bg-zinc-800/65">
+                <p className="mb-1 text-zinc-500 dark:text-zinc-400">Resources</p>
+                <p className="inline-flex items-center gap-2 text-[11px] font-medium text-zinc-800 dark:text-zinc-100">
+                  <span className="inline-flex items-center gap-1">
+                    <Cpu className="h-3.5 w-3.5" />
+                    {computerCount} Computers
+                  </span>
+                  <span className="text-zinc-400 dark:text-zinc-500">|</span>
+                  <span className="inline-flex items-center gap-1">
+                    <Code2 className="h-3.5 w-3.5" />
+                    {codeCount} Codes
+                  </span>
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-2 dark:border-zinc-700/80 dark:bg-zinc-800/65">
+                <p className="mb-1 text-zinc-500 dark:text-zinc-400">Plugins</p>
+                <p className="inline-flex items-center gap-1 text-[11px] font-medium text-zinc-800 dark:text-zinc-100">
+                  <PlugZap className="h-3.5 w-3.5" />
+                  {workchainCount} WorkChains
+                </p>
+              </div>
+            </div>
+          )}
 
           {!isOnline ? (
             <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-rose-600 dark:text-rose-300">

@@ -1,7 +1,9 @@
 import axios from "axios";
 
 import type {
+  BridgeResourcesResponse,
   BridgeStatusResponse,
+  BridgeSystemInfoResponse,
   BootstrapResponse,
   ChatResponse,
   GroupsResponse,
@@ -140,6 +142,21 @@ const DEFAULT_BRIDGE_STATUS: BridgeStatusResponse = {
   environment: "Local Sandbox",
 };
 
+const DEFAULT_BRIDGE_SYSTEM_INFO: BridgeSystemInfoResponse = {
+  profile: "unknown",
+  counts: {
+    computers: 0,
+    codes: 0,
+    workchains: 0,
+  },
+  daemon_status: false,
+};
+
+const DEFAULT_BRIDGE_RESOURCES: BridgeResourcesResponse = {
+  computers: [],
+  codes: [],
+};
+
 export async function getBridgeStatus(): Promise<BridgeStatusResponse> {
   try {
     const { data } = await aiidaApi.get<BridgeStatusResponse>("/status");
@@ -155,5 +172,23 @@ export async function getBridgePlugins(): Promise<string[]> {
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
+  }
+}
+
+export async function getBridgeSystemInfo(): Promise<BridgeSystemInfoResponse> {
+  try {
+    const { data } = await aiidaApi.get<BridgeSystemInfoResponse>("/system");
+    return data;
+  } catch {
+    return DEFAULT_BRIDGE_SYSTEM_INFO;
+  }
+}
+
+export async function getBridgeResources(): Promise<BridgeResourcesResponse> {
+  try {
+    const { data } = await aiidaApi.get<BridgeResourcesResponse>("/resources");
+    return data;
+  } catch {
+    return DEFAULT_BRIDGE_RESOURCES;
   }
 }

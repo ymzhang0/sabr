@@ -1,33 +1,40 @@
-from aiida import orm
-import tempfile
-import os
+"""Async bridge proxies for RemoteData directory/file access."""
 
-def list_remote_files(pk: str):
-    """
-    List files in a RemoteData node's remote directory.
-    Returns a list of filenames or an error message string.
-    """
-    try:
-        node = orm.load_node(pk)
-        return node.listdir()
-    except Exception as e:
-        return f"Error listing files: {e}"
+from __future__ import annotations
 
-def get_remote_file_content(pk: str, filename: str):
-    """
-    Retrieve content of a file from a RemoteData node.
-    Downloads to a temp file and reads it.
-    """
+from typing import Any
+
+from engines.aiida.bridge_client import (
+    OFFLINE_WORKER_MESSAGE,
+    BridgeOfflineError,
+    format_bridge_error,
+    request_json,
+)
+
+
+async def list_remote_files(pk: int | str) -> list[str] | dict[str, Any] | str:
+    """List files in a RemoteData node (`GET /data/remote/{pk}/files`)."""
     try:
-        node = orm.load_node(pk)
-        
-        with tempfile.TemporaryDirectory() as tmpdir:
-            dest_file = os.path.join(tmpdir, filename)
-            node.getfile(filename, dest_file)
-            
-            with open(dest_file, 'r', errors='replace') as fobj:
-                content = fobj.read()
-            return content
-            
-    except Exception as e:
-        return f"Error retrieving file: {e}"
+        payload = await request_json("GET", f"/data/remote/{pk}/files")
+        if isinstance(payload, dict):
+            files = payload.get("files")
+            return files if isinstance(files, list) else payload
+        return payload
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
+
+
+async def get_remote_file_content(pk: int | str, filename: str) -> str | dict[str, Any]:
+    """Read one file from RemoteData (`GET /data/remote/{pk}/files/{filename}`)."""
+    try:
+        payload = await request_json("GET", f"/data/remote/{pk}/files/{filename}")
+        if isinstance(payload, dict):
+            content = payload.get("content")
+            return str(content) if isinstance(content, str) else payload
+        return str(payload)
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)

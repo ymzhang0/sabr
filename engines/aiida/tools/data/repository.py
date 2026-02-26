@@ -1,23 +1,30 @@
-from aiida import orm
+"""Async bridge proxy for repository/folder file reading."""
 
-def get_node_file_content(pk: str, filename: str, source: str="folder"):
-    """
-    Retrieve text content of a file from a node's repository or file output.
-    source: 'folder' (Process/FolderData) or 'repository' (The node's own repo)
-    """
+from __future__ import annotations
+
+from typing import Any
+
+from engines.aiida.bridge_client import (
+    OFFLINE_WORKER_MESSAGE,
+    BridgeOfflineError,
+    format_bridge_error,
+    request_json,
+)
+
+
+async def get_node_file_content(pk: int | str, filename: str, source: str = "folder") -> str | dict[str, Any]:
+    """Read text content from node storage (`GET /data/repository/{pk}/files/{filename}`)."""
     try:
-        node = orm.load_node(pk)
-        content = ""
-        
-        if source == "repository" or source == "Virtual.Repository":
-             content = node.base.repository.get_object_content(filename)
-        else:
-             # For FolderData or similar, get_object_content works on the node itself
-             content = node.get_object_content(filename)
-             
-        # Attempt decode
-        if isinstance(content, bytes):
-            return content.decode("utf-8")
-        return content
-    except Exception as e:
-        return f"Error reading file: {str(e)}"
+        payload = await request_json(
+            "GET",
+            f"/data/repository/{pk}/files/{filename}",
+            params={"source": source},
+        )
+        if isinstance(payload, dict):
+            content = payload.get("content")
+            return str(content) if isinstance(content, str) else payload
+        return str(payload)
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)

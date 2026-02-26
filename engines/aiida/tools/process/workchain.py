@@ -1,10 +1,18 @@
-from aiida import orm
-from engines.aiida.tools.process.process_tree import ProcessTree
+"""Compatibility wrapper for workchain provenance inspection via unified process endpoint."""
 
-def inspect_workchain(node: orm.WorkChainNode) -> dict:
-    """Analyze the provenance call tree of a workchain."""
-    tree = ProcessTree(node)
-    return {
-        "provenance_tree": tree.to_dict(),
-        "report": "Call get_process_log for reports"
-    }
+from __future__ import annotations
+
+from typing import Any
+
+from .process import inspect_process
+
+
+async def inspect_workchain(identifier: int | str) -> dict[str, Any] | str:
+    """Inspect a workchain by delegating to `inspect_process` and returning its `workchain` section."""
+    result = await inspect_process(str(identifier))
+    if isinstance(result, str):
+        return result
+    if isinstance(result, dict):
+        workchain = result.get("workchain")
+        return workchain if isinstance(workchain, dict) else result
+    return {"result": result}

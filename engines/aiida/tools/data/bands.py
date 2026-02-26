@@ -1,21 +1,23 @@
-# engines/aiida/tools/bands.py
-from aiida import orm
+"""Async bridge proxy for BandsData extraction."""
 
-def get_bands_plot_data(pk: int):  # Keep an explicit integer PK type.
-    """
-    Retrieve plotting data from a BandsData node for plotting.
-    
-    Args:
-        pk (str): The primary key (PK) or UUID of the BandsData node.
-    """
+from __future__ import annotations
+
+from typing import Any
+
+from engines.aiida.bridge_client import (
+    OFFLINE_WORKER_MESSAGE,
+    BridgeOfflineError,
+    format_bridge_error,
+    request_json,
+)
+
+
+async def get_bands_plot_data(pk: int) -> dict[str, Any] | str:
+    """Retrieve plot-ready bands payload from worker (`GET /data/bands/{pk}`)."""
     try:
-        # `load_node` also accepts string PK/UUID values in AiiDA.
-        node = orm.load_node(pk)
-        
-        if hasattr(node, '_matplotlib_get_dict'):
-            return node._matplotlib_get_dict()
-            
-    except Exception as e:
-        return f"Error getting bands data for {pk}: {e}"
-    
-    return "Error: Node is not a compatible BandsData type."
+        payload = await request_json("GET", f"/data/bands/{int(pk)}")
+        return payload if isinstance(payload, dict) else {"data": payload}
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)

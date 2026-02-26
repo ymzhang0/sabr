@@ -1,30 +1,33 @@
 from .management.profile import (
     get_default_profile,
-    list_system_profiles, 
-    list_local_archives, 
-    switch_profile, 
+    list_system_profiles,
+    list_local_archives,
+    switch_profile,
     load_archive_profile,
-    get_statistics, 
-    list_groups, 
+    get_statistics,
+    list_groups,
     get_unified_source_map,
     get_database_summary,
     get_recent_processes,
     list_group_labels,
     get_recent_nodes,
-    )
+)
 from .management.group import inspect_group
 from .process.process import inspect_process, fetch_recent_processes
 from .submission.submission import (
     inspect_workchain_spec,
     list_remote_plugins,
     get_remote_workchain_spec,
+    inspect_lab_infrastructure,
     draft_workchain_builder,
     submit_workchain_builder,
+    submit_workflow,
 )
 from .interpreter import run_python_code
 from .data.bands import get_bands_plot_data
 from .data.remote import list_remote_files, get_remote_file_content
 from .data.repository import get_node_file_content
+from .base.node import get_node_summary, serialize_node
 
 __all__ = [
     "get_default_profile",
@@ -45,11 +48,15 @@ __all__ = [
     "inspect_workchain_spec",
     "list_remote_plugins",
     "get_remote_workchain_spec",
+    "inspect_lab_infrastructure",
     "draft_workchain_builder",
     "submit_workchain_builder",
+    "submit_workflow",
     "run_python_code",
     "get_bands_plot_data",
-    "list_remote_files", 
+    "list_remote_files",
     "get_remote_file_content",
-    "get_node_file_content"
+    "get_node_file_content",
+    "get_node_summary",
+    "serialize_node",
 ]

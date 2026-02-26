@@ -23,7 +23,12 @@ from src.sab_core.config import settings
 from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event
 
 from .hub import hub
-from .tools import get_recent_nodes, get_recent_processes, list_group_labels
+from .frontend_bridge import (
+    get_context_nodes,
+    get_recent_nodes,
+    get_recent_processes,
+    list_group_labels,
+)
 from .ui import fastui as ui
 from .ui.legacy_fastui.fastui import get_aiida_dashboard_layout, get_chat_interface
 
@@ -212,44 +217,7 @@ def _fetch_context_nodes(context_node_ids: list[int]) -> list[dict[str, Any]]:
     if not hub.current_profile:
         hub.start()
 
-    from aiida import orm
-
-    context_nodes: list[dict[str, Any]] = []
-    for pk in context_node_ids:
-        try:
-            node = orm.load_node(pk)
-        except Exception as err:
-            context_nodes.append({"pk": pk, "error": str(err)})
-            continue
-
-        process_state_value: str | None = None
-        if isinstance(node, orm.ProcessNode):
-            process_state = getattr(node, "process_state", None)
-            process_state_value = (
-                process_state.value if hasattr(process_state, "value")
-                else (str(process_state) if process_state else None)
-            )
-
-        context_nodes.append(
-            {
-                "pk": int(node.pk),
-                "uuid": str(getattr(node, "uuid", "")),
-                "label": str(
-                    getattr(node, "label", None)
-                    or getattr(node, "process_label", None)
-                    or node.__class__.__name__
-                ),
-                "node_type": str(node.__class__.__name__),
-                "process_state": process_state_value,
-                "formula": _get_structure_formula(node) if isinstance(node, orm.StructureData) else None,
-                "ctime": (
-                    node.ctime.strftime("%Y-%m-%d %H:%M:%S")
-                    if getattr(node, "ctime", None) is not None
-                    else None
-                ),
-            }
-        )
-    return context_nodes
+    return get_context_nodes(context_node_ids)
 
 
 def _sanitize_upload_name(filename: str) -> str:

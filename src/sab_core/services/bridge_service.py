@@ -60,6 +60,14 @@ class AiiDABridgeService:
         snapshot = await self.get_status(force_refresh=force_refresh)
         return snapshot.plugins
 
+    async def get_system_info(self) -> dict[str, Any]:
+        payload = await self._fetch_json("/system/info", timeout_seconds=max(8.0, self._request_timeout_seconds))
+        return payload if isinstance(payload, dict) else {}
+
+    async def get_resources(self) -> dict[str, Any]:
+        payload = await self._fetch_json("/resources", timeout_seconds=max(8.0, self._request_timeout_seconds))
+        return payload if isinstance(payload, dict) else {}
+
     async def _refresh_if_needed(self, *, force_refresh: bool) -> None:
         if not force_refresh and self._is_cache_fresh():
             return
@@ -99,15 +107,18 @@ class AiiDABridgeService:
             self._logged_first_handshake = True
 
     async def _fetch_plugins(self) -> list[str]:
-        endpoint = f"{self._bridge_url}/plugins"
         print(f"DEBUG: Fetching plugins from {self._bridge_url}")
-        timeout = httpx.Timeout(self._request_timeout_seconds)
+        payload = await self._fetch_json("/plugins")
+        return self._normalize_plugins(payload)
+
+    async def _fetch_json(self, path: str, *, timeout_seconds: float | None = None) -> Any:
+        endpoint = f"{self._bridge_url}{path}"
+        timeout = httpx.Timeout(timeout_seconds or self._request_timeout_seconds)
         # Keep local bridge probing independent from env proxy settings.
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             response = await client.get(endpoint)
             response.raise_for_status()
-            payload = response.json()
-        return self._normalize_plugins(payload)
+            return response.json()
 
     @property
     def _worker_target(self) -> str:
