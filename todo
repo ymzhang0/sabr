@@ -1,0 +1,19 @@
+i notice that you've put the bridge_service:AiiDABridgeService inside sab_core which is a bit unsettling.
+sab_core defined the framework of this kind of agent and aiida is one of the implementation.
+would it be better if the code related to aiida is separated from the core and be be put inside engines/
+or another specifically created new folder if necessary? done
+
+now since frontend is in the top dir. why not move also the backend to the top level and put the 
+aiida-related code inside it. done
+
+since aiida_bridge is moved into ../aiida_worker why not remove it from this package.
+
+please make sure to exclude those temporary files that are generated when creating the webpage and are not important.
+
+find a cleaner way to organize the structure of this package
+
+clean unused code
+
+optimize the log
+
+for the construction of the workchainnode, we should prefer get_builder_from_protocol than filling in the inputs item by item since in each workchain there are valuable logic defined in this class function. if we use plain get_builder or even worse we fill in the ports by ourself, we might miss a lot of detail or even the process will crash.

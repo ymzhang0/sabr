@@ -75,3 +75,18 @@ body,
 .minimal-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(113, 113, 122, 0.55);
 }
+
+@keyframes contextTagFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.context-tag-enter {
+  animation: contextTagFadeIn 180ms ease-out;
+}

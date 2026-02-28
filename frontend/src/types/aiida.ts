@@ -4,14 +4,18 @@ export type ProcessItem = {
   state: string;
   status_color: "running" | "success" | "error" | "idle" | string;
   node_type: string;
+  process_label?: string | null;
   process_state: string | null;
   formula: string | null;
+  preview?: Record<string, unknown> | null;
+  preview_info?: Record<string, unknown> | null;
 };
 
-export type ReferenceNode = {
+export type FocusNode = {
   pk: number;
   label: string;
   formula: string | null;
+  node_type: string;
 };
 
 export type ChatMessage = {
@@ -64,6 +68,8 @@ export type SendChatRequest = {
   model_name?: string;
   context_archive?: string | null;
   context_node_ids?: number[];
+  context_pks?: number[];
+  metadata?: Record<string, unknown>;
 };
 
 export type BridgeStatusResponse = {
@@ -120,4 +126,55 @@ export type BridgeCodeResource = {
 export type BridgeResourcesResponse = {
   computers: BridgeComputerResource[];
   codes: BridgeCodeResource[];
+};
+
+export type ProcessTreeNode = {
+  pk: number;
+  process_label: string;
+  state: string;
+  exit_status: number | null;
+  inputs?: ProcessNodeLink[];
+  outputs?: ProcessNodeLink[];
+  children: Record<string, ProcessTreeNode>;
+};
+
+export type ProcessNodeLinkPreview = {
+  remote_path?: string | null;
+  computer_name?: string | null;
+  filenames?: string[];
+  x_label?: string | null;
+  x_length?: number | null;
+  y_arrays?: Array<{ label: string; length: number | null }>;
+};
+
+export type ProcessNodeLink = {
+  link_label: string;
+  node_type: string;
+  pk: number;
+  preview?: ProcessNodeLinkPreview | null;
+};
+
+export type ProcessLogsResponse = {
+  pk: number;
+  lines: string[];
+  reports: string[];
+  stderr_excerpt: string | null;
+  text: string;
+};
+
+export type ProcessDetailResponse = {
+  summary?: {
+    pk?: number;
+    uuid?: string;
+    type?: string;
+    state?: string;
+    exit_status?: number | null;
+  };
+  inputs?: ProcessNodeLink[];
+  outputs?: ProcessNodeLink[];
+  workchain?: {
+    provenance_tree?: ProcessTreeNode;
+  };
+  logs?: ProcessLogsResponse;
+  calculation?: Record<string, unknown>;
 };

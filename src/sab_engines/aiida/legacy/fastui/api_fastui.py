@@ -99,22 +99,28 @@ def _serialize_processes(processes: list[dict[str, Any]]) -> list[dict[str, Any]
     for process in processes:
         process_state_raw = process.get("process_state")
         state = str(process_state_raw or process.get("state") or "unknown")
+        process_label_raw = process.get("process_label")
         try:
             pk = int(process.get("pk", 0))
         except (TypeError, ValueError):
             pk = 0
         formula = process.get("formula")
-        payload.append(
-            {
-                "pk": pk,
-                "label": str(process.get("label") or "Unknown Task"),
-                "state": state,
-                "status_color": _state_to_status_color(state),
-                "node_type": str(process.get("node_type") or "Node"),
-                "process_state": str(process_state_raw) if process_state_raw is not None else None,
-                "formula": str(formula) if formula else None,
-            }
-        )
+        serialized: dict[str, Any] = {
+            "pk": pk,
+            "label": str(process.get("label") or "Unknown Task"),
+            "state": state,
+            "status_color": _state_to_status_color(state),
+            "node_type": str(process.get("node_type") or "Node"),
+            "process_state": str(process_state_raw) if process_state_raw is not None else None,
+            "formula": str(formula) if formula else None,
+        }
+        if process_label_raw:
+            serialized["process_label"] = str(process_label_raw)
+        if "preview" in process:
+            serialized["preview"] = process.get("preview")
+        if "preview_info" in process:
+            serialized["preview_info"] = process.get("preview_info")
+        payload.append(serialized)
     return payload
 
 

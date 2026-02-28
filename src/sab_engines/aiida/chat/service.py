@@ -127,6 +127,32 @@ def _to_agent_model_name(name: str) -> str:
     return f"google-gla:{name}"
 
 
+def _merge_context_node_ids(
+    context_node_ids: list[int] | None,
+    metadata: dict[str, Any] | None,
+) -> list[int]:
+    raw_ids: list[Any] = []
+    if context_node_ids:
+        raw_ids.extend(context_node_ids)
+    if isinstance(metadata, dict):
+        raw_ids.extend(normalize_context_node_ids(metadata.get("context_pks")))
+        raw_ids.extend(normalize_context_node_ids(metadata.get("context_node_pks")))
+    return normalize_context_node_ids(raw_ids)
+
+
+def _inject_context_priority_instruction(user_intent: str, context_pks: list[int]) -> str:
+    if not context_pks:
+        return user_intent
+    serialized = ", ".join(str(pk) for pk in context_pks)
+    return (
+        "PRIMARY TURN CONTEXT:\n"
+        f"- context_pks: [{serialized}]\n"
+        "- Treat these PKs as the primary subjects of the current user query.\n"
+        "- If the request is ambiguous, prioritize inspecting these nodes first.\n\n"
+        f"USER REQUEST:\n{user_intent}"
+    )
+
+
 async def _thinking_status_ticker(state: Any, turn_id: int, stop_event: asyncio.Event) -> None:
     started = time.perf_counter()
     dots = 0
@@ -176,10 +202,14 @@ def start_chat_turn(
     fetch_context_nodes: Callable[[list[int]], list[dict[str, Any]]],
     context_archive: str | None = None,
     context_node_ids: list[int] | None = None,
+    metadata: dict[str, Any] | None = None,
     source: str = "frontend",
 ) -> int:
     chat_history = get_chat_history(state)
-    normalized_node_ids = normalize_context_node_ids(context_node_ids)
+    normalized_metadata = dict(metadata or {})
+    normalized_node_ids = _merge_context_node_ids(context_node_ids, normalized_metadata)
+    normalized_metadata["context_pks"] = normalized_node_ids
+    normalized_metadata["context_node_pks"] = normalized_node_ids
     turn_id = getattr(state, "chat_turn_seq", 0) + 1
     state.chat_turn_seq = turn_id
 
@@ -203,6 +233,7 @@ def start_chat_turn(
             intent=user_intent[:120],
             context=context_archive,
             context_node_ids=",".join(str(pk) for pk in normalized_node_ids) or None,
+            metadata_keys=",".join(sorted(str(key) for key in normalized_metadata.keys())) or None,
         )
     )
 
@@ -215,6 +246,7 @@ def start_chat_turn(
             fetch_context_nodes=fetch_context_nodes,
             context_archive=context_archive,
             context_node_ids=normalized_node_ids,
+            metadata=normalized_metadata,
         )
     )
     _ensure_chat_task_registry(state)[turn_id] = task
@@ -232,6 +264,7 @@ async def _execute_chat_turn(
     fetch_context_nodes: Callable[[list[int]], list[dict[str, Any]]],
     context_archive: str | None = None,
     context_node_ids: list[int] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     agent = getattr(state, "agent", None)
     deps_class = getattr(state, "deps_class", None)
@@ -249,6 +282,7 @@ async def _execute_chat_turn(
                 intent=user_intent[:120],
                 context=context_archive,
                 context_node_ids=",".join(str(pk) for pk in normalize_context_node_ids(context_node_ids)) or None,
+                metadata_keys=",".join(sorted(str(key) for key in (metadata or {}).keys())) or None,
             )
         )
 
@@ -256,7 +290,7 @@ async def _execute_chat_turn(
             if agent is None or deps_class is None:
                 raise RuntimeError("Agent dependencies are not ready")
 
-            normalized_node_ids = normalize_context_node_ids(context_node_ids)
+            normalized_node_ids = _merge_context_node_ids(context_node_ids, metadata)
             context_nodes = fetch_context_nodes(normalized_node_ids)
             if context_nodes:
                 _update_assistant_message(
@@ -277,8 +311,9 @@ async def _execute_chat_turn(
             spinner_task = asyncio.create_task(
                 _thinking_status_ticker(state=state, turn_id=turn_id, stop_event=spinner_stop)
             )
+            run_intent = _inject_context_priority_instruction(user_intent, normalized_node_ids)
             result = await agent.run(
-                user_intent,
+                run_intent,
                 deps=current_deps,
                 model=_to_agent_model_name(selected_model),
             )
@@ -317,13 +352,16 @@ async def _execute_chat_turn(
 
             if hasattr(state, "memory") and state.memory:
                 try:
+                    turn_metadata: dict[str, Any] = {
+                        "context_archive": context_archive,
+                        "context_node_ids": normalized_node_ids,
+                    }
+                    for key, value in (metadata or {}).items():
+                        turn_metadata[str(key)] = value
                     state.memory.add_turn(
                         intent=user_intent,
                         response=answer_text,
-                        metadata={
-                            "context_archive": context_archive,
-                            "context_node_ids": normalized_node_ids,
-                        },
+                        metadata=turn_metadata,
                     )
                 except Exception as mem_error:  # noqa: BLE001
                     logger.warning(

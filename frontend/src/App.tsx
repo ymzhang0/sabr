@@ -13,12 +13,13 @@ import {
   uploadArchive,
 } from "@/lib/api";
 import { ChatPanel } from "@/components/dashboard/chat-panel";
+import { ProcessDetailDrawer } from "@/components/dashboard/process-detail-drawer";
 import { RuntimeTerminal } from "@/components/dashboard/runtime-terminal";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import type {
   ChatMessage,
+  FocusNode,
   ProcessItem,
-  ReferenceNode,
   SendChatRequest,
 } from "@/types/aiida";
 
@@ -63,7 +64,8 @@ export default function App() {
   const [selectedType, setSelectedType] = useState("");
   const [processLimit, setProcessLimit] = useState(15);
   const [pendingProcessLimit, setPendingProcessLimit] = useState<number | null>(null);
-  const [selectedReferences, setSelectedReferences] = useState<ReferenceNode[]>([]);
+  const [contextNodes, setContextNodes] = useState<FocusNode[]>([]);
+  const [activeProcess, setActiveProcess] = useState<ProcessItem | null>(null);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<number | null>(null);
   const [streamedLogs, setStreamedLogs] = useState<string[] | null>(null);
@@ -165,27 +167,30 @@ export default function App() {
   const quickPrompts = bootstrapQuery.data?.quick_prompts ?? [];
 
   const isReady = bootstrapQuery.isSuccess;
-  const referencedNodeIds = useMemo(
-    () => selectedReferences.map((reference) => reference.pk),
-    [selectedReferences],
-  );
+  const contextNodeIds = useMemo(() => contextNodes.map((node) => node.pk), [contextNodes]);
   const isChatBusy = isChatLoading;
 
-  const handleReferenceNode = (process: ProcessItem) => {
-    setSelectedReferences((current) => {
-      if (current.some((reference) => reference.pk === process.pk)) {
+  const appendContextNode = useCallback((node: FocusNode) => {
+    setContextNodes((current) => {
+      if (current.some((existing) => existing.pk === node.pk)) {
         return current;
       }
-      return [
-        ...current,
-        {
-          pk: process.pk,
-          label: process.label,
-          formula: process.formula ?? null,
-        },
-      ];
+      return [...current, node];
     });
-  };
+  }, []);
+
+  const handleAddContextNode = useCallback((process: ProcessItem) => {
+    appendContextNode({
+      pk: process.pk,
+      label: process.label,
+      formula: process.formula ?? null,
+      node_type: process.node_type,
+    });
+  }, [appendContextNode]);
+
+  const handleRemoveContextNode = useCallback((pk: number) => {
+    setContextNodes((current) => current.filter((node) => node.pk !== pk));
+  }, []);
 
   useEffect(() => {
     if (!selectedGroup) {
@@ -241,6 +246,8 @@ export default function App() {
       if (!intent || isChatBusy || requestInFlightRef.current) {
         return;
       }
+      const selectedContextNodes = [...contextNodes];
+      const contextPks = selectedContextNodes.map((node) => node.pk);
 
       const controller = new AbortController();
       sendAbortControllerRef.current = controller;
@@ -252,9 +259,22 @@ export default function App() {
         const payload: SendChatRequest = {
           intent,
           model_name: selectedModel || undefined,
-          context_node_ids: referencedNodeIds,
+          context_node_ids: contextPks,
+          context_pks: contextPks,
+          metadata: {
+            context_pks: contextPks,
+            context_node_pks: contextPks,
+            context_nodes: selectedContextNodes.map((node) => ({
+              pk: node.pk,
+              label: node.label,
+              formula: node.formula,
+              node_type: node.node_type,
+            })),
+          },
         };
-        const { turn_id: turnId } = await sendChat(payload, controller.signal);
+        const sendPromise = sendChat(payload, controller.signal);
+        setContextNodes([]);
+        const { turn_id: turnId } = await sendPromise;
         setActiveTurnId(turnId);
         const startedAt = Date.now();
 
@@ -292,7 +312,7 @@ export default function App() {
         void queryClient.invalidateQueries({ queryKey: ["chat"] });
       }
     },
-    [isChatBusy, queryClient, referencedNodeIds, selectedModel],
+    [contextNodes, isChatBusy, queryClient, selectedModel],
   );
 
   const handleStopResponse = useCallback(() => {
@@ -327,7 +347,7 @@ export default function App() {
           selectedGroup={selectedGroup}
           selectedType={selectedType}
           processLimit={processLimit}
-          referencedNodeIds={referencedNodeIds}
+          contextNodeIds={contextNodeIds}
           isUpdatingProcessLimit={pendingProcessLimit !== null}
           isDarkMode={theme === "dark"}
           onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
@@ -340,10 +360,11 @@ export default function App() {
             setProcessLimit(nextLimit);
             setPendingProcessLimit(nextLimit);
           }}
-          onReferenceNode={handleReferenceNode}
+          onAddContextNode={handleAddContextNode}
+          onOpenProcessDetail={setActiveProcess}
         />
 
-        <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden">
+        <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden xl:pt-10">
           {isReady ? (
             <ChatPanel
               messages={chatMessages}
@@ -352,16 +373,12 @@ export default function App() {
               quickPrompts={quickPrompts}
               isLoading={isChatBusy}
               activeTurnId={activeTurnId}
-              selectedReferences={selectedReferences}
+              contextNodes={contextNodes}
               onSendMessage={handleSendMessage}
               onStopResponse={handleStopResponse}
               onModelChange={setSelectedModel}
               onAttachFile={(file) => uploadMutation.mutate(file)}
-              onRemoveReference={(pk) =>
-                setSelectedReferences((current) =>
-                  current.filter((reference) => reference.pk !== pk),
-                )
-              }
+              onRemoveContextNode={handleRemoveContextNode}
             />
           ) : (
             <section className="flex flex-1 items-center justify-center rounded-2xl border border-white/40 bg-white/70 shadow-glass backdrop-blur dark:border-white/10 dark:bg-zinc-950/40">
@@ -372,6 +389,11 @@ export default function App() {
           <RuntimeTerminal lines={logs} />
         </section>
       </div>
+      <ProcessDetailDrawer
+        process={activeProcess}
+        onClose={() => setActiveProcess(null)}
+        onAddContextNode={appendContextNode}
+      />
     </main>
   );
 }

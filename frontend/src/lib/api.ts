@@ -9,6 +9,8 @@ import type {
   ChatResponse,
   GroupsResponse,
   LogsResponse,
+  ProcessDetailResponse,
+  ProcessLogsResponse,
   ProcessesResponse,
   SendChatRequest,
   UploadArchiveResponse,
@@ -121,6 +123,16 @@ export async function stopChat(turnId?: number): Promise<{ status: string; turn_
   const { data } = await frontendApi.post<{ status: string; turn_id: number | null }>("/chat/stop", {
     turn_id: turnId,
   });
+  return data;
+}
+
+export async function getProcessDetail(identifier: number | string): Promise<ProcessDetailResponse> {
+  const { data } = await aiidaApi.get<ProcessDetailResponse>(`/process/${identifier}`);
+  return data;
+}
+
+export async function getProcessLogs(identifier: number | string): Promise<ProcessLogsResponse> {
+  const { data } = await aiidaApi.get<ProcessLogsResponse>(`/process/${identifier}/logs`);
   return data;
 }
 
