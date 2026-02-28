@@ -160,7 +160,7 @@ def setup_logging(default_level: str = "INFO") -> str:
     root_logger.handlers = [InterceptHandler()]
     root_logger.setLevel(_logging_level(global_level))
 
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "aiida", "alembic", "httpx", "httpcore"):
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi", "alembic", "httpx", "httpcore"):
         logging_logger = logging.getLogger(name)
         logging_logger.handlers = [InterceptHandler()]
         logging_logger.propagate = False

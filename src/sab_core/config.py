@@ -8,8 +8,8 @@ class Settings(BaseSettings):
     Loads variables from .env file or environment variables.
     """
     # --- AI & Engine ---
-    ENGINE_TYPE: str = "aiida" 
-    DEPS_CLASS: str = "AiiDADeps" 
+    ENGINE_TYPE: str = os.getenv("SABR_ENGINE_TYPE", "")
+    DEPS_CLASS: str = os.getenv("SABR_DEPS_CLASS", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "your-key-here")
     SABR_MEMORY_DIR: str = os.getenv("SABR_MEMORY_DIR",  "default")
 
@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # 📡 Network Configuration (If you need a proxy)
     HTTPS_PROXY: str = os.getenv("HTTPS_PROXY", "")
     HTTP_PROXY: str = os.getenv("HTTP_PROXY", "")
+    SABR_USE_OUTBOUND_PROXY: bool = os.getenv("SABR_USE_OUTBOUND_PROXY", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     SABR_FRONTEND_ORIGINS: str = os.getenv(
         "SABR_FRONTEND_ORIGINS",
         "http://localhost:5173,http://127.0.0.1:5173,https://sabr.yiming-zhang.com",

@@ -1,8 +1,8 @@
 from nicegui import ui, app
 
 # Import SABR v2 logic and UI components
-from engines.aiida.ui.legacy_nicegui.layout import create_aiida_layout
-from engines.aiida.ui.legacy_nicegui.controller import RemoteAiiDAController
+from src.sab_engines.aiida.ui.legacy_nicegui.layout import create_aiida_layout
+from src.sab_engines.aiida.ui.legacy_nicegui.controller import RemoteAiiDAController
 from src.sab_core.memory.json_memory import JSONMemory
 
 # --- 1. Global Configuration ---
@@ -11,8 +11,8 @@ API_URL = "http://localhost:8000"
 global_memory = JSONMemory(namespace="aiida_v2_ui")
 
 # Serving static files for custom CSS/JS
-# Note: Ensure engines/aiida/static exists
-app.add_static_files('/aiida/static', 'engines/aiida/static')
+# Note: Ensure src/sab_engines/aiida/static exists
+app.add_static_files('/aiida/static', 'src/sab_engines/aiida/static')
 
 # ============================================================
 # 🎨 Main Page Entry
