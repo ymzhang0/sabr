@@ -78,6 +78,27 @@ def _extract_missing_module_name(error_text: str) -> str | None:
     return None
 
 
+def _summarize_worker_error(error_text: str) -> str:
+    raw = str(error_text or "").strip()
+    if not raw:
+        return "Worker script execution failed"
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return "Worker script execution failed"
+
+    if any("traceback" in line.lower() for line in lines):
+        for line in reversed(lines):
+            lowered = line.lower()
+            if lowered.startswith("traceback"):
+                continue
+            if line.startswith("File "):
+                continue
+            return line[:220]
+        return lines[-1][:220]
+    return lines[-1][:220]
+
+
 def _ensure_script_archive_dir() -> Path | None:
     try:
         _SCRIPT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
@@ -271,6 +292,27 @@ async def request_json(
     """Tool-side worker JSON helper backed by unified singleton client."""
     retry_budget = 2 if method.upper() == "GET" else 0
     return await aiida_worker_client.request_json(
+        method,
+        path,
+        params=params,
+        json=json,
+        timeout=timeout,
+        retries=retry_budget,
+    )
+
+
+def request_json_sync(
+    method: str,
+    path: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    json: Mapping[str, Any] | None = None,
+    timeout: float = 10.0,
+    retries: int | None = None,
+) -> Any:
+    """Sync JSON helper for startup-time bridge calls."""
+    retry_budget = 2 if retries is None and method.upper() == "GET" else retries
+    return aiida_worker_client.request_json_sync(
         method,
         path,
         params=params,
@@ -682,12 +724,9 @@ async def run_python_code(
     turn_id: int | None = None,
 ) -> str | dict[str, Any]:
     """Execute ad-hoc Python/AiiDA logic on worker (`POST /management/run-python`)."""
-    archive_entry = _archive_script_pending(
-        script,
-        intent=intent,
-        nodes_involved=nodes_involved,
-        turn_id=turn_id,
-    )
+    _ = intent
+    _ = nodes_involved
+    _ = turn_id
     try:
         # Custom worker scripts can be substantially slower than regular bridge calls.
         payload = await request_json(
@@ -700,11 +739,6 @@ async def run_python_code(
             if payload.get("success"):
                 output_text = str(payload.get("output") or "Code executed successfully (No output).")
                 created_pks = _extract_created_pks(payload, output_text)
-                _archive_script_finalize(
-                    archive_entry,
-                    status="success",
-                    created_pks=created_pks,
-                )
                 logger.info(
                     log_event(
                         "aiida.worker.run_python.completed",
@@ -718,14 +752,7 @@ async def run_python_code(
             error_text = str(payload.get("error") or "Worker script execution failed")
             missing_module = _extract_missing_module_name(error_text)
             created_pks = _extract_created_pks(payload, output_text)
-            _archive_script_finalize(
-                archive_entry,
-                status="error",
-                error_message=error_text,
-                created_pks=created_pks,
-                missing_module=missing_module,
-            )
-            error_for_log = error_text if "traceback" in error_text.lower() else error_text[:220]
+            error_for_log = _summarize_worker_error(error_text)
             logger.warning(
                 log_event(
                     "aiida.worker.run_python.completed",
@@ -749,25 +776,97 @@ async def run_python_code(
             return response
         payload_text = str(payload)
         created_pks = _extract_created_pks(payload, payload_text)
-        _archive_script_finalize(
-            archive_entry,
-            status="success",
-            created_pks=created_pks,
-        )
         return payload_text
     except BridgeOfflineError:
-        _archive_script_finalize(
-            archive_entry,
-            status="error",
-            error_message=OFFLINE_WORKER_MESSAGE,
-        )
         return OFFLINE_WORKER_MESSAGE
     except Exception as exc:  # noqa: BLE001
-        _archive_script_finalize(
-            archive_entry,
-            status="error",
-            error_message=str(exc),
+        return format_bridge_error(exc)
+
+
+def _normalize_skill_registry_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        items = payload.get("items")
+        if isinstance(items, list):
+            normalized_items: list[dict[str, Any]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                normalized_items.append(
+                    {
+                        "name": name,
+                        "description": item.get("description"),
+                        "entrypoint": item.get("entrypoint"),
+                        "updated_at": item.get("updated_at"),
+                        "path": item.get("path"),
+                    }
+                )
+            return {"count": len(normalized_items), "items": normalized_items}
+    return {"count": 0, "items": []}
+
+
+async def list_registered_skills() -> dict[str, Any] | str:
+    """List persistent worker-side specialized scripts (`GET /registry/list`)."""
+    try:
+        payload = await request_json("GET", "/registry/list")
+        return _normalize_skill_registry_payload(payload)
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
+
+
+def list_registered_skills_sync() -> dict[str, Any]:
+    """Synchronous variant for startup-time skill discovery."""
+    try:
+        payload = request_json_sync("GET", "/registry/list", timeout=6.0, retries=1)
+        return _normalize_skill_registry_payload(payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(log_event("aiida.worker.registry.list.failed", error=str(exc)[:220]))
+        return {"count": 0, "items": []}
+
+
+async def register_specialized_skill(
+    skill_name: str,
+    script: str,
+    *,
+    description: str | None = None,
+    overwrite: bool = True,
+) -> dict[str, Any] | str:
+    """Persist a specialized skill script on worker (`POST /registry/register`)."""
+    body = {
+        "skill_name": str(skill_name or "").strip(),
+        "script": script,
+        "description": description,
+        "overwrite": bool(overwrite),
+    }
+    try:
+        payload = await request_json("POST", "/registry/register", json=body, timeout=30.0)
+        return payload if isinstance(payload, dict) else {"result": payload}
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        return format_bridge_error(exc)
+
+
+async def execute_specialized_skill(skill_name: str, args: Mapping[str, Any] | None = None) -> dict[str, Any] | str:
+    """Execute one registered worker-side skill (`POST /execute/{skill_name}`)."""
+    cleaned = str(skill_name or "").strip()
+    if not cleaned:
+        return {"error": "Skill name is required."}
+    try:
+        payload = await request_json(
+            "POST",
+            f"/execute/{quote(cleaned, safe='')}",
+            json={"params": dict(args or {})},
+            timeout=180.0,
         )
+        return payload if isinstance(payload, dict) else {"result": payload}
+    except BridgeOfflineError:
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
         return format_bridge_error(exc)
 
 
@@ -778,84 +877,60 @@ async def search_script_archive(
     include_source: bool = True,
     script_id: str | None = None,
 ) -> dict[str, Any]:
-    """List/read archived custom scripts filtered by intent keyword and involved node PKs."""
-    archive_dir = _ensure_script_archive_dir()
-    if archive_dir is None:
-        return {"items": [], "count": 0, "error": "Script archive directory is unavailable."}
+    """Compatibility wrapper mapped to worker-side specialized skill registry."""
+    registry_payload = await list_registered_skills()
+    if isinstance(registry_payload, str):
+        return {"count": 0, "items": [], "error": registry_payload}
+    if not isinstance(registry_payload, dict):
+        return {"count": 0, "items": []}
 
-    normalized_keyword = (keyword or "").strip().lower()
-    normalized_nodes = set(_normalize_nodes_involved(nodes_involved))
+    items = registry_payload.get("items")
+    if not isinstance(items, list):
+        return {"count": 0, "items": []}
+
+    normalized_keyword = str(keyword or "").strip().lower()
+    normalized_script_id = str(script_id or "").strip().lower()
+    _ = nodes_involved
+    _ = include_source
     try:
         parsed_limit = int(limit)
     except (TypeError, ValueError):
         parsed_limit = 20
     safe_limit = max(1, min(parsed_limit, 100))
 
-    metadata_files: list[Path]
-    if isinstance(script_id, str) and script_id.strip():
-        candidate = archive_dir / f"{script_id.strip()}.json"
-        metadata_files = [candidate] if candidate.exists() else []
-    else:
-        metadata_files = sorted(
-            archive_dir.glob(f"{_SCRIPT_ID_PREFIX}*.json"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
+    filtered: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if normalized_script_id and normalized_script_id != name.lower():
+            continue
+        if normalized_keyword and normalized_keyword not in f"{name} {description}".lower():
+            continue
+        filtered.append(
+            {
+                "script_id": name,
+                "intent": description or None,
+                "status": "registered",
+                "timestamp": item.get("updated_at"),
+                "nodes_involved": [],
+                "created_pks": [],
+                "error_message": None,
+                "missing_module": None,
+                "source": "worker_registry",
+            }
         )
-
-    results: list[dict[str, Any]] = []
-    for metadata_path in metadata_files:
-        if len(results) >= safe_limit:
+        if len(filtered) >= safe_limit:
             break
-        try:
-            raw = metadata_path.read_text(encoding="utf-8")
-            metadata = json.loads(raw)
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning(
-                log_event(
-                    "aiida.worker.script_archive.read_failed",
-                    metadata_file=str(metadata_path),
-                    error=str(exc)[:220],
-                )
-            )
-            continue
-
-        if not isinstance(metadata, dict):
-            continue
-        archived_intent = str(metadata.get("intent") or "")
-        archived_nodes = _normalize_nodes_involved(metadata.get("nodes_involved"))
-
-        if normalized_keyword and normalized_keyword not in archived_intent.lower():
-            continue
-        if normalized_nodes and not normalized_nodes.intersection(archived_nodes):
-            continue
-
-        item: dict[str, Any] = {
-            "script_id": str(metadata.get("script_id") or metadata_path.stem),
-            "timestamp": metadata.get("timestamp"),
-            "intent": archived_intent,
-            "status": metadata.get("status"),
-            "nodes_involved": archived_nodes,
-            "created_pks": _normalize_nodes_involved(metadata.get("created_pks")),
-            "error_message": metadata.get("error_message"),
-            "missing_module": metadata.get("missing_module"),
-        }
-        if include_source:
-            script_path = archive_dir / f"{item['script_id']}.py"
-            try:
-                if script_path.exists():
-                    item["script"] = script_path.read_text(encoding="utf-8")
-            except OSError as exc:
-                item["script_read_error"] = str(exc)
-        results.append(item)
 
     return {
-        "count": len(results),
-        "items": results,
+        "count": len(filtered),
+        "items": filtered,
         "filters": {
             "keyword": normalized_keyword or None,
-            "nodes_involved": sorted(normalized_nodes),
-            "script_id": script_id,
-            "include_source": include_source,
+            "script_id": normalized_script_id or None,
+            "source": "worker_registry",
         },
     }
 
@@ -964,6 +1039,10 @@ __all__ = [
     "submit_job",
     "submit_workflow",
     "run_python_code",
+    "list_registered_skills",
+    "list_registered_skills_sync",
+    "register_specialized_skill",
+    "execute_specialized_skill",
     "search_script_archive",
     "get_bands_plot_data",
     "list_remote_files",

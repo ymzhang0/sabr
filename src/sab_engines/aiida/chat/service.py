@@ -577,6 +577,12 @@ def _extract_pending_submission_payload(deps: Any) -> dict[str, Any] | None:
     elif isinstance(getattr(deps, "registry", None), dict):
         pending = deps.registry.get(_PENDING_SUBMISSION_KEY)
 
+    if not isinstance(pending, dict):
+        memory = getattr(deps, "memory", None)
+        memory_getter = getattr(memory, "get_kv", None)
+        if callable(memory_getter):
+            pending = memory_getter(_PENDING_SUBMISSION_KEY)
+
     return pending if isinstance(pending, dict) else None
 
 
@@ -660,6 +666,7 @@ def _normalize_submission_draft_payload(
     meta["parallel_settings"] = parallel_settings
     if "target_computer" not in meta:
         meta["target_computer"] = _extract_target_computer(draft) if isinstance(draft, dict) else None
+    meta.setdefault("workchain", process_label)
     for key, value in parallel_settings.items():
         lowered = str(key).strip().lower()
         if lowered in advanced_settings:
@@ -699,19 +706,21 @@ def _build_submission_draft_payload(
             continue
         advanced_settings[key] = value
     recommended_inputs = _normalize_recommended_inputs(None, advanced_settings)
+    process_label = _extract_process_label(draft)
     meta: dict[str, Any] = {
         "pk_map": _collect_pk_map(inputs),
         "target_computer": _extract_target_computer(draft),
         "parallel_settings": parallel_settings,
         "draft": draft,
         "recommended_inputs": recommended_inputs,
+        "workchain": process_label,
     }
     if isinstance(validation, dict):
         meta["validation"] = validation
     if isinstance(validation_summary, dict):
         meta["validation_summary"] = validation_summary
     payload = {
-        "process_label": _extract_process_label(draft),
+        "process_label": process_label,
         "inputs": inputs,
         "primary_inputs": _extract_primary_inputs(inputs),
         "recommended_inputs": recommended_inputs,
@@ -758,6 +767,7 @@ def _extract_balanced_json_object(fragment: str) -> str | None:
 
 def _extract_submission_draft_from_output_payload(output_payload: dict[str, Any]) -> dict[str, Any] | None:
     payload_type = str(output_payload.get("type") or "").strip().upper()
+    status_type = str(output_payload.get("status") or "").strip().upper()
     raw_submission = output_payload.get("submission_draft")
     if isinstance(raw_submission, dict):
         return _normalize_submission_draft_payload(
@@ -766,12 +776,37 @@ def _extract_submission_draft_from_output_payload(output_payload: dict[str, Any]
             validation=None,
             validation_summary=None,
         )
+    raw_submission_tag = output_payload.get("submission_draft_tag")
+    if isinstance(raw_submission_tag, str) and raw_submission_tag.strip():
+        parsed_from_tag = _extract_submission_draft_from_text(raw_submission_tag)
+        if isinstance(parsed_from_tag, dict):
+            return parsed_from_tag
+    raw_draft = output_payload.get("draft")
+    if isinstance(raw_draft, dict):
+        validation = output_payload.get("validation")
+        validation_summary = output_payload.get("validation_summary")
+        return _build_submission_draft_payload(
+            raw_draft,
+            validation=validation if isinstance(validation, dict) else None,
+            validation_summary=validation_summary if isinstance(validation_summary, dict) else None,
+        )
     if payload_type == "SUBMISSION_DRAFT":
         return _normalize_submission_draft_payload(
             output_payload,
             draft=None,
             validation=None,
             validation_summary=None,
+        )
+    if status_type == "SUBMISSION_DRAFT":
+        return _normalize_submission_draft_payload(
+            output_payload,
+            draft=raw_draft if isinstance(raw_draft, dict) else None,
+            validation=output_payload.get("validation") if isinstance(output_payload.get("validation"), dict) else None,
+            validation_summary=(
+                output_payload.get("validation_summary")
+                if isinstance(output_payload.get("validation_summary"), dict)
+                else None
+            ),
         )
     return None
 
@@ -1345,7 +1380,7 @@ async def _execute_chat_turn(
                             raise RuntimeError(
                                 "Gemini model was rejected by the API. "
                                 f"Model='{selected_model}', api_version='{getattr(settings, 'GEMINI_API_VERSION', 'unknown')}'. "
-                                "Update SABR_DEFAULT_MODEL (e.g., gemini-3-pro-preview) "
+                                "Update SABR_DEFAULT_MODEL (e.g., gemini-3-flash-preview) "
                                 "or SABR_GEMINI_API_VERSION and retry."
                             ) from run_error
 

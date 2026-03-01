@@ -91,6 +91,41 @@ def test_build_chat_message_payload_includes_submission_draft_fields() -> None:
     assert submission_draft["meta"]["validation_summary"]["status"] == "VALIDATION_OK"
 
 
+def test_build_chat_message_payload_reads_pending_submission_from_memory() -> None:
+    pending = {
+        "draft": {
+            "builder": {
+                "structure_pk": 19,
+                "metadata": {"options": {"resources": {"num_machines": 1}}},
+            }
+        },
+        "validation_summary": {"status": "VALIDATION_OK", "is_valid": True},
+    }
+
+    class _Memory:
+        def get_kv(self, key: str):
+            if key == "aiida_pending_submission":
+                return pending
+            return None
+
+    deps = SimpleNamespace(
+        get_registry_value=lambda _key: None,
+        memory=_Memory(),
+    )
+    output = SimpleNamespace(data_payload={"source": "agent"})
+
+    payload = chat_service._build_chat_message_payload(
+        output,
+        deps,
+        tool_calls=None,
+    )
+
+    assert payload is not None
+    assert payload["type"] == "SUBMISSION_DRAFT"
+    assert payload["submission_draft"]["inputs"]["structure_pk"] == 19
+    assert payload["submission_draft"]["meta"]["validation_summary"]["status"] == "VALIDATION_OK"
+
+
 def test_build_chat_message_payload_extracts_submission_draft_from_answer_text() -> None:
     output = SimpleNamespace(data_payload={"source": "agent"})
     deps = SimpleNamespace(get_registry_value=lambda _key: None)
@@ -141,6 +176,66 @@ def test_build_chat_message_payload_extracts_submission_draft_from_output_payloa
     assert payload["type"] == "SUBMISSION_DRAFT"
     assert payload["submission_draft"]["process_label"] == "PwRelaxWorkChain"
     assert payload["submission_draft"]["meta"]["pk_map"][0]["pk"] == 34
+
+
+def test_build_chat_message_payload_extracts_submission_draft_from_output_draft_shape() -> None:
+    output = SimpleNamespace(
+        data_payload={
+            "status": "SUBMISSION_DRAFT",
+            "draft": {
+                "builder": {
+                    "structure_pk": 56,
+                    "metadata": {
+                        "options": {
+                            "resources": {"num_machines": 2},
+                        }
+                    },
+                }
+            },
+            "validation_summary": {"status": "VALIDATION_OK", "is_valid": True},
+        }
+    )
+    deps = SimpleNamespace(get_registry_value=lambda _key: None)
+
+    payload = chat_service._build_chat_message_payload(
+        output,
+        deps,
+        tool_calls=None,
+        answer_text="",
+    )
+
+    assert payload is not None
+    assert payload["type"] == "SUBMISSION_DRAFT"
+    assert payload["submission_draft"]["inputs"]["structure_pk"] == 56
+    assert payload["submission_draft"]["meta"]["validation_summary"]["status"] == "VALIDATION_OK"
+
+
+def test_build_chat_message_payload_extracts_submission_draft_from_submission_tag_field() -> None:
+    output = SimpleNamespace(
+        data_payload={
+            "submission_draft_tag": (
+                "[SUBMISSION_DRAFT]\n"
+                "{\n"
+                '  "process_label": "PwBaseWorkChain",\n'
+                '  "inputs": {"structure_pk": 77},\n'
+                '  "meta": {"pk_map": [{"pk": 77}]}\n'
+                "}"
+            )
+        }
+    )
+    deps = SimpleNamespace(get_registry_value=lambda _key: None)
+
+    payload = chat_service._build_chat_message_payload(
+        output,
+        deps,
+        tool_calls=None,
+        answer_text="",
+    )
+
+    assert payload is not None
+    assert payload["type"] == "SUBMISSION_DRAFT"
+    assert payload["submission_draft"]["process_label"] == "PwBaseWorkChain"
+    assert payload["submission_draft"]["meta"]["pk_map"][0]["pk"] == 77
 
 
 def test_build_user_message_payload_keeps_context_nodes() -> None:
@@ -214,6 +309,50 @@ def test_normalize_submission_draft_payload_derives_primary_and_advanced() -> No
     assert normalized["advanced_settings"]["num_mpiprocs_per_machine"] == 4
     assert normalized["advanced_settings"]["ecutwfc"] == 80
     assert "num_machines" not in normalized["advanced_settings"]
+    assert isinstance(normalized["all_inputs"], dict)
+    assert isinstance(normalized["input_groups"], list)
+    assert normalized["meta"]["input_groups"] == normalized["input_groups"]
+
+
+def test_normalize_submission_draft_payload_builds_port_grouping_with_ui_types() -> None:
+    normalized = chat_service._normalize_submission_draft_payload(
+        {
+            "process_label": "PwRelaxWorkChain",
+            "inputs": {
+                "base": {
+                    "pw": {
+                        "parameters": {
+                            "SYSTEM": {"ecutwfc": 55},
+                        }
+                    }
+                },
+                "kpoints": {"mesh": [4, 4, 1]},
+                "metadata": {
+                    "options": {
+                        "resources": {"num_machines": 2},
+                        "max_wallclock_seconds": 3600,
+                    }
+                },
+                "protocol": "moderate",
+                "pseudo_family": "PseudoDojo/0.5/PBE/SR/standard/upf",
+            },
+            "advanced_settings": {"protocol": "moderate"},
+        },
+        draft=None,
+        validation=None,
+        validation_summary=None,
+    )
+
+    groups = normalized["input_groups"]
+    assert isinstance(groups, list)
+    group_titles = {entry.get("title") for entry in groups}
+    assert "Computational Details" in group_titles
+    assert "Brillouin Zone" in group_titles
+    assert "System Environment" in group_titles
+    assert "Physics Protocol" in group_titles
+
+    mesh_entry = normalized["all_inputs"]["kpoints.mesh"]
+    assert mesh_entry["ui_type"] == "mesh"
 
 
 def test_update_assistant_message_keeps_existing_text_when_status_payload_arrives() -> None:
@@ -253,7 +392,7 @@ def test_update_assistant_message_keeps_existing_text_when_status_payload_arrive
 
 def test_is_retryable_model_unavailable_error_detects_high_demand_503() -> None:
     error = RuntimeError(
-        "Request failed: status_code: 503, model_name: gemini-3-pro-preview, "
+        "Request failed: status_code: 503, model_name: gemini-3-flash-preview, "
         "body: {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. "
         "Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}"
     )

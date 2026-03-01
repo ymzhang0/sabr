@@ -1,11 +1,13 @@
 import { ChevronDown, Loader2, Moon, Sun } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
 import { cn } from "@/lib/utils";
 import type { ProcessItem } from "@/types/aiida";
+
+const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 
 function clampRecentLimit(value: number): number {
   return Math.min(100, Math.max(1, value));
@@ -465,6 +467,18 @@ export function Sidebar({
     }
   };
 
+  const handleProcessDragStart = (event: DragEvent<HTMLDivElement>, process: ProcessItem) => {
+    event.dataTransfer.effectAllowed = "copy";
+    const payload = {
+      pk: process.pk,
+      label: process.label || `Node #${process.pk}`,
+      formula: process.formula ?? null,
+      node_type: process.node_type || "Unknown",
+    };
+    event.dataTransfer.setData(CONTEXT_NODE_DRAG_MIME, JSON.stringify(payload));
+    event.dataTransfer.setData("text/plain", `#${process.pk}`);
+  };
+
   return (
     <aside className="flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight lg:w-[360px]">
       <header className="flex items-center justify-between">
@@ -668,6 +682,8 @@ export function Sidebar({
                       key={`${process.pk}-${process.state}-${process.formula ?? ""}`}
                       role="button"
                       tabIndex={0}
+                      draggable
+                      onDragStart={(event) => handleProcessDragStart(event, process)}
                       onClick={activateCard}
                       onKeyDown={(event) => {
                         if (event.key === "Enter" || event.key === " ") {

@@ -1,58 +1,27 @@
 from __future__ import annotations
 
-import json
-import re
-
 import pytest
 
 from src.sab_engines.aiida.agent import tools
 
 
 @pytest.mark.anyio
-async def test_run_python_code_archives_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.setattr(tools, "_SCRIPT_ARCHIVE_DIR", tmp_path)
-
+async def test_run_python_code_success_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_request_json(method: str, path: str, **kwargs):  # noqa: ANN003
         assert method == "POST"
         assert path == "/management/run-python"
-        assert kwargs.get("json", {}).get("script") == "print('archive')"
-        pending_metadata_files = list(tmp_path.glob("script_*.json"))
-        assert len(pending_metadata_files) == 1
-        pending_metadata = json.loads(pending_metadata_files[0].read_text(encoding="utf-8"))
-        assert pending_metadata["status"] == "pending"
-        return {"success": True, "output": "Submitted as PK 102 and Node #103"}
+        assert kwargs.get("json", {}).get("script") == "print('hello')"
+        return {"success": True, "output": "hello"}
 
     monkeypatch.setattr(tools, "request_json", _fake_request_json)
 
-    result = await tools.run_python_code(
-        "print('archive')",
-        intent="relax structures with pseudodojo",
-        nodes_involved=[264, "264"],
-        turn_id=1,
-    )
+    result = await tools.run_python_code("print('hello')")
 
-    assert isinstance(result, str)
-    assert "PK 102" in result
-
-    metadata_files = list(tmp_path.glob("script_*.json"))
-    assert len(metadata_files) == 1
-    metadata = json.loads(metadata_files[0].read_text(encoding="utf-8"))
-
-    assert re.match(r"script_\d{8}_turn1_v1", str(metadata.get("script_id")))
-    assert metadata["status"] == "success"
-    assert metadata["intent"] == "relax structures with pseudodojo"
-    assert metadata["nodes_involved"] == [264]
-    assert set(metadata["created_pks"]) == {102, 103}
-
-    script_path = tmp_path / f"{metadata['script_id']}.py"
-    assert script_path.exists()
-    assert script_path.read_text(encoding="utf-8") == "print('archive')"
+    assert result == "hello"
 
 
 @pytest.mark.anyio
-async def test_run_python_code_archives_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.setattr(tools, "_SCRIPT_ARCHIVE_DIR", tmp_path)
-
+async def test_run_python_code_returns_missing_module_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _fake_request_json(method: str, path: str, **kwargs):  # noqa: ANN003
         assert method == "POST"
         assert path == "/management/run-python"
@@ -61,76 +30,104 @@ async def test_run_python_code_archives_error(monkeypatch: pytest.MonkeyPatch, t
             "error": (
                 "Traceback (most recent call last):\n"
                 "  File \"<string>\", line 1, in <module>\n"
-                "ModuleNotFoundError: No module named 'aiida_quantumespresso'\n"
+                "ModuleNotFoundError: No module named 'aiida_pseudo.data.family'\n"
             ),
             "output": "",
         }
 
     monkeypatch.setattr(tools, "request_json", _fake_request_json)
 
-    result = await tools.run_python_code(
-        "raise RuntimeError('boom')",
-        intent="test failing script",
-        nodes_involved=[11],
-        turn_id=2,
-    )
+    result = await tools.run_python_code("import aiida_pseudo")
 
     assert isinstance(result, dict)
-    assert "ModuleNotFoundError" in result["error"]
-    assert result["missing_module"] == "aiida_quantumespresso"
+    assert result["missing_module"] == "aiida_pseudo.data.family"
     assert "missing this Python module" in result["hint"]
-
-    metadata_files = list(tmp_path.glob("script_*.json"))
-    assert len(metadata_files) == 1
-    metadata = json.loads(metadata_files[0].read_text(encoding="utf-8"))
-    assert metadata["status"] == "error"
-    assert "ModuleNotFoundError" in metadata["error_message"]
-    assert metadata["missing_module"] == "aiida_quantumespresso"
-    assert metadata["nodes_involved"] == [11]
 
 
 @pytest.mark.anyio
-async def test_search_script_archive_filters_by_keyword_and_nodes(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(tools, "_SCRIPT_ARCHIVE_DIR", tmp_path)
+async def test_register_specialized_skill_calls_registry_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_request_json(method: str, path: str, **kwargs):  # noqa: ANN003
+        assert method == "POST"
+        assert path == "/registry/register"
+        body = kwargs.get("json", {})
+        assert body["skill_name"] == "relax_helper"
+        assert "def main" in body["script"]
+        return {"status": "registered", "skill_name": body["skill_name"]}
 
-    meta_a = {
-        "script_id": "script_20260301_turn1_v1",
-        "timestamp": "2026-03-01T00:00:00+00:00",
-        "intent": "relax structures with pseudodojo",
-        "nodes_involved": [264, 300],
-        "status": "success",
-        "created_pks": [5001],
-        "error_message": None,
-    }
-    meta_b = {
-        "script_id": "script_20260301_turn2_v1",
-        "timestamp": "2026-03-01T00:01:00+00:00",
-        "intent": "inspect failed bands workflow",
-        "nodes_involved": [999],
-        "status": "error",
-        "created_pks": [],
-        "error_message": "missing pseudos",
-    }
-    (tmp_path / "script_20260301_turn1_v1.py").write_text("print('relax')", encoding="utf-8")
-    (tmp_path / "script_20260301_turn2_v1.py").write_text("print('inspect')", encoding="utf-8")
-    (tmp_path / "script_20260301_turn1_v1.json").write_text(
-        json.dumps(meta_a, ensure_ascii=True, indent=2),
-        encoding="utf-8",
-    )
-    (tmp_path / "script_20260301_turn2_v1.json").write_text(
-        json.dumps(meta_b, ensure_ascii=True, indent=2),
-        encoding="utf-8",
+    monkeypatch.setattr(tools, "request_json", _fake_request_json)
+
+    payload = await tools.register_specialized_skill(
+        skill_name="relax_helper",
+        script="def main(params):\n    return params\n",
+        description="Reusable relax helper",
+        overwrite=True,
     )
 
-    payload = await tools.search_script_archive(
-        keyword="relax",
-        nodes_involved=[264],
-        include_source=True,
-        limit=10,
+    assert isinstance(payload, dict)
+    assert payload["status"] == "registered"
+    assert payload["skill_name"] == "relax_helper"
+
+
+@pytest.mark.anyio
+async def test_execute_specialized_skill_calls_execute_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_request_json(method: str, path: str, **kwargs):  # noqa: ANN003
+        assert method == "POST"
+        assert path == "/execute/relax_helper"
+        assert kwargs.get("json") == {"params": {"pk": 264}}
+        return {"success": True, "result": {"submitted": [1001]}}
+
+    monkeypatch.setattr(tools, "request_json", _fake_request_json)
+
+    payload = await tools.execute_specialized_skill("relax_helper", {"pk": 264})
+
+    assert isinstance(payload, dict)
+    assert payload["success"] is True
+    assert payload["result"]["submitted"] == [1001]
+
+
+@pytest.mark.anyio
+async def test_list_registered_skills_normalizes_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_request_json(method: str, path: str, **kwargs):  # noqa: ANN003
+        assert method == "GET"
+        assert path == "/registry/list"
+        return {
+            "count": 2,
+            "items": [
+                {"name": "skill_a", "description": "A", "updated_at": "2026-03-01T00:00:00Z"},
+                {"name": "skill_b", "entrypoint": "main(params)"},
+            ],
+        }
+
+    monkeypatch.setattr(tools, "request_json", _fake_request_json)
+
+    payload = await tools.list_registered_skills()
+
+    assert isinstance(payload, dict)
+    assert payload["count"] == 2
+    assert payload["items"][0]["name"] == "skill_a"
+    assert payload["items"][1]["name"] == "skill_b"
+
+
+def test_list_registered_skills_sync_handles_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_request_json_sync(method: str, path: str, **kwargs):  # noqa: ANN003
+        assert method == "GET"
+        assert path == "/registry/list"
+        raise RuntimeError("worker unavailable")
+
+    monkeypatch.setattr(tools, "request_json_sync", _fake_request_json_sync)
+
+    payload = tools.list_registered_skills_sync()
+
+    assert payload == {"count": 0, "items": []}
+
+
+def test_summarize_worker_error_prefers_traceback_root_cause() -> None:
+    error_text = (
+        "Traceback (most recent call last):\n"
+        "  File \"<string>\", line 2, in <module>\n"
+        "ImportError: cannot import name 'load_dbenv' from 'aiida'\n"
     )
 
-    assert payload["count"] == 1
-    item = payload["items"][0]
-    assert item["script_id"] == "script_20260301_turn1_v1"
-    assert item["nodes_involved"] == [264, 300]
-    assert "print('relax')" in item["script"]
+    summary = tools._summarize_worker_error(error_text)
+
+    assert summary == "ImportError: cannot import name 'load_dbenv' from 'aiida'"

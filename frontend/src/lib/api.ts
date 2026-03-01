@@ -9,6 +9,7 @@ import type {
   ChatResponse,
   GroupsResponse,
   LogsResponse,
+  NodeHoverMetadataResponse,
   ProcessDetailResponse,
   ProcessLogsResponse,
   ProcessesResponse,
@@ -97,6 +98,11 @@ export async function getProcesses(
   const { data } = await frontendApi.get<ProcessesResponse>("/processes", {
     params: { limit, group_label: groupLabel, node_type: nodeType },
   });
+  return data;
+}
+
+export async function getNodeHoverMetadata(pk: number): Promise<NodeHoverMetadataResponse> {
+  const { data } = await frontendApi.get<NodeHoverMetadataResponse>(`/nodes/${pk}/metadata`);
   return data;
 }
 

@@ -1,5 +1,5 @@
 import { Bot, ChevronDown, Copy, Paperclip, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   SubmissionModal,
@@ -10,9 +10,9 @@ import {
 import { ThinkingIndicator, type ProcessLogEntry } from "@/components/dashboard/thinking-indicator";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
-import { cancelPendingSubmission, submitPreviewDraft } from "@/lib/api";
+import { cancelPendingSubmission, getNodeHoverMetadata, submitPreviewDraft } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { ChatMessage, FocusNode } from "@/types/aiida";
+import type { ChatMessage, FocusNode, NodeHoverMetadataResponse } from "@/types/aiida";
 
 type ChatTurn = {
   turnId: number;
@@ -36,18 +36,19 @@ type SubmissionDraftTagParseResult = {
   bufferedFragment: string | null;
 };
 
-type ActiveSubmissionModalState = {
-  turnId: number;
-  preview: SubmissionDraftPreview;
-};
-
 type SubmittedPreviewSummary = {
   processLabel: string;
   processPks: number[];
 };
 
+type NodeHoverMetadataState = {
+  status: "loading" | "loaded" | "error";
+  data: NodeHoverMetadataResponse | null;
+};
+
 const SUBMISSION_DRAFT_TAG = "[SUBMISSION_DRAFT]";
 const SUBMISSION_DRAFT_JSON_GLOBAL_REGEX = /(?:\[SUBMISSION_DRAFT\])\s*(\{[\s\S]*?\})/gis;
+const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 
 const FRIENDLY_TOOL_STEP_MAP: Record<string, string> = {
   inspect_process: "Inspecting process details...",
@@ -209,9 +210,15 @@ function normalizeSubmissionDraftPreview(rawSubmissionDraft: Record<string, unkn
     asRecord(metaRecord.recommended_inputs);
   const rawAllInputs = asRecord(rawSubmissionDraft.all_inputs) ?? asRecord(metaRecord.all_inputs);
   const rawAdvancedSettings = asRecord(rawSubmissionDraft.advanced_settings);
+  const rawInputGroups = Array.isArray(rawSubmissionDraft.input_groups)
+    ? rawSubmissionDraft.input_groups
+    : Array.isArray(metaRecord.input_groups)
+      ? metaRecord.input_groups
+      : [];
   const submissionDraft: SubmissionDraftPayload = {
     process_label: processLabel,
     inputs,
+    input_groups: rawInputGroups,
     primary_inputs: rawPrimaryInputs ?? {},
     recommended_inputs: rawRecommendedInputs ?? rawAdvancedSettings ?? {},
     all_inputs: rawAllInputs ?? {},
@@ -228,6 +235,7 @@ function normalizeSubmissionDraftPreview(rawSubmissionDraft: Record<string, unkn
       draft: submitDraft,
       recommended_inputs: rawRecommendedInputs ?? rawAdvancedSettings ?? {},
       all_inputs: rawAllInputs ?? {},
+      input_groups: rawInputGroups,
       structure_metadata: Array.isArray(metaRecord.structure_metadata) ? metaRecord.structure_metadata : [],
     },
   };
@@ -247,6 +255,7 @@ function isSubmissionDraftLikePayload(value: Record<string, unknown> | null): bo
     asRecord(value.primary_inputs) ||
     asRecord(value.recommended_inputs) ||
     asRecord(value.all_inputs) ||
+    Array.isArray(value.input_groups) ||
     asRecord(value.advanced_settings) ||
     asRecord(value.meta)
   ) {
@@ -488,6 +497,22 @@ function parseSubmissionDraftTag(
   };
 }
 
+function stripSubmissionDraftBlocks(text: string): string {
+  let clean = text ?? "";
+  for (let pass = 0; pass < 4; pass += 1) {
+    if (!clean.toUpperCase().includes(SUBMISSION_DRAFT_TAG)) {
+      break;
+    }
+    const parsed = parseSubmissionDraftTag(clean);
+    if (parsed.cleanText === clean) {
+      clean = clean.replace(/\[SUBMISSION_DRAFT\][\s\S]*$/gi, "").trimEnd();
+      break;
+    }
+    clean = parsed.cleanText;
+  }
+  return clean;
+}
+
 function resolveTurnSubmissionDraft(
   turn: ChatTurn,
   bufferedFragment?: string,
@@ -502,6 +527,9 @@ function submissionDraftSignature(preview: SubmissionDraftPreview): string {
   const primaryInputsCount = Object.keys(asRecord(preview.submissionDraft.primary_inputs) ?? {}).length;
   const recommendedInputsCount = Object.keys(asRecord(preview.submissionDraft.recommended_inputs) ?? {}).length;
   const allInputsCount = Object.keys(asRecord(preview.submissionDraft.all_inputs) ?? {}).length;
+  const inputGroupsCount = Array.isArray(preview.submissionDraft.input_groups)
+    ? preview.submissionDraft.input_groups.length
+    : 0;
   const advancedSettingsCount = Object.keys(asRecord(preview.submissionDraft.advanced_settings) ?? {}).length;
   const pkCount = Array.isArray(preview.submissionDraft.meta.pk_map)
     ? preview.submissionDraft.meta.pk_map.length
@@ -511,6 +539,7 @@ function submissionDraftSignature(preview: SubmissionDraftPreview): string {
     primaryInputsCount,
     recommendedInputsCount,
     allInputsCount,
+    inputGroupsCount,
     advancedSettingsCount,
     pkCount,
   ].join("|");
@@ -893,40 +922,128 @@ function arePreviewMapsEqual(
   return true;
 }
 
+type PkCitationLinkProps = {
+  label: string;
+  pk: number;
+  showHoverCard: boolean;
+  onOpenDetail: (pk: number) => void;
+  onEnsureHoverMetadata: (pk: number) => void;
+  hoverMetadata?: NodeHoverMetadataState;
+};
+
+function formatMetadataValue(value: string | null | undefined): string {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text || "N/A";
+}
+
+function PkCitationLink({
+  label,
+  pk,
+  showHoverCard,
+  onOpenDetail,
+  onEnsureHoverMetadata,
+  hoverMetadata,
+}: PkCitationLinkProps) {
+  const [isTooltipVisible, setIsTooltipVisible] = useState(false);
+
+  const handleShowTooltip = () => {
+    setIsTooltipVisible(true);
+    if (showHoverCard) {
+      onEnsureHoverMetadata(pk);
+    }
+  };
+
+  const handleHideTooltip = () => {
+    setIsTooltipVisible(false);
+  };
+
+  const formula = formatMetadataValue(hoverMetadata?.data?.formula);
+  const spacegroup = formatMetadataValue(hoverMetadata?.data?.spacegroup);
+  const nodeType = formatMetadataValue(hoverMetadata?.data?.node_type);
+
+  return (
+    <span className="relative inline-flex align-baseline">
+      <span
+        role="button"
+        tabIndex={0}
+        className="font-mono text-sky-600 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-300"
+        onClick={() => onOpenDetail(pk)}
+        onMouseEnter={handleShowTooltip}
+        onMouseLeave={handleHideTooltip}
+        onFocus={handleShowTooltip}
+        onBlur={handleHideTooltip}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onOpenDetail(pk);
+          }
+        }}
+      >
+        {label}
+      </span>
+      {showHoverCard && isTooltipVisible ? (
+        <span
+          role="status"
+          className="pointer-events-none absolute left-0 top-full z-40 mt-1.5 w-56 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-100 shadow-2xl"
+        >
+          <p className="mb-2 font-mono text-[11px] text-zinc-300">Node #{pk}</p>
+          {hoverMetadata?.status === "loading" ? (
+            <p className="text-zinc-200">Loading metadata...</p>
+          ) : hoverMetadata?.status === "error" ? (
+            <p className="text-zinc-200">Metadata unavailable.</p>
+          ) : (
+            <div className="space-y-1.5">
+              <p className="flex items-start justify-between gap-2">
+                <span className="uppercase tracking-[0.08em] text-zinc-400">Formula</span>
+                <span className="text-right text-zinc-100">{formula}</span>
+              </p>
+              <p className="flex items-start justify-between gap-2">
+                <span className="uppercase tracking-[0.08em] text-zinc-400">Spacegroup</span>
+                <span className="text-right text-zinc-100">{spacegroup}</span>
+              </p>
+              <p className="flex items-start justify-between gap-2">
+                <span className="uppercase tracking-[0.08em] text-zinc-400">Node Type</span>
+                <span className="text-right text-zinc-100">{nodeType}</span>
+              </p>
+            </div>
+          )}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 function renderTextWithSmartCitations(
   text: string,
   handleOpenDetail: (pk: number) => void,
+  hoverMetadataByPk: Record<number, NodeHoverMetadataState>,
+  ensureHoverMetadata: (pk: number) => void,
 ): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /\b(PK|Node|#|structure)\s*(\d+)\b/gi;
+  const pattern = /#\s*(\d+)\b|\b(?:PK|Node|structure)\s*(\d+)\b/gi;
   let cursor = 0;
   let match = pattern.exec(text);
 
   while (match) {
     const [full] = match;
-    const pk = toPositiveInteger(match[2]);
+    const pk = toPositiveInteger(match[1] ?? match[2]);
     const start = match.index;
     const end = start + full.length;
     if (start > cursor) {
       nodes.push(text.slice(cursor, start));
     }
     if (pk !== null) {
+      const isHashToken = Boolean(match[1]);
       nodes.push(
-        <span
+        <PkCitationLink
           key={`pk-link-${start}-${pk}`}
-          role="button"
-          tabIndex={0}
-          className="font-mono text-sky-600 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-300"
-          onClick={() => handleOpenDetail(pk)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              handleOpenDetail(pk);
-            }
-          }}
-        >
-          {full}
-        </span>,
+          label={full}
+          pk={pk}
+          showHoverCard={isHashToken}
+          onOpenDetail={handleOpenDetail}
+          onEnsureHoverMetadata={ensureHoverMetadata}
+          hoverMetadata={hoverMetadataByPk[pk]}
+        />,
       );
     } else {
       nodes.push(full);
@@ -982,6 +1099,7 @@ type ChatPanelProps = {
   messages: ChatMessage[];
   models: string[];
   selectedModel: string;
+  composerResetVersion: number;
   quickPrompts: Array<{ label: string; prompt: string }>;
   contextNodes: FocusNode[];
   isLoading: boolean;
@@ -990,42 +1108,79 @@ type ChatPanelProps = {
   onStopResponse: () => void;
   onModelChange: (model: string) => void;
   onAttachFile: (file: File) => void;
+  onAddContextNode: (node: FocusNode) => void;
   onRemoveContextNode: (pk: number) => void;
   onOpenDetail: (pk: number) => void;
   onRestoreContextNodes: (nodes: FocusNode[]) => void;
 };
 
-function iconForNodeType(nodeType: string): string {
-  if (nodeType === "StructureData") {
-    return "💎";
+function normalizeDroppedContextNode(raw: unknown): FocusNode | null {
+  const record = asRecord(raw);
+  if (!record) {
+    return null;
   }
-  if (nodeType === "ProcessNode" || nodeType === "WorkChainNode" || nodeType === "CalcJobNode" || nodeType === "CalcFunctionNode") {
-    return "⚡";
+  const pk = toPositiveInteger(record.pk);
+  if (pk === null) {
+    return null;
   }
-  if (nodeType === "BandsData" || nodeType === "XyData") {
-    return "📈";
-  }
-  if (nodeType === "Dict" || nodeType === "ArrayData") {
-    return "📑";
-  }
-  if (nodeType === "RemoteData" || nodeType === "FolderData") {
-    return "📁";
-  }
-  return "📦";
+  const label = typeof record.label === "string" && record.label.trim() ? record.label.trim() : `#${pk}`;
+  const formula = typeof record.formula === "string" && record.formula.trim() ? record.formula.trim() : null;
+  const nodeType =
+    typeof record.node_type === "string" && record.node_type.trim() ? record.node_type.trim() : "Unknown";
+  return { pk, label, formula, node_type: nodeType };
 }
 
-function shortNodeLabel(node: FocusNode): string {
-  const raw = node.label.trim();
-  if (!raw) {
-    return `#${node.pk}`;
+function parseDroppedContextNode(event: DragEvent<HTMLElement>): FocusNode | null {
+  const rawPayload = event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME);
+  if (rawPayload) {
+    try {
+      const parsed = JSON.parse(rawPayload);
+      const node = normalizeDroppedContextNode(parsed);
+      if (node) {
+        return node;
+      }
+    } catch {
+      // Ignore malformed drag payload and fall back to plain text parsing.
+    }
   }
-  return raw.length > 18 ? `${raw.slice(0, 16)}…` : raw;
+
+  const plainText = event.dataTransfer.getData("text/plain");
+  const match = plainText.match(/#\s*(\d+)\b/);
+  const pk = toPositiveInteger(match?.[1]);
+  if (pk === null) {
+    return null;
+  }
+  return {
+    pk,
+    label: `#${pk}`,
+    formula: null,
+    node_type: "Unknown",
+  };
+}
+
+function insertPkTokenAtSelection(
+  text: string,
+  pk: number,
+  selectionStart: number,
+  selectionEnd: number,
+): { value: string; caret: number } {
+  const token = `#${pk}`;
+  const start = Math.max(0, Math.min(selectionStart, text.length));
+  const end = Math.max(start, Math.min(selectionEnd, text.length));
+  const prefix = text.slice(0, start);
+  const suffix = text.slice(end);
+  const needsLeadingSpace = prefix.length > 0 && !/\s$/.test(prefix);
+  const needsTrailingSpace = suffix.length > 0 && !/^\s/.test(suffix);
+  const inserted = `${needsLeadingSpace ? " " : ""}${token}${needsTrailingSpace ? " " : ""}`;
+  const value = `${prefix}${inserted}${suffix}`;
+  return { value, caret: prefix.length + inserted.length };
 }
 
 export function ChatPanel({
   messages,
   models,
   selectedModel,
+  composerResetVersion,
   quickPrompts,
   contextNodes,
   isLoading,
@@ -1034,6 +1189,7 @@ export function ChatPanel({
   onStopResponse,
   onModelChange,
   onAttachFile,
+  onAddContextNode,
   onRemoveContextNode,
   onOpenDetail,
   onRestoreContextNodes,
@@ -1048,10 +1204,10 @@ export function ChatPanel({
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
+  const [dragOverZone, setDragOverZone] = useState<"textarea" | "attachment" | null>(null);
   const [previewStateByTurn, setPreviewStateByTurn] = useState<Record<number, SubmissionModalState>>({});
   const [submittedPreviewByTurn, setSubmittedPreviewByTurn] = useState<Record<number, SubmittedPreviewSummary>>({});
-  const [pendingSubmission, setPendingSubmission] = useState<ActiveSubmissionModalState | null>(null);
-  const [isSubmissionModalOpen, setIsSubmissionModalOpen] = useState(false);
+  const [expandedSubmissionByTurn, setExpandedSubmissionByTurn] = useState<Record<number, boolean>>({});
   const [currentStep, setCurrentStep] = useState("");
   const [currentStepTurnId, setCurrentStepTurnId] = useState<number | null>(null);
   const [processLogByTurn, setProcessLogByTurn] = useState<Record<number, ProcessLogEntry[]>>({});
@@ -1062,7 +1218,8 @@ export function ChatPanel({
   const [stableSubmissionDraftByTurn, setStableSubmissionDraftByTurn] = useState<
     Record<number, SubmissionDraftPreview>
   >({});
-  const surfacedDraftSignaturesRef = useRef<Record<number, string>>({});
+  const [nodeHoverMetadataByPk, setNodeHoverMetadataByPk] = useState<Record<number, NodeHoverMetadataState>>({});
+  const nodeHoverMetadataRef = useRef<Record<number, NodeHoverMetadataState>>({});
 
   const turns = useMemo(() => groupMessages(messages), [messages]);
   const latestTurnId = turns.length > 0 ? turns[turns.length - 1].turnId : null;
@@ -1101,6 +1258,39 @@ export function ChatPanel({
   }, []);
 
   useEffect(() => {
+    nodeHoverMetadataRef.current = nodeHoverMetadataByPk;
+  }, [nodeHoverMetadataByPk]);
+
+  const ensureNodeHoverMetadata = useCallback((pk: number) => {
+    if (!Number.isInteger(pk) || pk <= 0) {
+      return;
+    }
+    const currentState = nodeHoverMetadataRef.current[pk];
+    if (currentState?.status === "loading" || currentState?.status === "loaded") {
+      return;
+    }
+
+    setNodeHoverMetadataByPk((current) => ({
+      ...current,
+      [pk]: { status: "loading", data: null },
+    }));
+
+    void getNodeHoverMetadata(pk)
+      .then((metadata) => {
+        setNodeHoverMetadataByPk((current) => ({
+          ...current,
+          [pk]: { status: "loaded", data: metadata },
+        }));
+      })
+      .catch(() => {
+        setNodeHoverMetadataByPk((current) => ({
+          ...current,
+          [pk]: { status: "error", data: null },
+        }));
+      });
+  }, []);
+
+  useEffect(() => {
     const handleOutside = (event: MouseEvent) => {
       if (!modelMenuRef.current) {
         return;
@@ -1119,6 +1309,16 @@ export function ChatPanel({
       if (scrollRafRef.current !== null) {
         window.cancelAnimationFrame(scrollRafRef.current);
       }
+    };
+  }, []);
+
+  useEffect(() => {
+    const clearDragZone = () => setDragOverZone(null);
+    window.addEventListener("dragend", clearDragZone);
+    window.addEventListener("drop", clearDragZone);
+    return () => {
+      window.removeEventListener("dragend", clearDragZone);
+      window.removeEventListener("drop", clearDragZone);
     };
   }, []);
 
@@ -1166,15 +1366,39 @@ export function ChatPanel({
       }
       return changed ? next : current;
     });
-    const nextSignatures: Record<number, string> = {};
-    Object.entries(surfacedDraftSignaturesRef.current).forEach(([turnKey, signature]) => {
-      const turnId = Number.parseInt(turnKey, 10);
-      if (turnIds.has(turnId)) {
-        nextSignatures[turnId] = signature;
-      }
+    setExpandedSubmissionByTurn((current) => {
+      const next: Record<number, boolean> = {};
+      let changed = false;
+      Object.entries(current).forEach(([turnKey, expanded]) => {
+        const turnId = Number.parseInt(turnKey, 10);
+        if (turnIds.has(turnId)) {
+          next[turnId] = expanded;
+          return;
+        }
+        changed = true;
+      });
+      return changed ? next : current;
     });
-    surfacedDraftSignaturesRef.current = nextSignatures;
   }, [turns]);
+
+  useEffect(() => {
+    setExpandedSubmissionByTurn((current) => {
+      const next = { ...current };
+      let changed = false;
+      turns.forEach((turn) => {
+        const assistantText = turnTextBufferByTurn[turn.turnId] ?? turn.assistantText ?? "";
+        const hasSubmissionTag = assistantText.toUpperCase().includes(SUBMISSION_DRAFT_TAG);
+        const hasSubmissionPayload = Boolean(extractSubmissionDraft(turn.assistantPayload));
+        const hasSubmissionSignal = hasSubmissionTag || hasSubmissionPayload || Boolean(stableSubmissionDraftByTurn[turn.turnId]);
+        if (!hasSubmissionSignal || Object.prototype.hasOwnProperty.call(next, turn.turnId)) {
+          return;
+        }
+        next[turn.turnId] = true;
+        changed = true;
+      });
+      return changed ? next : current;
+    });
+  }, [stableSubmissionDraftByTurn, turnTextBufferByTurn, turns]);
 
   useEffect(() => {
     const next: Record<number, ProcessLogEntry[]> = {};
@@ -1305,89 +1529,6 @@ export function ChatPanel({
   }, [submissionDraftBufferByTurn, turnTextBufferByTurn, turns]);
 
   useEffect(() => {
-    if (isSubmissionModalOpen) {
-      return;
-    }
-
-    let latestDraft: ActiveSubmissionModalState | null = null;
-    turns.forEach((turn) => {
-      const assistantText = turnTextBufferByTurn[turn.turnId] ?? turn.assistantText ?? "";
-      const hasSubmissionTag = assistantText.toUpperCase().includes(SUBMISSION_DRAFT_TAG);
-      const hasSubmissionPayload = Boolean(extractSubmissionDraft(turn.assistantPayload));
-      if (!hasSubmissionTag && !hasSubmissionPayload) {
-        return;
-      }
-
-      const preview = resolveTurnSubmissionDraft(
-        { ...turn, assistantText },
-        submissionDraftBufferByTurn[turn.turnId],
-      );
-      if (!preview) {
-        return;
-      }
-
-      const signature = submissionDraftSignature(preview);
-      const seenSignature = surfacedDraftSignaturesRef.current[turn.turnId];
-      const previewState = previewStateByTurn[turn.turnId];
-      const isFinalized = previewState?.status === "submitted" || previewState?.status === "cancelled";
-      if (seenSignature === signature || isFinalized) {
-        return;
-      }
-
-      surfacedDraftSignaturesRef.current[turn.turnId] = signature;
-      latestDraft = { turnId: turn.turnId, preview };
-    });
-
-    if (latestDraft) {
-      setPendingSubmission(latestDraft);
-      setIsSubmissionModalOpen(true);
-    }
-  }, [isSubmissionModalOpen, previewStateByTurn, submissionDraftBufferByTurn, turnTextBufferByTurn, turns]);
-
-  useEffect(() => {
-    if (!pendingSubmission) {
-      return;
-    }
-    const matchingTurn = turns.find((turn) => turn.turnId === pendingSubmission.turnId);
-    if (!matchingTurn) {
-      setPendingSubmission(null);
-      setIsSubmissionModalOpen(false);
-      return;
-    }
-    const assistantText = turnTextBufferByTurn[pendingSubmission.turnId] ?? matchingTurn.assistantText ?? "";
-    const updatedPreview = resolveTurnSubmissionDraft(
-      { ...matchingTurn, assistantText },
-      submissionDraftBufferByTurn[pendingSubmission.turnId],
-    );
-    if (!updatedPreview) {
-      return;
-    }
-    const nextSignature = submissionDraftSignature(updatedPreview);
-    const currentSignature = submissionDraftSignature(pendingSubmission.preview);
-    if (nextSignature === currentSignature) {
-      return;
-    }
-    setPendingSubmission({
-      turnId: pendingSubmission.turnId,
-      preview: updatedPreview,
-    });
-  }, [pendingSubmission, submissionDraftBufferByTurn, turnTextBufferByTurn, turns]);
-
-  useEffect(() => {
-    if (!pendingSubmission) {
-      return;
-    }
-    const activeState = previewStateByTurn[pendingSubmission.turnId];
-    if (activeState?.status !== "submitted") {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setIsSubmissionModalOpen(false);
-    }, 1200);
-    return () => window.clearTimeout(timer);
-  }, [pendingSubmission, previewStateByTurn]);
-
-  useEffect(() => {
     const thinkingTurnId = activeTurnId ?? latestTurnId;
     if (!isLoading || thinkingTurnId === null) {
       setCurrentStep("");
@@ -1440,10 +1581,6 @@ export function ChatPanel({
     setIsAutoScrollEnabled(true);
     scrollToBottom("smooth");
     onSendMessage(text);
-    setDraft("");
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "56px";
-    }
   };
 
   const isDraftEmpty = !draft.trim();
@@ -1495,8 +1632,6 @@ export function ChatPanel({
       ...current,
       [turnId]: { status: "cancelled", processPk: null, processPks: [], errorText: null },
     }));
-    setPendingSubmission((current) => (current?.turnId === turnId ? null : current));
-    setIsSubmissionModalOpen(false);
     try {
       await cancelPendingSubmission();
     } catch (error) {
@@ -1538,9 +1673,13 @@ export function ChatPanel({
     [onSendMessage, scrollToBottom, structureContextPks],
   );
 
-  const activeSubmissionState: SubmissionModalState = pendingSubmission
-    ? (previewStateByTurn[pendingSubmission.turnId] ?? { status: "idle" })
-    : { status: "idle" };
+  useEffect(() => {
+    setDraft("");
+    setDragOverZone(null);
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "56px";
+    }
+  }, [composerResetVersion]);
 
   return (
     <Panel className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden p-0">
@@ -1581,7 +1720,8 @@ export function ChatPanel({
               taggedSubmissionDraft.cleanText.trim().length > 0
                 ? taggedSubmissionDraft.cleanText
                 : (stableAssistantTextByTurn[turn.turnId] ?? taggedSubmissionDraft.cleanText);
-            const hasAssistantText = Boolean(assistantText.trim());
+            const visibleAssistantText = stripSubmissionDraftBlocks(assistantText);
+            const hasAssistantText = Boolean(visibleAssistantText.trim());
             const hasFinalAssistantState =
               Boolean(turn.assistantStatus) &&
               turn.assistantStatus !== "thinking" &&
@@ -1627,13 +1767,21 @@ export function ChatPanel({
                   }));
             const previewState = previewStateByTurn[turn.turnId] ?? { status: "idle" as const };
             const submittedPreview = submittedPreviewByTurn[turn.turnId];
+            const isSubmissionExpanded = expandedSubmissionByTurn[turn.turnId] ?? true;
 
             return (
               <article key={turn.turnId} className="space-y-3">
                 {turn.userText ? (
                   <div className="flex justify-end">
                     <div className="group relative max-w-[78%] rounded-2xl border border-zinc-200/80 bg-white/90 px-4 py-3 text-sm leading-6 text-zinc-900 shadow-sm dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100">
-                      <p className="whitespace-pre-wrap">{turn.userText}</p>
+                      <p className="whitespace-pre-wrap">
+                        {renderTextWithSmartCitations(
+                          turn.userText,
+                          onOpenDetail,
+                          nodeHoverMetadataByPk,
+                          ensureNodeHoverMetadata,
+                        )}
+                      </p>
                       {userContextPks.length > 0 ? (
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {userContextPks.map((pk) => (
@@ -1720,36 +1868,49 @@ export function ChatPanel({
                               })}
                             </ul>
                           ) : null}
-                          {assistantText.trim() ? (
+                          {visibleAssistantText.trim() ? (
                             <p className="whitespace-pre-wrap">
-                              {renderTextWithSmartCitations(assistantText, onOpenDetail)}
+                              {renderTextWithSmartCitations(
+                                visibleAssistantText,
+                                onOpenDetail,
+                                nodeHoverMetadataByPk,
+                                ensureNodeHoverMetadata,
+                              )}
                             </p>
                           ) : null}
                           {turn.assistantStatus === "error" ? (
                             <p className="mt-2 text-xs text-rose-500">Response ended with error.</p>
                           ) : null}
                           {submissionDraft ? (
-                            <div className="mt-3">
-                              <button
-                                type="button"
-                                className="inline-flex items-center rounded-full border border-blue-200/90 bg-blue-50/85 px-3 py-1 text-xs font-medium text-blue-700 transition-colors hover:bg-blue-100 dark:border-blue-900/60 dark:bg-blue-950/35 dark:text-blue-200 dark:hover:bg-blue-900/50"
-                                onClick={() => {
-                                  setPendingSubmission({
-                                    turnId: turn.turnId,
-                                    preview: submissionDraft,
-                                  });
-                                  setIsSubmissionModalOpen(true);
-                                }}
-                              >
-                                {previewState.status === "submitted" ? "View submission summary" : "Review submission draft"}
-                              </button>
-                            </div>
+                            <SubmissionModal
+                              open
+                              mode="inline"
+                              expanded={isSubmissionExpanded}
+                              onToggleExpanded={() =>
+                                setExpandedSubmissionByTurn((current) => ({
+                                  ...current,
+                                  [turn.turnId]: !isSubmissionExpanded,
+                                }))
+                              }
+                              turnId={turn.turnId}
+                              submissionDraft={submissionDraft.submissionDraft}
+                              state={previewState}
+                              isBusy={isLoading}
+                              onClose={() => {}}
+                              onConfirm={(draftPayload) => {
+                                void handleConfirmPreview(turn.turnId, submissionDraft, draftPayload);
+                              }}
+                              onCancel={() => {
+                                void handleCancelPreview(turn.turnId);
+                              }}
+                              onOpenDetail={onOpenDetail}
+                            />
                           ) : null}
                           <div className="pointer-events-none absolute -top-2 right-2 flex items-center gap-1 rounded-md border border-zinc-200/80 bg-white/95 px-1.5 py-1 opacity-0 shadow-sm transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 dark:border-zinc-700 dark:bg-zinc-950/95">
                             <button
                               type="button"
                               className="inline-flex h-6 w-6 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                              onClick={() => void copyTextToClipboard(assistantText)}
+                              onClick={() => void copyTextToClipboard(visibleAssistantText)}
                               aria-label="Copy message"
                             >
                               <Copy className="h-3.5 w-3.5" />
@@ -1757,7 +1918,7 @@ export function ChatPanel({
                             <button
                               type="button"
                               className="inline-flex h-6 w-6 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                              onClick={() => handleReaskMessage(assistantText, userContextNodes)}
+                              onClick={() => handleReaskMessage(visibleAssistantText, userContextNodes)}
                               aria-label="Re-ask message"
                             >
                               <RotateCcw className="h-3.5 w-3.5" />
@@ -1803,37 +1964,6 @@ export function ChatPanel({
       <div className="bg-white/75 px-4 pb-4 pt-3 backdrop-blur dark:bg-zinc-950/35 md:px-6">
         <div className="pt-2">
           <div className="rounded-2xl border border-zinc-200/80 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
-            <div
-              className={cn(
-                "overflow-hidden transition-all duration-200 ease-out",
-                hasContextNodes
-                  ? "mb-2 max-h-[10rem] translate-y-0 opacity-100"
-                  : "pointer-events-none mb-0 max-h-0 -translate-y-1 opacity-0",
-              )}
-            >
-              <div className="flex flex-wrap gap-2 pb-0.5">
-                {contextNodes.map((node) => (
-                  <div
-                    key={node.pk}
-                    className="context-tag-enter inline-flex w-auto max-w-full items-center gap-1.5 rounded-full border border-slate-200 bg-slate-100 px-2.5 py-1 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-200"
-                  >
-                    <span role="img" aria-label={node.node_type} className="shrink-0">
-                      {iconForNodeType(node.node_type)}
-                    </span>
-                    <span className="truncate font-medium">{shortNodeLabel(node)}</span>
-                    <span className="font-mono text-[11px] text-slate-500 dark:text-slate-400">#{node.pk}</span>
-                    <button
-                      type="button"
-                      className="inline-flex h-4 w-4 items-center justify-center rounded-full text-slate-500 transition-colors duration-150 hover:bg-slate-200 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-slate-100"
-                      onClick={() => onRemoveContextNode(node.pk)}
-                      aria-label={`Remove node ${node.pk} from context`}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
             {quickPrompts.length > 0 ? (
               <div className="mb-2 border-b border-zinc-200/70 pb-2 dark:border-zinc-800/80">
                 <div className="mb-1 flex items-center justify-between gap-2">
@@ -1882,11 +2012,56 @@ export function ChatPanel({
               rows={2}
               value={draft}
               placeholder="Message SABR..."
-              className="max-h-[220px] min-h-[56px] w-full resize-none border-none bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100"
+              className={cn(
+                "max-h-[220px] min-h-[56px] w-full resize-none rounded-lg border border-transparent bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition-colors dark:text-zinc-100",
+                dragOverZone === "textarea" &&
+                  "border-dashed border-sky-400/80 bg-sky-50/45 dark:border-sky-700/80 dark:bg-sky-950/30",
+              )}
               disabled={isLoading}
               onChange={(event) => {
                 setDraft(event.target.value);
                 updateTextareaHeight(event.currentTarget);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "copy";
+                if (dragOverZone !== "textarea") {
+                  setDragOverZone("textarea");
+                }
+              }}
+              onDragLeave={() => {
+                if (dragOverZone === "textarea") {
+                  setDragOverZone(null);
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (isLoading) {
+                  return;
+                }
+                const droppedNode = parseDroppedContextNode(event);
+                if (!droppedNode) {
+                  setDragOverZone(null);
+                  return;
+                }
+                const textarea = event.currentTarget;
+                const { value, caret } = insertPkTokenAtSelection(
+                  textarea.value,
+                  droppedNode.pk,
+                  textarea.selectionStart ?? textarea.value.length,
+                  textarea.selectionEnd ?? textarea.value.length,
+                );
+                setDraft(value);
+                setDragOverZone(null);
+                window.requestAnimationFrame(() => {
+                  const target = textareaRef.current;
+                  if (!target) {
+                    return;
+                  }
+                  target.setSelectionRange(caret, caret);
+                  updateTextareaHeight(target);
+                  target.focus();
+                });
               }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -1895,6 +2070,65 @@ export function ChatPanel({
                 }
               }}
             />
+
+            <div
+              className={cn(
+                "minimal-scrollbar mt-2 flex h-7 items-center gap-1 overflow-x-auto rounded-md border border-dashed px-1.5",
+                dragOverZone === "attachment"
+                  ? "border-sky-400/80 bg-sky-50/70 dark:border-sky-700/80 dark:bg-sky-950/35"
+                  : "border-zinc-200/75 bg-zinc-50/60 dark:border-zinc-800/85 dark:bg-zinc-900/45",
+              )}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "copy";
+                if (dragOverZone !== "attachment") {
+                  setDragOverZone("attachment");
+                }
+              }}
+              onDragLeave={() => {
+                if (dragOverZone === "attachment") {
+                  setDragOverZone(null);
+                }
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                if (isLoading) {
+                  setDragOverZone(null);
+                  return;
+                }
+                const droppedNode = parseDroppedContextNode(event);
+                if (!droppedNode) {
+                  setDragOverZone(null);
+                  return;
+                }
+                onAddContextNode(droppedNode);
+                setDragOverZone(null);
+              }}
+            >
+              {hasContextNodes ? (
+                contextNodes.map((node) => (
+                  <span
+                    key={`context-chip-${node.pk}`}
+                    className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-zinc-300/80 bg-white/95 px-1.5 text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/85 dark:text-zinc-200"
+                  >
+                    <span aria-hidden>⚛️</span>
+                    <span className="font-mono">#{node.pk}</span>
+                    <button
+                      type="button"
+                      className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200/90 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                      onClick={() => onRemoveContextNode(node.pk)}
+                      aria-label={`Remove node ${node.pk} from context`}
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  </span>
+                ))
+              ) : (
+                <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                  Drop node here to attach context
+                </p>
+              )}
+            </div>
 
             <div className="mt-3 flex flex-row items-center justify-between gap-2">
               <div className="flex flex-row items-center gap-2">
@@ -1986,27 +2220,6 @@ export function ChatPanel({
           </div>
         </div>
       </div>
-      <SubmissionModal
-        open={Boolean(pendingSubmission) && isSubmissionModalOpen}
-        turnId={pendingSubmission?.turnId ?? null}
-        submissionDraft={pendingSubmission?.preview.submissionDraft ?? null}
-        state={activeSubmissionState}
-        isBusy={isLoading}
-        onClose={() => setIsSubmissionModalOpen(false)}
-        onConfirm={(draftPayload) => {
-          if (!pendingSubmission) {
-            return;
-          }
-          void handleConfirmPreview(pendingSubmission.turnId, pendingSubmission.preview, draftPayload);
-        }}
-        onCancel={() => {
-          if (!pendingSubmission) {
-            return;
-          }
-          void handleCancelPreview(pendingSubmission.turnId);
-        }}
-        onOpenDetail={onOpenDetail}
-      />
     </Panel>
   );
 }

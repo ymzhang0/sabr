@@ -1,6 +1,7 @@
 import json
 from typing import Any
 
+from loguru import logger
 from pydantic_ai import Agent, RunContext
 
 from src.sab_engines.aiida.deps import AiiDADeps
@@ -28,22 +29,25 @@ from src.sab_engines.aiida.agent.tools import (
     inspect_lab_infrastructure as inspect_lab_infrastructure_via_bridge,
     inspect_process,
     inspect_workchain_spec,
+    list_group_labels,
     list_groups,
     list_local_archives,
     list_remote_files,
     list_remote_plugins as list_remote_plugins_via_bridge,
+    list_registered_skills_sync,
     list_system_profiles,
+    register_specialized_skill,
     run_python_code,
-    search_script_archive,
+    execute_specialized_skill,
     submit_job,
     switch_profile,
     validate_job,
 )
 from src.sab_engines.aiida.presenters.workflow_view import enrich_submission_draft_payload
+from src.sab_core.logging_utils import log_event
 from src.sab_core.schema.response import SABRResponse
 
 _PENDING_SUBMISSION_KEY = "aiida_pending_submission"
-_SCRIPT_ARCHIVE_TURN_COUNTER_KEY = "aiida_script_archive_turn_counter"
 _KNOWN_PARALLEL_KEYS = {
     "num_machines",
     "num_mpiprocs_per_machine",
@@ -85,11 +89,64 @@ _CRITICAL_ADVANCED_KEYS = {
     *_KNOWN_PARALLEL_KEYS,
 }
 
+
+def _load_specialized_skills_snapshot() -> list[dict[str, Any]]:
+    payload = list_registered_skills_sync()
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        normalized.append(
+            {
+                "name": name,
+                "description": str(item.get("description") or "").strip() or None,
+                "entrypoint": str(item.get("entrypoint") or "").strip() or "main(params)",
+            }
+        )
+    return normalized
+
+
+def _build_startup_skill_overlay(skills: list[dict[str, Any]]) -> list[str]:
+    if not skills:
+        return [
+            "Startup skill registry snapshot: no specialized skills were discovered from worker /registry/list."
+        ]
+    lines = [
+        "Startup skill registry snapshot from worker /registry/list (use call_specialized_skill for these):"
+    ]
+    for item in skills[:20]:
+        description = item.get("description")
+        if isinstance(description, str) and description.strip():
+            lines.append(f"{item['name']}: {description.strip()}")
+        else:
+            lines.append(str(item["name"]))
+    return lines
+
+
+_STARTUP_SPECIALIZED_SKILLS = _load_specialized_skills_snapshot()
+logger.info(
+    log_event(
+        "aiida.agent.skills.snapshot.loaded",
+        discovered=len(_STARTUP_SPECIALIZED_SKILLS),
+    )
+)
+
 aiida_researcher = Agent(
     f"google-gla:{settings.DEFAULT_MODEL}",
     deps_type=AiiDADeps,
     output_type=SABRResponse,
-    system_prompt=build_system_prompt(),
+    system_prompt=build_system_prompt(
+        extra_instructions=_build_startup_skill_overlay(_STARTUP_SPECIALIZED_SKILLS),
+    ),
     retries=3,
 )
 
@@ -228,10 +285,16 @@ def _looks_like_missing_pseudopotential_error(payload: Any) -> bool:
 
 
 def _build_pseudodojo_overrides() -> dict[str, Any]:
+    return _build_pseudo_family_overrides("PseudoDojo")
+
+
+def _build_pseudo_family_overrides(pseudo_family_label: str) -> dict[str, Any]:
+    value = str(pseudo_family_label or "").strip() or "PseudoDojo"
     return {
-        "pseudo_family": "PseudoDojo",
-        "pseudo_family_label": "PseudoDojo",
-        "pseudopotential_family": "PseudoDojo",
+        "pseudo_family": value,
+        "pseudo_family_label": value,
+        "pseudopotential_family": value,
+        "pseudo_family_name": value,
     }
 
 
@@ -248,39 +311,75 @@ def _coerce_positive_int(value: Any) -> int | None:
     return None
 
 
-def _collect_context_node_pks(ctx: RunContext[AiiDADeps]) -> list[int]:
-    context_nodes = getattr(ctx.deps, "context_nodes", None) or []
-    pks: list[int] = []
-    seen: set[int] = set()
-    for node in context_nodes:
-        if not isinstance(node, dict):
+def _extract_group_labels(payload: Any) -> list[str]:
+    if isinstance(payload, str):
+        return []
+    if isinstance(payload, dict):
+        candidates = payload.get("items")
+        if isinstance(candidates, list):
+            payload = candidates
+        else:
+            payload = [payload]
+    if not isinstance(payload, list):
+        return []
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    for item in payload:
+        if isinstance(item, str):
+            label = item.strip()
+        elif isinstance(item, dict):
+            label = str(item.get("label") or item.get("name") or "").strip()
+        else:
+            label = ""
+        lowered = label.lower()
+        if not label or lowered in seen:
             continue
-        parsed = _coerce_positive_int(node.get("pk"))
-        if parsed is None or parsed in seen:
+        seen.add(lowered)
+        labels.append(label)
+    return labels
+
+
+def _select_best_pseudo_family_label(labels: list[str]) -> str | None:
+    if not labels:
+        return None
+
+    def _score(label: str) -> tuple[int, int, int]:
+        text = label.lower()
+        score = 0
+        if "pseudodojo" in text:
+            score += 50
+        elif "sssp" in text:
+            score += 30
+        elif "sg15" in text:
+            score += 20
+        if "pbe" in text:
+            score += 6
+        if "standard" in text:
+            score += 4
+        if "efficiency" in text:
+            score += 3
+        return (score, -len(text), text.count("/"))
+
+    ranked = sorted(labels, key=_score, reverse=True)
+    return ranked[0]
+
+
+async def _resolve_worker_pseudo_family_label() -> str | None:
+    discovered: list[str] = []
+    for keyword in ("PseudoDojo", "SSSP", "SG15"):
+        payload = await list_group_labels(keyword)
+        discovered.extend(_extract_group_labels(payload))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for label in discovered:
+        lowered = label.lower()
+        if lowered in seen:
             continue
-        seen.add(parsed)
-        pks.append(parsed)
-    return pks
-
-
-def _merge_node_pk_filters(explicit_nodes: list[int] | None, fallback_nodes: list[int]) -> list[int]:
-    merged: list[int] = []
-    seen: set[int] = set()
-    for source in (explicit_nodes or [], fallback_nodes):
-        for value in source:
-            parsed = _coerce_positive_int(value)
-            if parsed is None or parsed in seen:
-                continue
-            seen.add(parsed)
-            merged.append(parsed)
-    return merged
-
-
-def _next_script_turn_index(ctx: RunContext[AiiDADeps]) -> int:
-    current = _coerce_positive_int(ctx.deps.get_registry_value(_SCRIPT_ARCHIVE_TURN_COUNTER_KEY)) or 0
-    next_value = current + 1
-    ctx.deps.set_registry_value(_SCRIPT_ARCHIVE_TURN_COUNTER_KEY, next_value)
-    return next_value
+        seen.add(lowered)
+        deduped.append(label)
+    return _select_best_pseudo_family_label(deduped)
 
 
 def _find_first_named_value(payload: Any, candidate_keys: set[str]) -> Any:
@@ -560,8 +659,9 @@ def _build_submission_draft_payload(
         advanced_settings[key] = value
     recommended_inputs = _normalize_recommended_inputs(None, advanced_settings)
 
+    process_label = _extract_process_label(draft, fallback=fallback_process_label)
     payload = {
-        "process_label": _extract_process_label(draft, fallback=fallback_process_label),
+        "process_label": process_label,
         "inputs": inputs,
         "primary_inputs": _extract_primary_inputs(inputs),
         "recommended_inputs": recommended_inputs,
@@ -570,6 +670,7 @@ def _build_submission_draft_payload(
             "pk_map": _collect_pk_map(inputs),
             "target_computer": _extract_target_computer(draft),
             "parallel_settings": parallel_settings,
+            "workchain": process_label,
         },
     }
     return enrich_submission_draft_payload(payload)
@@ -645,6 +746,26 @@ def add_referenced_nodes_prompt(ctx: RunContext[AiiDADeps]) -> str:
                 omitted_count=len(context_nodes) - max_items,
             )
         )
+    return "\n".join(lines)
+
+
+@aiida_researcher.system_prompt(dynamic=True)
+def add_specialized_skills_prompt(ctx: RunContext[AiiDADeps]) -> str:  # noqa: ARG001
+    if not _STARTUP_SPECIALIZED_SKILLS:
+        return ""
+    lines = [
+        "### SPECIALIZED SKILLS",
+        "Worker-side registry skills available via `call_specialized_skill`:",
+    ]
+    for item in _STARTUP_SPECIALIZED_SKILLS[:20]:
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(item.get("description") or "").strip()
+        if description:
+            lines.append(f"- {name}: {description}")
+        else:
+            lines.append(f"- {name}")
     return "\n".join(lines)
 
 
@@ -767,13 +888,21 @@ async def submit_new_workflow(
     draft = await draft_workchain_builder(workchain, structure_pk, code, protocol)
     if not (isinstance(draft, dict) and draft.get("status") == "DRAFT_READY"):
         if _looks_like_missing_pseudopotential_error(draft):
-            ctx.deps.log_step("Protocol builder missing pseudo family; retrying with PseudoDojo override")
+            resolved_pseudo_family = await _resolve_worker_pseudo_family_label()
+            if resolved_pseudo_family:
+                ctx.deps.log_step(
+                    f"Protocol builder missing pseudo family; retrying with {resolved_pseudo_family}"
+                )
+                pseudo_overrides = _build_pseudo_family_overrides(resolved_pseudo_family)
+            else:
+                ctx.deps.log_step("Protocol builder missing pseudo family; retrying with PseudoDojo override")
+                pseudo_overrides = _build_pseudodojo_overrides()
             draft = await draft_workchain_builder(
                 workchain,
                 structure_pk,
                 code,
                 protocol,
-                overrides=_build_pseudodojo_overrides(),
+                overrides=pseudo_overrides,
             )
     if isinstance(draft, dict) and draft.get("status") == "DRAFT_READY":
         validation = await validate_job(draft)
@@ -893,21 +1022,31 @@ async def get_node_file(ctx: RunContext[AiiDADeps], pk: int, filename: str):
 
 
 @aiida_researcher.tool
-async def search_past_scripts(
-    ctx: RunContext[AiiDADeps],  # noqa: ARG001
-    keyword: str | None = None,
-    nodes_involved: list[int] | None = None,
-    limit: int = 20,
-    include_source: bool = True,
-    script_id: str | None = None,
+async def call_specialized_skill(
+    ctx: RunContext[AiiDADeps],
+    skill_name: str,
+    args: dict[str, Any] | None = None,
 ):
-    """Search and optionally read archived custom scripts by intent and involved PKs."""
-    return await search_script_archive(
-        keyword=keyword,
-        nodes_involved=nodes_involved,
-        limit=limit,
-        include_source=include_source,
-        script_id=script_id,
+    """Execute one worker-registered specialized skill by name."""
+    ctx.deps.log_step(f"Running specialized skill: {skill_name}")
+    return await execute_specialized_skill(skill_name, args=args or {})
+
+
+@aiida_researcher.tool
+async def persist_current_script(
+    ctx: RunContext[AiiDADeps],
+    name: str,
+    script: str,
+    description: str | None = None,
+    overwrite: bool = True,
+):
+    """Persist a successful script into worker registry for future skill reuse."""
+    ctx.deps.log_step(f"Persisting specialized skill: {name}")
+    return await register_specialized_skill(
+        skill_name=name,
+        script=script,
+        description=description,
+        overwrite=overwrite,
     )
 
 
@@ -920,12 +1059,10 @@ async def run_aiida_code_script(
 ):
     """Execute targeted Python/AiiDA code on the worker."""
     ctx.deps.log_step("Running custom research script on worker")
-    merged_nodes = _merge_node_pk_filters(nodes_involved, _collect_context_node_pks(ctx))
     result = await run_python_code(
         script,
         intent=intent,
-        nodes_involved=merged_nodes,
-        turn_id=_next_script_turn_index(ctx),
+        nodes_involved=nodes_involved,
     )
     if isinstance(result, dict):
         missing_module = result.get("missing_module")

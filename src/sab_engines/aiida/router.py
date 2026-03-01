@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Path as ApiPath, Query, Request, UploadFile
 from google import genai
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -139,6 +139,13 @@ class BridgeSwitchProfileResponse(BaseModel):
     current_profile: str | None = None
 
 
+class NodeHoverMetadataResponse(BaseModel):
+    pk: int
+    formula: str | None = None
+    spacegroup: str | None = None
+    node_type: str = "Unknown"
+
+
 def _coerce_chat_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
@@ -149,6 +156,152 @@ def _coerce_chat_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
             continue
         metadata[cleaned_key] = value
     return metadata
+
+
+def _coerce_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_empty_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    return False
+
+
+def _find_first_named_value(payload: Any, candidate_keys: set[str], depth: int = 0) -> Any:
+    if depth > 8:
+        return None
+
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered = str(key).strip().lower()
+            if lowered in candidate_keys and not _is_empty_value(value):
+                return value
+            nested = _find_first_named_value(value, candidate_keys, depth + 1)
+            if nested is not None:
+                return nested
+        return None
+
+    if isinstance(payload, (list, tuple, set)):
+        for entry in payload:
+            nested = _find_first_named_value(entry, candidate_keys, depth + 1)
+            if nested is not None:
+                return nested
+
+    return None
+
+
+def _format_spacegroup_value(value: Any) -> str | None:
+    if isinstance(value, dict):
+        symbol = _coerce_text(
+            value.get("symbol")
+            or value.get("international_short")
+            or value.get("international_symbol")
+            or value.get("spacegroup")
+            or value.get("space_group")
+            or value.get("name")
+        )
+        number = _coerce_text(
+            value.get("number")
+            or value.get("spacegroup_number")
+            or value.get("international_number")
+        )
+        if symbol and number:
+            return f"{symbol} ({number})"
+        return symbol or number
+
+    if isinstance(value, (list, tuple, set)):
+        for entry in value:
+            formatted = _format_spacegroup_value(entry)
+            if formatted:
+                return formatted
+        return None
+
+    return _coerce_text(value)
+
+
+def _extract_node_hover_metadata(node_payload: dict[str, Any], pk: int) -> NodeHoverMetadataResponse:
+    formula = _coerce_text(node_payload.get("formula") or node_payload.get("chemical_formula"))
+    if formula is None:
+        formula = _coerce_text(
+            _find_first_named_value(
+                node_payload,
+                {
+                    "formula",
+                    "chemical_formula",
+                    "formula_hill",
+                    "formula_reduced",
+                    "reduced_formula",
+                },
+            )
+        )
+
+    node_type = _coerce_text(node_payload.get("node_type") or node_payload.get("type"))
+    if node_type is None:
+        node_type = _coerce_text(
+            _find_first_named_value(
+                node_payload,
+                {"node_type", "type"},
+            )
+        )
+
+    raw_spacegroup = _find_first_named_value(
+        node_payload,
+        {
+            "spacegroup",
+            "space_group",
+            "spacegroup_symbol",
+            "spacegroup_number",
+            "international_symbol",
+            "international_number",
+            "symmetry",
+        },
+    )
+    spacegroup = _format_spacegroup_value(raw_spacegroup)
+
+    return NodeHoverMetadataResponse(
+        pk=pk,
+        formula=formula,
+        spacegroup=spacegroup,
+        node_type=node_type or "Unknown",
+    )
+
+
+def _get_node_hover_metadata(pk: int) -> NodeHoverMetadataResponse:
+    if not hub.current_profile:
+        hub.start()
+
+    try:
+        nodes = get_context_nodes([pk])
+    except Exception as error:  # noqa: BLE001
+        logger.warning(log_event("aiida.frontend.node_metadata.failed", pk=pk, error=str(error)))
+        return NodeHoverMetadataResponse(pk=pk)
+
+    matched: dict[str, Any] | None = None
+    for entry in nodes:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            entry_pk = int(str(entry.get("pk", "")).strip())
+        except (TypeError, ValueError):
+            entry_pk = None
+        if entry_pk == pk:
+            matched = entry
+            break
+        if matched is None:
+            matched = entry
+
+    if not matched:
+        return NodeHoverMetadataResponse(pk=pk)
+
+    return _extract_node_hover_metadata(matched, pk)
 
 
 def _fetch_context_nodes(context_node_ids: list[int]) -> list[dict[str, Any]]:
@@ -539,6 +692,15 @@ async def frontend_processes(
         logger.exception(log_event("aiida.frontend.processes.failed", error=str(error)))
         processes = []
     return {"items": _serialize_processes(processes)}
+
+
+@router.get(
+    "/frontend/nodes/{pk}/metadata",
+    response_model=NodeHoverMetadataResponse,
+    tags=[FRONTEND_TAG],
+)
+async def frontend_node_hover_metadata(pk: int = ApiPath(..., ge=1)) -> NodeHoverMetadataResponse:
+    return _get_node_hover_metadata(pk)
 
 
 @router.get("/frontend/processes/stream", tags=[FRONTEND_TAG])

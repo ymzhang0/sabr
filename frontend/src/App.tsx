@@ -231,6 +231,36 @@ function mergeChatMessages(previous: ChatMessage[], incoming: ChatMessage[]): Ch
   });
 }
 
+function extractPkReferences(text: string): number[] {
+  const seen = new Set<number>();
+  const matches = text.matchAll(/#\s*(\d+)\b/g);
+  for (const match of matches) {
+    const raw = match[1];
+    if (!raw) {
+      continue;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0 || seen.has(parsed)) {
+      continue;
+    }
+    seen.add(parsed);
+  }
+  return [...seen];
+}
+
+function mergeUniquePks(...sources: number[][]): number[] {
+  const merged: number[] = [];
+  const seen = new Set<number>();
+  sources.flat().forEach((pk) => {
+    if (!Number.isFinite(pk) || pk <= 0 || seen.has(pk)) {
+      return;
+    }
+    seen.add(pk);
+    merged.push(pk);
+  });
+  return merged;
+}
+
 export default function App() {
   const queryClient = useQueryClient();
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
@@ -243,6 +273,7 @@ export default function App() {
   const [activeProcess, setActiveProcess] = useState<ProcessItem | null>(null);
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<number | null>(null);
+  const [composerResetVersion, setComposerResetVersion] = useState(0);
   const [streamedLogs, setStreamedLogs] = useState<{ version: number; lines: string[] } | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const sendAbortControllerRef = useRef<AbortController | null>(null);
@@ -524,6 +555,8 @@ export default function App() {
       }
       const selectedContextNodes = [...contextNodes];
       const contextPks = selectedContextNodes.map((node) => node.pk);
+      const textReferencedPks = extractPkReferences(intent);
+      const mergedContextPks = mergeUniquePks(contextPks, textReferencedPks);
 
       const controller = new AbortController();
       sendAbortControllerRef.current = controller;
@@ -535,11 +568,11 @@ export default function App() {
         const payload: SendChatRequest = {
           intent,
           model_name: selectedModel || undefined,
-          context_node_ids: contextPks,
-          context_pks: contextPks,
+          context_node_ids: mergedContextPks,
+          context_pks: mergedContextPks,
           metadata: {
-            context_pks: contextPks,
-            context_node_pks: contextPks,
+            context_pks: mergedContextPks,
+            context_node_pks: mergedContextPks,
             context_nodes: selectedContextNodes.map((node) => ({
               pk: node.pk,
               label: node.label,
@@ -548,10 +581,10 @@ export default function App() {
             })),
           },
         };
-        const sendPromise = sendChat(payload, controller.signal);
-        setContextNodes([]);
-        const { turn_id: turnId } = await sendPromise;
+        const { turn_id: turnId } = await sendChat(payload, controller.signal);
         setActiveTurnId(turnId);
+        setContextNodes([]);
+        setComposerResetVersion((current) => current + 1);
         void queryClient.invalidateQueries({ queryKey: ["chat"] });
       } catch (error) {
         setIsChatLoading(false);
@@ -622,6 +655,7 @@ export default function App() {
               messages={chatMessages}
               models={models}
               selectedModel={selectedModel}
+              composerResetVersion={composerResetVersion}
               quickPrompts={quickPrompts}
               isLoading={isChatBusy}
               activeTurnId={activeTurnId}
@@ -630,6 +664,7 @@ export default function App() {
               onStopResponse={handleStopResponse}
               onModelChange={setSelectedModel}
               onAttachFile={(file) => uploadMutation.mutate(file)}
+              onAddContextNode={appendContextNode}
               onRemoveContextNode={handleRemoveContextNode}
               onOpenDetail={handleOpenDetail}
               onRestoreContextNodes={handleRestoreContextNodes}

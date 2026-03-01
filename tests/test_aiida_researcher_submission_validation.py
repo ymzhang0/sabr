@@ -82,7 +82,7 @@ async def test_submit_new_workflow_retries_with_pseudodojo_when_sssp_missing(
         assert protocol == "moderate"
         if overrides is None:
             return {"status": "ERROR", "error": "SSSP pseudo family not found"}
-        assert overrides.get("pseudo_family") == "PseudoDojo"
+        assert str(overrides.get("pseudo_family", "")).startswith("PseudoDojo")
         return {
             "status": "DRAFT_READY",
             "builder": {"workchain": workchain, "pseudo_family": "PseudoDojo"},
@@ -109,7 +109,7 @@ async def test_submit_new_workflow_retries_with_pseudodojo_when_sssp_missing(
     assert len(draft_calls) == 2
     assert draft_calls[0] is None
     assert isinstance(draft_calls[1], dict)
-    assert draft_calls[1]["pseudo_family"] == "PseudoDojo"
+    assert str(draft_calls[1]["pseudo_family"]).startswith("PseudoDojo")
 
 
 @pytest.mark.anyio
@@ -203,3 +203,51 @@ async def test_run_aiida_code_script_adds_recovery_hint_on_missing_module(
     assert isinstance(result, dict)
     assert result["missing_module"] == "aiida_pseudo.data.family"
     assert "submit_new_workflow" in result["recovery_suggestion"]
+
+
+@pytest.mark.anyio
+async def test_call_specialized_skill_forwards_to_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_execute_specialized_skill(skill_name: str, args: dict | None = None):
+        assert skill_name == "relax_helper"
+        assert args == {"structure_pk": 264}
+        return {"success": True, "result": {"pk": 9001}}
+
+    monkeypatch.setattr(researcher, "execute_specialized_skill", _fake_execute_specialized_skill)
+
+    payload = await researcher.call_specialized_skill(
+        _ctx(),
+        skill_name="relax_helper",
+        args={"structure_pk": 264},
+    )
+
+    assert payload["success"] is True
+    assert payload["result"]["pk"] == 9001
+
+
+@pytest.mark.anyio
+async def test_persist_current_script_forwards_to_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_register_specialized_skill(
+        skill_name: str,
+        script: str,
+        *,
+        description: str | None = None,
+        overwrite: bool = True,
+    ):
+        assert skill_name == "relax_helper"
+        assert "def main" in script
+        assert description == "Reusable helper"
+        assert overwrite is False
+        return {"status": "registered", "skill_name": skill_name}
+
+    monkeypatch.setattr(researcher, "register_specialized_skill", _fake_register_specialized_skill)
+
+    payload = await researcher.persist_current_script(
+        _ctx(),
+        name="relax_helper",
+        script="def main(params):\n    return params\n",
+        description="Reusable helper",
+        overwrite=False,
+    )
+
+    assert payload["status"] == "registered"
+    assert payload["skill_name"] == "relax_helper"

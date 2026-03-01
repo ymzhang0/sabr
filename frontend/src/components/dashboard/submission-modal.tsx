@@ -1,4 +1,4 @@
-import { CheckCircle2, ChevronDown, Loader2, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Folder, Loader2, X } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,31 @@ type SubmissionStructureMetadata = {
   symmetry?: string | null;
   num_atoms?: number | null;
   estimated_runtime?: unknown;
+};
+
+type SubmissionInputProperty = {
+  path: string;
+  key: string;
+  label?: string;
+  value?: unknown;
+  ui_type?: string;
+  editor_hint?: string | null;
+  is_recommended?: boolean;
+};
+
+type SubmissionInputPort = {
+  path: string;
+  label?: string;
+  ui_type?: string;
+  editor_hint?: string | null;
+  is_recommended?: boolean;
+  properties?: SubmissionInputProperty[];
+};
+
+type SubmissionInputGroup = {
+  id: string;
+  title: string;
+  ports?: SubmissionInputPort[];
 };
 
 export type SubmissionValidationSummary = {
@@ -40,6 +65,7 @@ export type SubmissionSubmitDraft = Record<string, unknown> | Array<Record<strin
 export type SubmissionDraftPayload = {
   process_label: string;
   inputs: Record<string, unknown>;
+  input_groups?: SubmissionInputGroup[];
   primary_inputs?: Record<string, SubmissionPrimaryInputField | unknown>;
   recommended_inputs?: Record<string, unknown>;
   all_inputs?: Record<string, unknown>;
@@ -53,6 +79,7 @@ export type SubmissionDraftPayload = {
     draft?: SubmissionSubmitDraft | null;
     recommended_inputs?: Record<string, unknown> | null;
     all_inputs?: Record<string, unknown> | null;
+    input_groups?: SubmissionInputGroup[] | null;
     structure_metadata?: SubmissionStructureMetadata[] | null;
     symmetry?: string | null;
     num_atoms?: number | null;
@@ -73,6 +100,9 @@ type SubmissionModalProps = {
   submissionDraft: SubmissionDraftPayload | null;
   state: SubmissionModalState;
   isBusy: boolean;
+  mode?: "modal" | "inline";
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
   onClose: () => void;
   onConfirm: (draftPayload: SubmissionSubmitDraft) => void;
   onCancel: () => void;
@@ -476,6 +506,557 @@ function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): Subm
   return entries;
 }
 
+type NormalizedInputProperty = {
+  path: string;
+  key: string;
+  label: string;
+  uiType: string;
+  editorHint: string | null;
+  isRecommended: boolean;
+};
+
+type NormalizedInputPort = {
+  path: string;
+  label: string;
+  uiType: string;
+  editorHint: string | null;
+  isRecommended: boolean;
+  properties: NormalizedInputProperty[];
+};
+
+type NormalizedInputGroup = {
+  id: string;
+  title: string;
+  ports: NormalizedInputPort[];
+};
+
+const INPUT_GROUP_TITLE: Record<string, string> = {
+  computational_details: "Computational Details",
+  brillouin_zone: "Brillouin Zone",
+  system_environment: "System Environment",
+  physics_protocol: "Physics Protocol",
+};
+
+const INPUT_GROUP_ORDER = [
+  "computational_details",
+  "brillouin_zone",
+  "system_environment",
+  "physics_protocol",
+];
+
+function inferUiTypeFromPathAndValue(path: string, value: unknown): string {
+  const lowered = path.trim().toLowerCase();
+  if ((lowered.includes("kpoint") || lowered.includes("kpoints")) && (lowered.endsWith(".mesh") || lowered.includes(".mesh."))) {
+    return "mesh";
+  }
+  if (Array.isArray(value) && value.length === 3 && value.every((item) => typeof item === "number")) {
+    return "mesh";
+  }
+  if (typeof value === "boolean") {
+    return "toggle";
+  }
+  if (Array.isArray(value) || asRecord(value)) {
+    return "dict";
+  }
+  return "scalar";
+}
+
+function classifyInputGroup(path: string): string {
+  const lowered = path.trim().toLowerCase();
+  const leaf = lowered.split(".").pop() ?? lowered;
+  if (
+    lowered.includes("metadata.options") ||
+    lowered.includes(".resources.") ||
+    ["resources", "queue_name", "max_wallclock_seconds", "account"].includes(leaf)
+  ) {
+    return "system_environment";
+  }
+  if (
+    lowered.includes("kpoint") ||
+    lowered.includes("kpoints") ||
+    ["mesh", "kpoints_distance", "kpoint_distance"].includes(leaf)
+  ) {
+    return "brillouin_zone";
+  }
+  if (
+    [
+      "relax_type",
+      "protocol",
+      "pseudo_family",
+      "pseudo_family_label",
+      "pseudopotential",
+      "electronic_type",
+      "spin_type",
+    ].some((token) => lowered.includes(token))
+  ) {
+    return "physics_protocol";
+  }
+  if (lowered.includes(".parameters") || lowered.startsWith("parameters") || lowered.includes("pw.parameters")) {
+    return "computational_details";
+  }
+  return "computational_details";
+}
+
+function derivePortPath(path: string, groupId: string): string {
+  const segments = path.split(".").map((segment) => segment.trim()).filter(Boolean);
+  const lowered = segments.map((segment) => segment.toLowerCase());
+
+  if (groupId === "system_environment") {
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      if (lowered[index] === "metadata" && lowered[index + 1] === "options") {
+        const base = segments.slice(0, index + 2);
+        if (lowered[index + 2] === "resources") {
+          base.push(segments[index + 2]);
+        }
+        return base.join(".");
+      }
+    }
+  }
+
+  if (groupId === "computational_details") {
+    const parametersIndex = lowered.findIndex((segment) => segment === "parameters");
+    if (parametersIndex >= 0) {
+      return segments.slice(0, parametersIndex + 1).join(".");
+    }
+  }
+
+  if (groupId === "brillouin_zone") {
+    const kpointIndex = lowered.findIndex((segment) => segment.includes("kpoint"));
+    if (kpointIndex >= 0) {
+      return segments.slice(0, kpointIndex + 1).join(".");
+    }
+    const meshIndex = lowered.findIndex((segment) => segment === "mesh");
+    if (meshIndex >= 0) {
+      return segments.slice(0, meshIndex + 1).join(".");
+    }
+  }
+
+  if (groupId === "physics_protocol") {
+    const protocolIndex = lowered.findIndex((segment) =>
+      ["relax_type", "protocol", "pseudo_family", "pseudo_family_label"].includes(segment),
+    );
+    if (protocolIndex >= 0) {
+      return segments.slice(0, protocolIndex + 1).join(".");
+    }
+  }
+
+  if (segments.length <= 1) {
+    return path;
+  }
+  return segments.slice(0, -1).join(".");
+}
+
+function inferEditorHint(path: string, uiType: string): string | null {
+  const lowered = path.trim().toLowerCase();
+  if (uiType === "mesh") {
+    return "mesh";
+  }
+  if (lowered.includes("metadata.options.resources")) {
+    return "resource_grid";
+  }
+  if (uiType === "dict") {
+    return "property_grid";
+  }
+  return null;
+}
+
+function normalizeInputGroupsFromPayload(raw: unknown): NormalizedInputGroup[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const groups: NormalizedInputGroup[] = [];
+  raw.forEach((entry) => {
+    const groupRecord = asRecord(entry);
+    if (!groupRecord) {
+      return;
+    }
+    const id = typeof groupRecord.id === "string" && groupRecord.id.trim() ? groupRecord.id.trim() : "";
+    if (!id) {
+      return;
+    }
+    const title =
+      typeof groupRecord.title === "string" && groupRecord.title.trim()
+        ? groupRecord.title.trim()
+        : (INPUT_GROUP_TITLE[id] ?? formatSettingKey(id));
+    const portsRaw = Array.isArray(groupRecord.ports) ? groupRecord.ports : [];
+    const ports: NormalizedInputPort[] = [];
+    portsRaw.forEach((rawPort) => {
+      const portRecord = asRecord(rawPort);
+      if (!portRecord) {
+        return;
+      }
+      const path = typeof portRecord.path === "string" && portRecord.path.trim() ? portRecord.path.trim() : "";
+      if (!path) {
+        return;
+      }
+      const label =
+        typeof portRecord.label === "string" && portRecord.label.trim()
+          ? portRecord.label.trim()
+          : formatSettingKey(path.split(".").pop() ?? path);
+      const uiType =
+        typeof portRecord.ui_type === "string" && portRecord.ui_type.trim()
+          ? portRecord.ui_type.trim()
+          : "dict";
+      const editorHint =
+        typeof portRecord.editor_hint === "string" && portRecord.editor_hint.trim()
+          ? portRecord.editor_hint.trim()
+          : inferEditorHint(path, uiType);
+      const propertiesRaw = Array.isArray(portRecord.properties) ? portRecord.properties : [];
+      const properties: NormalizedInputProperty[] = [];
+      propertiesRaw.forEach((rawProperty) => {
+        const propertyRecord = asRecord(rawProperty);
+        if (!propertyRecord) {
+          return;
+        }
+        const propertyPath =
+          typeof propertyRecord.path === "string" && propertyRecord.path.trim()
+            ? propertyRecord.path.trim()
+            : path;
+        const key =
+          typeof propertyRecord.key === "string" && propertyRecord.key.trim()
+            ? propertyRecord.key.trim()
+            : propertyPath;
+        const propertyUiType =
+          typeof propertyRecord.ui_type === "string" && propertyRecord.ui_type.trim()
+            ? propertyRecord.ui_type.trim()
+            : inferUiTypeFromPathAndValue(propertyPath, propertyRecord.value);
+        properties.push({
+          path: propertyPath,
+          key,
+          label:
+            typeof propertyRecord.label === "string" && propertyRecord.label.trim()
+              ? propertyRecord.label.trim()
+              : formatSettingKey(key.split(".").pop() ?? key),
+          uiType: propertyUiType,
+          editorHint:
+            typeof propertyRecord.editor_hint === "string" && propertyRecord.editor_hint.trim()
+              ? propertyRecord.editor_hint.trim()
+              : inferEditorHint(propertyPath, propertyUiType),
+          isRecommended: Boolean(propertyRecord.is_recommended),
+        });
+      });
+      if (properties.length === 0) {
+        properties.push({
+          path,
+          key: path,
+          label,
+          uiType,
+          editorHint,
+          isRecommended: Boolean(portRecord.is_recommended),
+        });
+      }
+      ports.push({
+        path,
+        label,
+        uiType,
+        editorHint,
+        isRecommended: Boolean(portRecord.is_recommended),
+        properties,
+      });
+    });
+    if (ports.length > 0) {
+      groups.push({ id, title, ports });
+    }
+  });
+  return groups;
+}
+
+function buildFallbackInputGroups(entries: SubmissionAllInputEntry[]): NormalizedInputGroup[] {
+  const grouped = new Map<string, Map<string, NormalizedInputPort>>();
+  entries.forEach((entry) => {
+    const groupId = classifyInputGroup(entry.path);
+    const portPath = derivePortPath(entry.path, groupId);
+    let groupPorts = grouped.get(groupId);
+    if (!groupPorts) {
+      groupPorts = new Map<string, NormalizedInputPort>();
+      grouped.set(groupId, groupPorts);
+    }
+    const existing = groupPorts.get(portPath);
+    const uiType = inferUiTypeFromPathAndValue(entry.path, entry.value);
+    const propertyKey = entry.path.startsWith(`${portPath}.`) ? entry.path.slice(portPath.length + 1) : entry.path;
+    const property: NormalizedInputProperty = {
+      path: entry.path,
+      key: propertyKey || entry.path,
+      label: formatSettingKey((propertyKey || entry.path).split(".").pop() ?? entry.path),
+      uiType,
+      editorHint: inferEditorHint(entry.path, uiType),
+      isRecommended: entry.isRecommended,
+    };
+    if (!existing) {
+      groupPorts.set(portPath, {
+        path: portPath,
+        label: formatSettingKey((portPath.split(".").pop() ?? portPath) || portPath),
+        uiType: uiType,
+        editorHint: inferEditorHint(portPath, uiType),
+        isRecommended: entry.isRecommended,
+        properties: [property],
+      });
+      return;
+    }
+    existing.properties.push(property);
+    existing.isRecommended = existing.isRecommended || entry.isRecommended;
+    if (uiType === "mesh") {
+      existing.uiType = "mesh";
+      existing.editorHint = "mesh";
+      return;
+    }
+    existing.uiType = existing.properties.length > 1 ? "dict" : uiType;
+    existing.editorHint = inferEditorHint(existing.path, existing.uiType);
+  });
+
+  const groups: NormalizedInputGroup[] = [];
+  INPUT_GROUP_ORDER.forEach((groupId) => {
+    const portsMap = grouped.get(groupId);
+    if (!portsMap || portsMap.size === 0) {
+      return;
+    }
+    const ports = [...portsMap.values()]
+      .map((port) => ({
+        ...port,
+        properties: [...port.properties].sort((left, right) => left.key.localeCompare(right.key)),
+      }))
+      .sort((left, right) => left.path.localeCompare(right.path));
+    groups.push({
+      id: groupId,
+      title: INPUT_GROUP_TITLE[groupId] ?? formatSettingKey(groupId),
+      ports,
+    });
+  });
+  return groups;
+}
+
+function buildInputGroupsForModal(
+  submissionDraft: SubmissionDraftPayload,
+  entries: SubmissionAllInputEntry[],
+): NormalizedInputGroup[] {
+  const fromTopLevel = normalizeInputGroupsFromPayload(submissionDraft.input_groups);
+  if (fromTopLevel.length > 0) {
+    return fromTopLevel;
+  }
+  const fromMeta = normalizeInputGroupsFromPayload(submissionDraft.meta.input_groups);
+  if (fromMeta.length > 0) {
+    return fromMeta;
+  }
+  return buildFallbackInputGroups(entries);
+}
+
+function toMessageList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const messages: string[] = [];
+  value.forEach((entry) => {
+    let message = "";
+    if (typeof entry === "string") {
+      message = entry.trim();
+    } else if (entry && typeof entry === "object") {
+      const record = entry as Record<string, unknown>;
+      const candidate =
+        record.message ?? record.error ?? record.detail ?? record.reason ?? record.title ?? record.path;
+      message = String(candidate ?? "").trim();
+    } else {
+      message = String(entry ?? "").trim();
+    }
+    if (!message || seen.has(message)) {
+      return;
+    }
+    seen.add(message);
+    messages.push(message);
+  });
+  return messages;
+}
+
+function normalizeValidationSummary(
+  summary: SubmissionValidationSummary | null | undefined,
+  validation: Record<string, unknown> | null | undefined,
+): SubmissionValidationSummary | null {
+  const summaryRecord = summary ?? {};
+  const validationRecord = validation ?? {};
+  const summaryErrors = toMessageList(summaryRecord.errors);
+  const summaryWarnings = toMessageList(summaryRecord.warnings);
+  const validationErrors = toMessageList(
+    validationRecord.errors ?? validationRecord.validation_errors ?? validationRecord.missing_inputs,
+  );
+  const validationWarnings = toMessageList(
+    validationRecord.warnings ?? validationRecord.validation_warnings,
+  );
+  const errors = summaryErrors.length > 0 ? summaryErrors : validationErrors;
+  const warnings = summaryWarnings.length > 0 ? summaryWarnings : validationWarnings;
+
+  const statusRaw = summaryRecord.status ?? validationRecord.status;
+  const status = typeof statusRaw === "string" ? statusRaw.trim() : "";
+  const statusUpper = status.toUpperCase();
+  let isValid: boolean;
+  if (typeof summaryRecord.is_valid === "boolean") {
+    isValid = summaryRecord.is_valid;
+  } else if (typeof validationRecord.is_valid === "boolean") {
+    isValid = Boolean(validationRecord.is_valid);
+  } else if (statusUpper === "VALIDATION_OK" || statusUpper === "VALID" || statusUpper === "SUCCESS") {
+    isValid = true;
+  } else if (statusUpper === "VALIDATION_FAILED" || statusUpper === "INVALID" || statusUpper === "ERROR") {
+    isValid = false;
+  } else {
+    isValid = errors.length === 0;
+  }
+
+  if (!status && errors.length === 0 && warnings.length === 0 && summary === null && validation === null) {
+    return null;
+  }
+
+  const blockingErrorCountRaw = summaryRecord.blocking_error_count;
+  const warningCountRaw = summaryRecord.warning_count;
+  const blockingErrorCount =
+    typeof blockingErrorCountRaw === "number" && Number.isFinite(blockingErrorCountRaw)
+      ? Math.max(0, Math.floor(blockingErrorCountRaw))
+      : errors.length;
+  const warningCount =
+    typeof warningCountRaw === "number" && Number.isFinite(warningCountRaw)
+      ? Math.max(0, Math.floor(warningCountRaw))
+      : warnings.length;
+  const normalizedStatus = status || (isValid ? "VALIDATION_OK" : "VALIDATION_FAILED");
+  const summaryText =
+    typeof summaryRecord.summary_text === "string" && summaryRecord.summary_text.trim()
+      ? summaryRecord.summary_text.trim()
+      : `Status: ${normalizedStatus}\nBlocking errors: ${blockingErrorCount}\nWarnings: ${warningCount}`;
+
+  return {
+    status: normalizedStatus,
+    is_valid: isValid,
+    blocking_error_count: blockingErrorCount,
+    warning_count: warningCount,
+    errors,
+    warnings,
+    summary_text: summaryText,
+  };
+}
+
+const CUTOFF_KEYS = new Set(["ecutwfc", "ecutrho"]);
+
+function buildInspectorInputEntries(entries: SubmissionAllInputEntry[]): SubmissionAllInputEntry[] {
+  const cutoffsUnderParameters = new Set<string>();
+  entries.forEach((entry) => {
+    const normalizedPath = entry.path.trim().toLowerCase();
+    if (!normalizedPath.includes(".parameters.")) {
+      return;
+    }
+    const leaf = normalizedPath.split(".").pop() ?? "";
+    if (CUTOFF_KEYS.has(leaf)) {
+      cutoffsUnderParameters.add(leaf);
+    }
+  });
+
+  const seen = new Set<string>();
+  const filtered: SubmissionAllInputEntry[] = [];
+  entries.forEach((entry) => {
+    const path = entry.path.trim();
+    if (!path) {
+      return;
+    }
+    const normalizedPath = path.toLowerCase();
+    if (seen.has(normalizedPath)) {
+      return;
+    }
+    const leaf = normalizedPath.split(".").pop() ?? "";
+    if (CUTOFF_KEYS.has(leaf) && cutoffsUnderParameters.has(leaf) && !normalizedPath.includes(".parameters.")) {
+      return;
+    }
+    seen.add(normalizedPath);
+    filtered.push(entry);
+  });
+
+  return filtered.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+type NamespaceTreeIndex = {
+  namespaces: string[];
+  childrenByNamespace: Record<string, string[]>;
+  leavesByNamespace: Record<string, SubmissionAllInputEntry[]>;
+  atomicEntries: SubmissionAllInputEntry[];
+};
+
+function buildNamespaceTreeIndex(entries: SubmissionAllInputEntry[]): NamespaceTreeIndex {
+  const namespaceSet = new Set<string>([""]);
+  const childrenMap = new Map<string, Set<string>>();
+  const leavesMap = new Map<string, SubmissionAllInputEntry[]>();
+  const atomicEntries: SubmissionAllInputEntry[] = [];
+
+  const appendLeaf = (namespace: string, entry: SubmissionAllInputEntry) => {
+    const current = leavesMap.get(namespace) ?? [];
+    current.push(entry);
+    leavesMap.set(namespace, current);
+  };
+
+  entries.forEach((entry) => {
+    const segments = entry.path
+      .split(".")
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length === 0) {
+      return;
+    }
+    if (segments.length === 1) {
+      atomicEntries.push(entry);
+      appendLeaf("", entry);
+      return;
+    }
+
+    for (let index = 1; index < segments.length; index += 1) {
+      const namespace = segments.slice(0, index).join(".");
+      namespaceSet.add(namespace);
+      const parent = index === 1 ? "" : segments.slice(0, index - 1).join(".");
+      const parentChildren = childrenMap.get(parent) ?? new Set<string>();
+      parentChildren.add(namespace);
+      childrenMap.set(parent, parentChildren);
+    }
+    appendLeaf(segments.slice(0, -1).join("."), entry);
+  });
+
+  const childrenByNamespace: Record<string, string[]> = {};
+  childrenMap.forEach((children, namespace) => {
+    childrenByNamespace[namespace] = [...children].sort((left, right) => left.localeCompare(right));
+  });
+
+  const leavesByNamespace: Record<string, SubmissionAllInputEntry[]> = {};
+  leavesMap.forEach((leaves, namespace) => {
+    leavesByNamespace[namespace] = [...leaves].sort((left, right) => left.path.localeCompare(right.path));
+  });
+
+  return {
+    namespaces: [...namespaceSet].sort((left, right) => {
+      if (left === "") {
+        return -1;
+      }
+      if (right === "") {
+        return 1;
+      }
+      const depthDelta = left.split(".").length - right.split(".").length;
+      return depthDelta !== 0 ? depthDelta : left.localeCompare(right);
+    }),
+    childrenByNamespace,
+    leavesByNamespace,
+    atomicEntries: atomicEntries.sort((left, right) => left.path.localeCompare(right.path)),
+  };
+}
+
+type NamespaceSidebarItem = {
+  path: string;
+  depth: number;
+};
+
+function flattenNamespaceTree(childrenByNamespace: Record<string, string[]>): NamespaceSidebarItem[] {
+  const flattened: NamespaceSidebarItem[] = [];
+  const walk = (namespace: string, depth: number) => {
+    const children = childrenByNamespace[namespace] ?? [];
+    children.forEach((child) => {
+      flattened.push({ path: child, depth });
+      walk(child, depth + 1);
+    });
+  };
+  walk("", 0);
+  return flattened;
+}
+
 function buildDraftFieldEditorState(
   entries: SubmissionAllInputEntry[],
 ): Record<string, DraftFieldEditorValue> {
@@ -866,6 +1447,36 @@ function extractSymmetryLabel(payload: unknown): string | null {
   return null;
 }
 
+function parseMeshTriplet(value: unknown): [string, string, string] {
+  if (Array.isArray(value) && value.length >= 3) {
+    return [String(value[0] ?? ""), String(value[1] ?? ""), String(value[2] ?? "")];
+  }
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return ["", "", ""];
+  }
+  if (text.startsWith("[") && text.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed) && parsed.length >= 3) {
+        return [String(parsed[0] ?? ""), String(parsed[1] ?? ""), String(parsed[2] ?? "")];
+      }
+    } catch {
+      // Fall through to token parsing.
+    }
+  }
+  const tokens = text.split(/[\sx,]+/i).map((token) => token.trim()).filter(Boolean);
+  return [tokens[0] ?? "", tokens[1] ?? "", tokens[2] ?? ""];
+}
+
+function serializeMeshTriplet(values: [string, string, string]): string {
+  const parsed = values.map((value) => {
+    const numeric = Number.parseInt(value.trim() || "0", 10);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : 1;
+  });
+  return JSON.stringify(parsed);
+}
+
 type BatchJobDraft = {
   id: string;
   pk: number | null;
@@ -1017,24 +1628,25 @@ export function SubmissionModal({
   submissionDraft,
   state,
   isBusy,
+  mode = "modal",
+  expanded = true,
+  onToggleExpanded,
   onClose,
   onConfirm,
   onCancel,
   onOpenDetail,
 }: SubmissionModalProps) {
-  const [isAdvancedExpanded, setIsAdvancedExpanded] = useState(false);
-  const [isAllInputsExpanded, setIsAllInputsExpanded] = useState(false);
   const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
   const [draftState, setDraftState] = useState<Record<string, DraftFieldEditorValue>>({});
   const [draftStateErrors, setDraftStateErrors] = useState<Record<string, string>>({});
   const [expandedJsonFields, setExpandedJsonFields] = useState<Record<string, boolean>>({});
   const [globalOverridePath, setGlobalOverridePath] = useState("");
   const [globalOverrideValue, setGlobalOverrideValue] = useState("");
+  const [selectedNamespace, setSelectedNamespace] = useState("");
+  const [showValidationDetails, setShowValidationDetails] = useState(false);
 
   useEffect(() => {
-    if (!open) {
-      setIsAdvancedExpanded(false);
-      setIsAllInputsExpanded(false);
+    if (!open || mode === "inline") {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1044,7 +1656,7 @@ export function SubmissionModal({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose, state.status]);
+  }, [mode, open, onClose, state.status]);
 
   const pkEntries = useMemo(
     () => normalizePkMapEntries(submissionDraft?.meta.pk_map),
@@ -1054,17 +1666,44 @@ export function SubmissionModal({
     () => (submissionDraft ? extractPrimaryFields(submissionDraft) : { code: null, structure: null, pseudos: null }),
     [submissionDraft],
   );
-  const advancedEntries = useMemo(() => {
-    const source = asRecord(submissionDraft?.advanced_settings);
-    if (!source) {
-      return [];
-    }
-    return Object.entries(source).filter(([, value]) => !isMissingValue(value));
-  }, [submissionDraft]);
   const allInputEntries = useMemo(
     () => (submissionDraft ? allInputEntriesFromDraft(submissionDraft) : []),
     [submissionDraft],
   );
+  const inspectorInputEntries = useMemo(
+    () => buildInspectorInputEntries(allInputEntries),
+    [allInputEntries],
+  );
+  const groupedInputSections = useMemo(
+    () => (submissionDraft ? buildInputGroupsForModal(submissionDraft, inspectorInputEntries) : []),
+    [inspectorInputEntries, submissionDraft],
+  );
+  const namespaceTree = useMemo(
+    () => buildNamespaceTreeIndex(inspectorInputEntries),
+    [inspectorInputEntries],
+  );
+  const namespaceSidebarItems = useMemo(
+    () => flattenNamespaceTree(namespaceTree.childrenByNamespace),
+    [namespaceTree.childrenByNamespace],
+  );
+  const selectedNamespaceChildren = useMemo(
+    () => namespaceTree.childrenByNamespace[selectedNamespace] ?? [],
+    [namespaceTree.childrenByNamespace, selectedNamespace],
+  );
+  const selectedNamespaceLeafEntries = useMemo(
+    () => namespaceTree.leavesByNamespace[selectedNamespace] ?? [],
+    [namespaceTree.leavesByNamespace, selectedNamespace],
+  );
+  const namespaceBreadcrumb = useMemo(() => {
+    if (!selectedNamespace) {
+      return [] as Array<{ label: string; path: string }>;
+    }
+    const segments = selectedNamespace.split(".").filter(Boolean);
+    return segments.map((segment, index) => ({
+      label: formatSettingKey(segment),
+      path: segments.slice(0, index + 1).join("."),
+    }));
+  }, [selectedNamespace]);
   const allDraftFields = useMemo(() => {
     const fields = Object.values(draftState);
     return fields.sort((left, right) => {
@@ -1078,10 +1717,6 @@ export function SubmissionModal({
     () => allDraftFields.filter((field) => field.isRecommended),
     [allDraftFields],
   );
-  const additionalDraftFields = useMemo(
-    () => allDraftFields.filter((field) => !field.isRecommended),
-    [allDraftFields],
-  );
   const globalOverrideOptions = useMemo(
     () => allDraftFields.filter((field) => field.kind !== "json"),
     [allDraftFields],
@@ -1090,6 +1725,17 @@ export function SubmissionModal({
     () => buildParallelEntries(submissionDraft?.meta.parallel_settings),
     [submissionDraft],
   );
+  const validationSummary = useMemo(
+    () => normalizeValidationSummary(submissionDraft?.meta.validation_summary, asRecord(submissionDraft?.meta.validation)),
+    [submissionDraft],
+  );
+  const validationErrors = validationSummary?.errors ?? [];
+  const validationWarnings = validationSummary?.warnings ?? [];
+  const hasValidationIssues = validationErrors.length > 0 || validationWarnings.length > 0;
+  const hasValidationBlockingError =
+    validationErrors.length > 0 ||
+    (validationSummary?.blocking_error_count ?? 0) > 0 ||
+    validationSummary?.is_valid === false;
   const batchJobs = useMemo(
     () => (submissionDraft ? extractBatchJobRows(submissionDraft) : []),
     [submissionDraft],
@@ -1130,6 +1776,8 @@ export function SubmissionModal({
       setExpandedJsonFields({});
       setGlobalOverridePath("");
       setGlobalOverrideValue("");
+      setSelectedNamespace("");
+      setShowValidationDetails(false);
       return;
     }
     const nextDraftState = buildDraftFieldEditorState(allInputEntries);
@@ -1149,7 +1797,19 @@ export function SubmissionModal({
       setGlobalOverridePath("");
       setGlobalOverrideValue("");
     }
+    setShowValidationDetails(false);
   }, [allInputEntries, open, submissionDraft]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const available = new Set(namespaceTree.namespaces);
+    if (available.has(selectedNamespace)) {
+      return;
+    }
+    setSelectedNamespace(available.has("") ? "" : namespaceTree.namespaces[0] ?? "");
+  }, [namespaceTree.namespaces, open, selectedNamespace]);
 
   const targetComputer =
     typeof submissionDraft?.meta.target_computer === "string" && submissionDraft.meta.target_computer.trim()
@@ -1225,9 +1885,70 @@ export function SubmissionModal({
       { label: "Cutoffs", value: cutoffs || "Default" },
     ];
   }, [primaryFields.code?.value, submissionDraft?.inputs, submissionDraft?.meta.validation]);
+  const isInlineMode = mode === "inline";
+  const isExpanded = isInlineMode ? expanded : true;
   const canClose = state.status !== "submitting";
 
-  if (!open || !submissionDraft || turnId === null) {
+  const clearDraftFieldError = (path: string) => {
+    setDraftStateErrors((current) => {
+      if (!current[path]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[path];
+      return next;
+    });
+  };
+
+  const updateDraftFieldValue = (path: string, nextValue: boolean | string) => {
+    setDraftState((current) => {
+      const field = current[path];
+      if (!field) {
+        return current;
+      }
+      return {
+        ...current,
+        [path]: {
+          ...field,
+          value: nextValue,
+        },
+      };
+    });
+    clearDraftFieldError(path);
+  };
+
+  const handleLaunch = () => {
+    if (!submissionDraft) {
+      return;
+    }
+    const { valuesByPath, errors } = parseDraftFieldEditorState(draftState);
+    if (Object.keys(errors).length > 0) {
+      setDraftStateErrors(errors);
+      return;
+    }
+    setDraftStateErrors({});
+
+    const selectedDraft: SubmissionSubmitDraft = isBatchDraft
+      ? selectedBatchJobs.map((job) => job.draft)
+      : (() => {
+          const metaDraftRecord = asRecord(submissionDraft.meta.draft);
+          if (metaDraftRecord) {
+            return metaDraftRecord;
+          }
+          const metaDraftArray = toRecordArray(submissionDraft.meta.draft);
+          if (metaDraftArray.length > 0) {
+            return metaDraftArray[0];
+          }
+          return submissionDraft.inputs;
+        })();
+    const mergedDraft = applyEditorValuesToSubmitDraft(
+      selectedDraft,
+      valuesByPath,
+    );
+    onConfirm(mergedDraft);
+  };
+
+  if ((!open && !isInlineMode) || !submissionDraft || turnId === null) {
     return null;
   }
 
@@ -1268,59 +1989,354 @@ export function SubmissionModal({
     );
   };
 
+  const renderEditableFieldControl = (
+    path: string,
+    uiType: string,
+    compact = false,
+  ): ReactNode => {
+    const field = draftState[path];
+    if (!field) {
+      return (
+        <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+          Default
+        </span>
+      );
+    }
+    const error = draftStateErrors[path];
+
+    if (uiType === "mesh") {
+      const [m1, m2, m3] = parseMeshTriplet(field.value);
+      const meshValues: [string, string, string] = [m1, m2, m3];
+      return (
+        <div>
+          <div className="inline-flex items-center gap-1">
+            {[0, 1, 2].map((index) => (
+              <div key={`${path}-mesh-${index}`} className="inline-flex items-center gap-1">
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={meshValues[index]}
+                  onChange={(event) => {
+                    const nextValues: [string, string, string] = [...meshValues] as [string, string, string];
+                    nextValues[index] = event.currentTarget.value;
+                    updateDraftFieldValue(path, serializeMeshTriplet(nextValues));
+                  }}
+                  className={cn(
+                    "w-14 rounded-md border px-1.5 py-1 text-center text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+                    error
+                      ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
+                      : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+                  )}
+                />
+                {index < 2 ? <span className="text-xs text-slate-500">x</span> : null}
+              </div>
+            ))}
+          </div>
+          {error ? (
+            <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
+          ) : null}
+        </div>
+      );
+    }
+
+    if (field.kind === "boolean" || uiType === "toggle") {
+      return (
+        <button
+          type="button"
+          className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200"
+          onClick={() => updateDraftFieldValue(path, !Boolean(field.value))}
+        >
+          <span
+            className={cn(
+              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
+              Boolean(field.value) ? "bg-blue-600" : "bg-slate-300 dark:bg-slate-700",
+            )}
+          >
+            <span
+              className={cn(
+                "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                Boolean(field.value) ? "translate-x-4" : "translate-x-0.5",
+              )}
+            />
+          </span>
+          <span>{Boolean(field.value) ? "Enabled" : "Disabled"}</span>
+        </button>
+      );
+    }
+
+    if (field.kind === "json" || uiType === "dict") {
+      return (
+        <div className="min-w-0">
+          <button
+            type="button"
+            className="rounded-md border border-slate-300 px-2 py-1 text-[11px] text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            onClick={() =>
+              setExpandedJsonFields((current) => ({
+                ...current,
+                [path]: !Boolean(current[path]),
+              }))
+            }
+          >
+            {expandedJsonFields[path] ? "Hide JSON" : "Edit JSON"}
+          </button>
+          {expandedJsonFields[path] ? (
+            <textarea
+              className={cn(
+                "minimal-scrollbar mt-1 h-24 w-full resize-y rounded-md border px-2 py-1.5 font-mono text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+                error
+                  ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
+                  : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+              )}
+              value={String(field.value)}
+              onChange={(event) => updateDraftFieldValue(path, event.currentTarget.value)}
+            />
+          ) : null}
+          {error ? (
+            <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
+          ) : null}
+        </div>
+      );
+    }
+
+    return (
+      <div className="min-w-0">
+        <input
+          type={field.kind === "number" ? "number" : "text"}
+          step={field.kind === "number" ? "any" : undefined}
+          value={String(field.value)}
+          onChange={(event) => updateDraftFieldValue(path, event.currentTarget.value)}
+          className={cn(
+            "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+            compact ? "h-8" : "h-9",
+            error
+              ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
+              : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+          )}
+          title={String(field.value)}
+        />
+        {error ? (
+          <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-[1.5px]">
-      <button
-        type="button"
-        className="absolute inset-0 cursor-default"
-        aria-label="Close submission modal"
-        onClick={() => {
-          if (canClose) {
-            onClose();
-          }
-        }}
-      />
+    <div
+      className={cn(
+        isInlineMode
+          ? "mt-3"
+          : "fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/35 px-4 py-6 backdrop-blur-[1.5px]",
+      )}
+    >
+      {!isInlineMode ? (
+        <button
+          type="button"
+          className="absolute inset-0 cursor-default"
+          aria-label="Close submission modal"
+          onClick={() => {
+            if (canClose) {
+              onClose();
+            }
+          }}
+        />
+      ) : null}
       <section
-        className="relative z-10 h-[80vh] w-full max-w-6xl overflow-y-auto overscroll-contain rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_24px_80px_rgba(15,23,42,0.35)] dark:border-slate-800 dark:bg-slate-950/95"
+        className={cn(
+          isInlineMode
+            ? "w-full rounded-2xl border border-slate-200/90 bg-white/95 p-4 dark:border-slate-800 dark:bg-slate-950/70"
+            : "relative z-10 h-[80vh] w-full max-w-6xl overflow-y-auto overscroll-contain rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_24px_80px_rgba(15,23,42,0.35)] dark:border-slate-800 dark:bg-slate-950/95",
+        )}
         style={MODAL_FONT_STYLE}
       >
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-blue-700/80 dark:text-blue-300/80">
-              Submission Review
-            </p>
-            <h2 className="mt-1 text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-              {submissionDraft.process_label}
-            </h2>
-            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
-              <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                Symmetry: {symmetrySummary}
-              </span>
-              <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                Time Est.: {runtimeSummary}
-              </span>
-              <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                Atoms: {atomSummary}
-              </span>
-              {isBatchDraft ? (
+        <div
+          className={cn(
+            isInlineMode
+              ? "border-b border-slate-200/85 pb-3 dark:border-slate-800"
+              : "sticky top-0 z-20 -mx-5 -mt-5 border-b border-slate-200/85 bg-white/95 px-5 py-4 backdrop-blur dark:border-slate-800 dark:bg-slate-950/95",
+          )}
+        >
+          {validationSummary ? (
+            <div
+              className={cn(
+                "mb-3 rounded-lg border px-3 py-2 text-xs",
+                !hasValidationIssues
+                  ? "border-emerald-300/90 bg-emerald-50/90 text-emerald-800 dark:border-emerald-700/60 dark:bg-emerald-950/35 dark:text-emerald-200"
+                  : hasValidationBlockingError
+                    ? "border-rose-300/90 bg-rose-50/90 text-rose-800 dark:border-rose-700/60 dark:bg-rose-950/35 dark:text-rose-200"
+                    : "border-amber-300/90 bg-amber-50/90 text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/35 dark:text-amber-200",
+              )}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  {hasValidationIssues ? (
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  )}
+                  <span className="font-semibold">
+                    {hasValidationIssues ? "Validation Error" : "Builder Validated"}
+                  </span>
+                  <span className="text-[11px] opacity-90">
+                    {validationErrors.length} errors, {validationWarnings.length} warnings
+                  </span>
+                </div>
+                {hasValidationIssues ? (
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded-md border border-current/25 px-2 py-0.5 text-[11px] transition-colors hover:bg-white/45 dark:hover:bg-slate-900/30"
+                    onClick={() => setShowValidationDetails((current) => !current)}
+                    aria-expanded={showValidationDetails}
+                  >
+                    <span>{showValidationDetails ? "Hide details" : "Show details"}</span>
+                    <ChevronDown
+                      className={cn(
+                        "h-3.5 w-3.5 transition-transform duration-200",
+                        showValidationDetails ? "rotate-180" : "rotate-0",
+                      )}
+                    />
+                  </button>
+                ) : null}
+              </div>
+              {hasValidationIssues && showValidationDetails ? (
+                <div className="mt-2 space-y-2 border-t border-current/20 pt-2 text-[11px]">
+                  {validationErrors.length > 0 ? (
+                    <div>
+                      <p className="font-semibold uppercase tracking-[0.08em]">Blocking Ports</p>
+                      <ul className="mt-1 space-y-1">
+                        {validationErrors.map((message, index) => (
+                          <li key={`${turnId}-validation-error-${index}`} className="rounded-md bg-white/60 px-2 py-1 dark:bg-slate-900/45">
+                            {renderPkLinkedText(message, `${turnId}-validation-error-${index}`, onOpenDetail)}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {validationWarnings.length > 0 ? (
+                    <div>
+                      <p className="font-semibold uppercase tracking-[0.08em]">Warnings</p>
+                      <ul className="mt-1 space-y-1">
+                        {validationWarnings.map((message, index) => (
+                          <li key={`${turnId}-validation-warning-${index}`} className="rounded-md bg-white/55 px-2 py-1 dark:bg-slate-900/40">
+                            {renderPkLinkedText(message, `${turnId}-validation-warning-${index}`, onOpenDetail)}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-blue-700/80 dark:text-blue-300/80">
+                Submission Review
+              </p>
+              <h2 className="mt-1 text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
+                {submissionDraft.process_label}
+              </h2>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
                 <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                  {selectedBatchJobs.length}/{batchJobs.length} selected
+                  Structure: {primaryFields.structure?.pk ? `#${primaryFields.structure.pk}` : "System selected"}
                 </span>
+                <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
+                  Symmetry: {symmetrySummary}
+                </span>
+                <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
+                  Time Est.: {runtimeSummary}
+                </span>
+                <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
+                  Atoms: {atomSummary}
+                </span>
+                {isBatchDraft ? (
+                  <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
+                    {selectedBatchJobs.length}/{batchJobs.length} selected
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex items-start gap-2">
+              {state.status === "submitted" ? (
+                <span className="inline-flex h-9 items-center rounded-md border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-medium text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
+                  Submitted
+                </span>
+              ) : null}
+              {isInlineMode && onToggleExpanded ? (
+                <button
+                  type="button"
+                  className="inline-flex h-9 items-center gap-1 rounded-md border border-slate-300 bg-white/80 px-2.5 text-xs text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                  onClick={onToggleExpanded}
+                  aria-expanded={isExpanded}
+                  aria-label={isExpanded ? "Collapse submission card" : "Expand submission card"}
+                >
+                  <span>{isExpanded ? "Collapse" : "Expand"}</span>
+                  <ChevronDown
+                    className={cn(
+                      "h-4 w-4 transition-transform duration-200",
+                      isExpanded ? "rotate-180" : "rotate-0",
+                    )}
+                  />
+                </button>
+              ) : null}
+              {!isInlineMode ? (
+                <>
+                  {state.status !== "submitted" ? (
+                    <Button
+                      size="sm"
+                      className="bg-blue-600 text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
+                      onClick={handleLaunch}
+                      disabled={
+                        state.status === "submitting" ||
+                        isBusy ||
+                        (isBatchDraft && selectedBatchJobs.length === 0)
+                      }
+                    >
+                      {state.status === "submitting" ? (
+                        <span className="inline-flex items-center gap-1">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          Submitting...
+                        </span>
+                      ) : isBatchDraft ? (
+                        "Launch All"
+                      ) : (
+                        "Launch"
+                      )}
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-slate-300 bg-white/80 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                    onClick={state.status === "submitted" ? onClose : onCancel}
+                    disabled={state.status === "submitting"}
+                  >
+                    {state.status === "submitted" ? "Close" : "Cancel"}
+                  </Button>
+                  <button
+                    type="button"
+                    className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                    onClick={onClose}
+                    disabled={!canClose}
+                    aria-label="Close modal"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </>
               ) : null}
             </div>
           </div>
-          <button
-            type="button"
-            className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
-            onClick={onClose}
-            disabled={!canClose}
-            aria-label="Close modal"
-          >
-            <X className="h-4 w-4" />
-          </button>
         </div>
 
-        <div className="mt-3 grid gap-2 md:grid-cols-3">
+        {!isExpanded ? (
+          <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
+            Expand this submission card to review grouped ports and edit K-mesh before launch.
+          </p>
+        ) : null}
+        {isExpanded ? (
+          <>
+            <div className="mt-4 grid gap-2 md:grid-cols-3">
           {keyParameterEntries.map((entry) => (
             <div
               key={`${turnId}-key-parameter-${entry.label}`}
@@ -1334,7 +2350,7 @@ export function SubmissionModal({
               </p>
             </div>
           ))}
-        </div>
+            </div>
 
         {isBatchDraft ? (
           <div className="mt-4">
@@ -1520,331 +2536,190 @@ export function SubmissionModal({
         <div className="mt-3 rounded-xl border border-slate-200/85 bg-slate-50/75 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/35">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
-              Interactive Inputs
+              Builder Port Hierarchy
             </p>
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
                 {recommendedDraftFields.length} recommended
               </span>
               <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                {allDraftFields.length} total ports
+                {allDraftFields.length} editable ports
+              </span>
+              <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
+                {groupedInputSections.length} spec groups
               </span>
             </div>
           </div>
-          {allDraftFields.length > 0 ? (
-            <>
-              <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                {recommendedDraftFields.map((field) => {
-                  const error = draftStateErrors[field.path];
-                  const isModified = isFieldModified(field);
-                  return (
-                    <label
-                      key={`${turnId}-port-recommended-${field.path}`}
-                      className={cn(
-                        "rounded-lg border bg-white/90 px-2.5 py-2 text-sm dark:bg-slate-950/40",
-                        isModified
-                          ? "border-blue-400/90 shadow-[0_0_0_1px_rgba(59,130,246,0.2)] dark:border-blue-500/80"
-                          : "border-slate-200/80 dark:border-slate-800",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                          {field.label}
-                        </span>
-                        <div className="flex items-center gap-1">
-                          {field.isRecommended ? (
-                            <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
-                              AI
-                            </span>
-                          ) : null}
-                          {isModified ? (
-                            <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
-                              Modified
-                            </span>
-                          ) : null}
-                        </div>
+          <div className="mt-2 grid gap-2 lg:grid-cols-[240px_minmax(0,1fr)]">
+            <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-lg border border-slate-200/85 bg-white/90 p-2 dark:border-slate-800 dark:bg-slate-950/45">
+              <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                Atomic Inputs
+              </p>
+              {namespaceTree.atomicEntries.length > 0 ? (
+                <div className="mt-1.5 space-y-1">
+                  {namespaceTree.atomicEntries.map((entry) => {
+                    const leaf = entry.path.split(".").pop() ?? entry.path;
+                    return (
+                      <div
+                        key={`${turnId}-atomic-${entry.path}`}
+                        className="rounded-md border border-slate-200/80 bg-slate-50/80 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900/50"
+                      >
+                        <p className="font-semibold text-slate-700 dark:text-slate-200">{formatSettingKey(leaf)}</p>
+                        <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
+                          {entry.path}
+                        </p>
                       </div>
-                      <p className="mt-0.5 break-all text-[11px] text-slate-500 dark:text-slate-400" title={field.path}>
-                        {field.path}
-                      </p>
-                      {field.kind === "boolean" ? (
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
+                  No direct scalar inputs at root.
+                </p>
+              )}
+
+              <div className="mt-3 border-t border-slate-200/80 pt-2 dark:border-slate-800">
+                <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                  Namespaces
+                </p>
+                {namespaceSidebarItems.length > 0 ? (
+                  <div className="mt-1 space-y-1">
+                    {namespaceSidebarItems.map((namespaceItem) => {
+                      const label = namespaceItem.path.split(".").pop() ?? namespaceItem.path;
+                      const isSelected = namespaceItem.path === selectedNamespace;
+                      return (
                         <button
+                          key={`${turnId}-namespace-${namespaceItem.path}`}
                           type="button"
-                          className="mt-1.5 inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300"
-                          onClick={() => {
-                            setDraftState((current) => ({
-                              ...current,
-                              [field.path]: {
-                                ...field,
-                                value: !Boolean(field.value),
-                              },
-                            }));
-                            setDraftStateErrors((current) => {
-                              if (!current[field.path]) {
-                                return current;
-                              }
-                              const next = { ...current };
-                              delete next[field.path];
-                              return next;
-                            });
-                          }}
-                        >
-                          <span
-                            className={cn(
-                              "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
-                              Boolean(field.value) ? "bg-blue-600" : "bg-slate-300 dark:bg-slate-700",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                                Boolean(field.value) ? "translate-x-4" : "translate-x-0.5",
-                              )}
-                            />
-                          </span>
-                          <span>{Boolean(field.value) ? "Enabled" : "Disabled"}</span>
-                        </button>
-                      ) : field.kind === "json" ? (
-                        <>
-                          <button
-                            type="button"
-                            className="mt-1.5 rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-                            onClick={() =>
-                              setExpandedJsonFields((current) => ({
-                                ...current,
-                                [field.path]: !Boolean(current[field.path]),
-                              }))
-                            }
-                          >
-                            {expandedJsonFields[field.path] ? "Hide JSON Editor" : "Click to Edit JSON"}
-                          </button>
-                          {expandedJsonFields[field.path] ? (
-                            <textarea
-                              className={cn(
-                                "minimal-scrollbar mt-1.5 h-24 w-full resize-y rounded-md border px-2 py-1.5 font-mono text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
-                                error
-                                  ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
-                                  : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
-                              )}
-                              value={String(field.value)}
-                              onChange={(event) => {
-                                const nextValue = event.currentTarget.value;
-                                setDraftState((current) => ({
-                                  ...current,
-                                  [field.path]: { ...field, value: nextValue },
-                                }));
-                                setDraftStateErrors((current) => {
-                                  if (!current[field.path]) {
-                                    return current;
-                                  }
-                                  const next = { ...current };
-                                  delete next[field.path];
-                                  return next;
-                                });
-                              }}
-                            />
-                          ) : null}
-                        </>
-                      ) : (
-                        <input
-                          type={field.kind === "number" ? "number" : "text"}
-                          step={field.kind === "number" ? "any" : undefined}
                           className={cn(
-                            "mt-1.5 w-full rounded-md border px-2 py-1.5 text-sm text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
-                            error
-                              ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
-                              : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+                            "flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs transition-colors",
+                            isSelected
+                              ? "border-blue-300/90 bg-blue-50 text-blue-700 dark:border-blue-700/70 dark:bg-blue-950/35 dark:text-blue-200"
+                              : "border-transparent text-slate-700 hover:border-slate-200 hover:bg-slate-50 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-900/60",
                           )}
-                          value={String(field.value)}
-                          onChange={(event) => {
-                            const nextValue = event.currentTarget.value;
-                            setDraftState((current) => ({
-                              ...current,
-                              [field.path]: { ...field, value: nextValue },
-                            }));
-                            setDraftStateErrors((current) => {
-                              if (!current[field.path]) {
-                                return current;
-                              }
-                              const next = { ...current };
-                              delete next[field.path];
-                              return next;
-                            });
-                          }}
-                        />
+                          onClick={() => setSelectedNamespace(namespaceItem.path)}
+                          style={{ paddingLeft: `${0.5 + namespaceItem.depth * 0.65}rem` }}
+                        >
+                          <Folder className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">{formatSettingKey(label)}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    No nested namespaces detected.
+                  </p>
+                )}
+              </div>
+            </aside>
+
+            <div className="rounded-lg border border-slate-200/85 bg-white/90 p-2.5 dark:border-slate-800 dark:bg-slate-950/45">
+              <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
+                <button
+                  type="button"
+                  className={cn(
+                    "rounded-md px-1.5 py-0.5 font-semibold",
+                    selectedNamespace === ""
+                      ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
+                      : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
+                  )}
+                  onClick={() => setSelectedNamespace("")}
+                >
+                  inputs
+                </button>
+                {namespaceBreadcrumb.map((breadcrumb) => (
+                  <span key={`${turnId}-breadcrumb-${breadcrumb.path}`} className="inline-flex items-center gap-1">
+                    <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+                    <button
+                      type="button"
+                      className={cn(
+                        "rounded-md px-1.5 py-0.5",
+                        breadcrumb.path === selectedNamespace
+                          ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
+                          : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
                       )}
-                      {error ? (
-                        <span className="mt-1 block text-[11px] text-rose-600 dark:text-rose-300">{error}</span>
-                      ) : null}
-                    </label>
-                  );
-                })}
+                      onClick={() => setSelectedNamespace(breadcrumb.path)}
+                    >
+                      {breadcrumb.label}
+                    </button>
+                  </span>
+                ))}
               </div>
 
-              {additionalDraftFields.length > 0 ? (
-                <div className="mt-2">
-                  <button
-                    type="button"
-                    className="inline-flex w-full items-center justify-between rounded-xl bg-white/75 px-3 py-2 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800/70"
-                    onClick={() => setIsAllInputsExpanded((current) => !current)}
-                    aria-expanded={isAllInputsExpanded}
-                  >
-                    <span>Additional Ports ({additionalDraftFields.length})</span>
-                    <ChevronDown
-                      className={cn(
-                        "h-4 w-4 shrink-0 transition-transform duration-200",
-                        isAllInputsExpanded ? "rotate-180" : "rotate-0",
-                      )}
-                    />
-                  </button>
-                  <div
-                    className={cn(
-                      "overflow-hidden transition-[max-height,opacity] duration-300 ease-out",
-                      isAllInputsExpanded ? "mt-2 max-h-[560px] opacity-100" : "max-h-0 opacity-0",
-                    )}
-                  >
-                    <div className="minimal-scrollbar grid max-h-[360px] gap-2 overflow-auto md:grid-cols-2 xl:grid-cols-3">
-                      {additionalDraftFields.map((field) => {
-                        const error = draftStateErrors[field.path];
-                        const isModified = isFieldModified(field);
-                        return (
-                          <label
-                            key={`${turnId}-port-additional-${field.path}`}
-                            className={cn(
-                              "rounded-lg border bg-white/90 px-2.5 py-2 text-sm dark:bg-slate-950/40",
-                              isModified
-                                ? "border-blue-400/90 shadow-[0_0_0_1px_rgba(59,130,246,0.2)] dark:border-blue-500/80"
-                                : "border-slate-200/80 dark:border-slate-800",
-                            )}
-                          >
-                            <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                              {field.label}
-                            </span>
-                            <p className="mt-0.5 break-all text-[11px] text-slate-500 dark:text-slate-400" title={field.path}>
-                              {field.path}
-                            </p>
-                            {field.kind === "boolean" ? (
-                              <button
-                                type="button"
-                                className="mt-1.5 inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300"
-                                onClick={() => {
-                                  setDraftState((current) => ({
-                                    ...current,
-                                    [field.path]: {
-                                      ...field,
-                                      value: !Boolean(field.value),
-                                    },
-                                  }));
-                                  setDraftStateErrors((current) => {
-                                    if (!current[field.path]) {
-                                      return current;
-                                    }
-                                    const next = { ...current };
-                                    delete next[field.path];
-                                    return next;
-                                  });
-                                }}
-                              >
-                                <span
-                                  className={cn(
-                                    "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
-                                    Boolean(field.value) ? "bg-blue-600" : "bg-slate-300 dark:bg-slate-700",
-                                  )}
-                                >
-                                  <span
-                                    className={cn(
-                                      "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
-                                      Boolean(field.value) ? "translate-x-4" : "translate-x-0.5",
-                                    )}
-                                  />
-                                </span>
-                                <span>{Boolean(field.value) ? "Enabled" : "Disabled"}</span>
-                              </button>
-                            ) : field.kind === "json" ? (
-                              <>
-                                <button
-                                  type="button"
-                                  className="mt-1.5 rounded-md border border-slate-300 px-2 py-1 text-xs text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-                                  onClick={() =>
-                                    setExpandedJsonFields((current) => ({
-                                      ...current,
-                                      [field.path]: !Boolean(current[field.path]),
-                                    }))
-                                  }
-                                >
-                                  {expandedJsonFields[field.path] ? "Hide JSON Editor" : "Click to Edit JSON"}
-                                </button>
-                                {expandedJsonFields[field.path] ? (
-                                  <textarea
-                                    className={cn(
-                                      "minimal-scrollbar mt-1.5 h-20 w-full resize-y rounded-md border px-2 py-1.5 font-mono text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
-                                      error
-                                        ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
-                                        : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
-                                    )}
-                                    value={String(field.value)}
-                                    onChange={(event) => {
-                                      const nextValue = event.currentTarget.value;
-                                      setDraftState((current) => ({
-                                        ...current,
-                                        [field.path]: { ...field, value: nextValue },
-                                      }));
-                                      setDraftStateErrors((current) => {
-                                        if (!current[field.path]) {
-                                          return current;
-                                        }
-                                        const next = { ...current };
-                                        delete next[field.path];
-                                        return next;
-                                      });
-                                    }}
-                                  />
-                                ) : null}
-                              </>
-                            ) : (
-                              <input
-                                type={field.kind === "number" ? "number" : "text"}
-                                step={field.kind === "number" ? "any" : undefined}
-                                className={cn(
-                                  "mt-1.5 w-full rounded-md border px-2 py-1.5 text-sm text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
-                                  error
-                                    ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
-                                    : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
-                                )}
-                                value={String(field.value)}
-                                onChange={(event) => {
-                                  const nextValue = event.currentTarget.value;
-                                  setDraftState((current) => ({
-                                    ...current,
-                                    [field.path]: { ...field, value: nextValue },
-                                  }));
-                                  setDraftStateErrors((current) => {
-                                    if (!current[field.path]) {
-                                      return current;
-                                    }
-                                    const next = { ...current };
-                                    delete next[field.path];
-                                    return next;
-                                  });
-                                }}
-                              />
-                            )}
-                            {error ? (
-                              <span className="mt-1 block text-[11px] text-rose-600 dark:text-rose-300">{error}</span>
-                            ) : null}
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </div>
+              {selectedNamespaceChildren.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {selectedNamespaceChildren.map((childPath) => {
+                    const childLabel = childPath.split(".").pop() ?? childPath;
+                    return (
+                      <button
+                        key={`${turnId}-namespace-folder-${childPath}`}
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:bg-slate-800"
+                        onClick={() => setSelectedNamespace(childPath)}
+                      >
+                        <Folder className="h-3.5 w-3.5" />
+                        <span>{formatSettingKey(childLabel)}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
-            </>
-          ) : (
-            <p className="mt-1.5 text-xs text-slate-500 dark:text-slate-400">
-              No editable input ports were provided. Submission will use validated defaults.
-            </p>
-          )}
+
+              {selectedNamespaceLeafEntries.length > 0 ? (
+                <div className="minimal-scrollbar mt-2 max-h-[330px] overflow-auto">
+                  <table className="w-full min-w-[500px] text-left text-xs">
+                    <thead className="sticky top-0 bg-slate-100/95 text-[10px] uppercase tracking-[0.1em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
+                      <tr>
+                        <th className="w-[44%] px-2 py-1.5 font-semibold">Parameter</th>
+                        <th className="px-2 py-1.5 font-semibold">Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedNamespaceLeafEntries.map((entry) => {
+                        const leafKey = entry.path.split(".").pop() ?? entry.path;
+                        const uiType = inferUiTypeFromPathAndValue(entry.path, entry.value);
+                        const field = draftState[entry.path];
+                        const isModified = field ? isFieldModified(field) : false;
+                        return (
+                          <tr
+                            key={`${turnId}-namespace-entry-${entry.path}`}
+                            className="border-t border-slate-200/70 align-top dark:border-slate-800"
+                          >
+                            <td className="px-2 py-1.5">
+                              <p className="truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                                {formatSettingKey(leafKey)}
+                              </p>
+                              <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
+                                {entry.path}
+                              </p>
+                              <div className="mt-1 flex flex-wrap items-center gap-1">
+                                {entry.isRecommended ? (
+                                  <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                                    AI
+                                  </span>
+                                ) : null}
+                                {isModified ? (
+                                  <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                                    Modified
+                                  </span>
+                                ) : null}
+                              </div>
+                            </td>
+                            <td className="px-2 py-1.5">{renderEditableFieldControl(entry.path, uiType, true)}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                  No direct parameters in this namespace. Select a sub-namespace folder to continue.
+                </p>
+              )}
+            </div>
+          </div>
         </div>
 
         <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -1900,49 +2775,41 @@ export function SubmissionModal({
           </div>
         ) : null}
 
-        {!isBatchDraft ? (
-          <div className="mt-4">
-            <button
-              type="button"
-              className="inline-flex w-full items-center justify-between rounded-xl bg-slate-100/85 px-3 py-2 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200/70 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-800/70"
-              onClick={() => setIsAdvancedExpanded((current) => !current)}
-              aria-expanded={isAdvancedExpanded}
-            >
-              <span>Advanced Settings ({advancedEntries.length})</span>
-              <ChevronDown
-                className={cn(
-                  "h-4 w-4 shrink-0 transition-transform duration-200",
-                  isAdvancedExpanded ? "rotate-180" : "rotate-0",
-                )}
-              />
-            </button>
-            <div
-              className={cn(
-                "overflow-hidden transition-[max-height,opacity] duration-300 ease-out",
-                isAdvancedExpanded ? "mt-2 max-h-[360px] opacity-100" : "max-h-0 opacity-0",
-              )}
-            >
-              {advancedEntries.length > 0 ? (
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {advancedEntries.map(([key, value]) => (
-                    <div key={`${turnId}-advanced-${key}`} className="px-1 py-0.5 text-sm text-slate-700 dark:text-slate-200">
-                      <p className="text-[11px] font-medium uppercase tracking-[0.11em] text-slate-500 dark:text-slate-400">
-                        {formatSettingKey(key)}
-                      </p>
-                      <p className="mt-0.5 break-words">{renderValueNode(value, `${turnId}-advanced-${key}`, onOpenDetail)}</p>
-                    </div>
-                  ))}
+            <div className="mt-5 border-t border-slate-200/80 pt-4 dark:border-slate-800">
+              {isInlineMode && state.status !== "submitted" ? (
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    className="bg-blue-600 text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
+                    onClick={handleLaunch}
+                    disabled={
+                      state.status === "submitting" ||
+                      isBusy ||
+                      (isBatchDraft && selectedBatchJobs.length === 0)
+                    }
+                  >
+                    {state.status === "submitting" ? (
+                      <span className="inline-flex items-center gap-1">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Submitting...
+                      </span>
+                    ) : isBatchDraft ? (
+                      "Launch All"
+                    ) : (
+                      "Launch"
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="border-slate-300 bg-white/80 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                    onClick={onCancel}
+                    disabled={state.status === "submitting"}
+                  >
+                    Cancel
+                  </Button>
                 </div>
-              ) : (
-                <p className="text-xs text-slate-500 dark:text-slate-400">
-                  No advanced overrides detected. Validated defaults will be applied.
-                </p>
-              )}
-            </div>
-          </div>
-        ) : null}
-
-        <div className="mt-5 border-t border-slate-200/80 pt-4 dark:border-slate-800">
+              ) : null}
           {state.status === "submitted" ? (
             <div className="rounded-xl bg-emerald-50/90 px-3 py-3 dark:bg-emerald-950/35">
               <div className="flex items-center gap-3">
@@ -1991,69 +2858,16 @@ export function SubmissionModal({
           ) : state.status === "cancelled" ? (
             <p className="text-sm text-slate-600 dark:text-slate-300">Submission cancelled.</p>
           ) : (
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                className="bg-blue-600 text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
-                onClick={() => {
-                  const { valuesByPath, errors } = parseDraftFieldEditorState(draftState);
-                  if (Object.keys(errors).length > 0) {
-                    setDraftStateErrors(errors);
-                    return;
-                  }
-                  setDraftStateErrors({});
-
-                  const selectedDraft: SubmissionSubmitDraft = isBatchDraft
-                    ? selectedBatchJobs.map((job) => job.draft)
-                    : (() => {
-                        const metaDraftRecord = asRecord(submissionDraft.meta.draft);
-                        if (metaDraftRecord) {
-                          return metaDraftRecord;
-                        }
-                        const metaDraftArray = toRecordArray(submissionDraft.meta.draft);
-                        if (metaDraftArray.length > 0) {
-                          return metaDraftArray[0];
-                        }
-                        return submissionDraft.inputs;
-                      })();
-                  const mergedDraft = applyEditorValuesToSubmitDraft(
-                    selectedDraft,
-                    valuesByPath,
-                  );
-                  onConfirm(mergedDraft);
-                }}
-                disabled={
-                  state.status === "submitting" ||
-                  isBusy ||
-                  (isBatchDraft && selectedBatchJobs.length === 0)
-                }
-              >
-                {state.status === "submitting" ? (
-                  <span className="inline-flex items-center gap-1">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    Submitting...
-                  </span>
-                ) : isBatchDraft ? (
-                  "Launch All"
-                ) : (
-                  "Launch"
-                )}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-slate-300 bg-white/80 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                onClick={onCancel}
-                disabled={state.status === "submitting"}
-              >
-                Cancel
-              </Button>
-            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Review grouped inputs above and launch when ready.
+            </p>
           )}
           {state.status === "error" && state.errorText ? (
             <p className="mt-2 text-xs text-rose-600 dark:text-rose-300">{state.errorText}</p>
           ) : null}
-        </div>
+            </div>
+          </>
+        ) : null}
       </section>
     </div>
   );

@@ -251,3 +251,51 @@ async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch:
     assert response["failures"] == []
     assert len(response["responses"]) == 3
     assert captured[aiida_router.PENDING_SUBMISSION_KEY] is None
+
+
+@pytest.mark.anyio
+async def test_frontend_node_hover_metadata_resolves_formula_spacegroup_and_node_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        aiida_router,
+        "get_context_nodes",
+        lambda _ids: [
+            {
+                "pk": 11,
+                "node_type": "StructureData",
+                "formula": "Si2",
+                "attributes": {
+                    "spacegroup": {
+                        "symbol": "Fm-3m",
+                        "number": 225,
+                    }
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(aiida_router.hub, "start", lambda: None)
+    monkeypatch.setattr(aiida_router.hub, "_current_profile", "test-profile")
+
+    response = await aiida_router.frontend_node_hover_metadata(11)
+
+    assert response.pk == 11
+    assert response.formula == "Si2"
+    assert response.spacegroup == "Fm-3m (225)"
+    assert response.node_type == "StructureData"
+
+
+@pytest.mark.anyio
+async def test_frontend_node_hover_metadata_returns_safe_fallback_when_node_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(aiida_router, "get_context_nodes", lambda _ids: [])
+    monkeypatch.setattr(aiida_router.hub, "start", lambda: None)
+    monkeypatch.setattr(aiida_router.hub, "_current_profile", "test-profile")
+
+    response = await aiida_router.frontend_node_hover_metadata(9999)
+
+    assert response.pk == 9999
+    assert response.formula is None
+    assert response.spacegroup is None
+    assert response.node_type == "Unknown"

@@ -37,6 +37,10 @@ _BASE_OPERATIONAL_RULES: tuple[str, ...] = (
         "When a calculation is ready, output the block exactly as "
         "'[SUBMISSION_DRAFT] { ...JSON... }'. This is the ONLY way the user can see the launch button."
     ),
+    (
+        "Do not force cutoff values into narrative summaries. Mention ecutwfc/ecutrho only when these values are "
+        "explicitly present in the prepared builder/draft payload."
+    ),
     "Do not wrap this block in markdown code fences unless the frontend parser explicitly handles it.",
     "Do not skip this block. Do not summarize it away. Do not wrap it in markdown fences.",
 )
@@ -74,8 +78,12 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
         "If PseudoDojo is unavailable, state that clearly and propose the closest available alternative."
     ),
     (
-        "Script Archive: Use 'search_past_scripts' to review previous custom scripts by intent or node PKs. "
-        "If a task is complex or a script failed before, consult the archive before drafting a new script."
+        "Specialized skill registry: use 'call_specialized_skill' to execute worker-side reusable scripts "
+        "that are already registered under /registry/list."
+    ),
+    (
+        "Growth rule: when a custom script succeeds and is reusable, call 'persist_current_script' to register it "
+        "into worker registry for future reuse."
     ),
     (
         "If 'run_aiida_code_script' returns a missing_module error, do not repeat the same import pattern. "

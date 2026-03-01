@@ -75,6 +75,13 @@ export type SendChatRequest = {
 
 export type SubmissionResponse = Record<string, unknown>;
 
+export type NodeHoverMetadataResponse = {
+  pk: number;
+  formula: string | null;
+  spacegroup: string | null;
+  node_type: string;
+};
+
 export type BridgeStatusResponse = {
   status: "online" | "offline";
   url: string;
