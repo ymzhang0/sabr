@@ -4,12 +4,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CHAT_STREAM_URL,
   LOGS_STREAM_URL,
+  addNodesToGroup,
+  createGroup,
+  deleteGroup,
+  exportGroup,
   getBootstrap,
   getChatMessages,
   getGroups,
   getLogs,
   getProcesses,
+  renameGroup,
   sendChat,
+  softDeleteNode,
   stopChat,
   uploadArchive,
 } from "@/lib/api";
@@ -21,7 +27,9 @@ import type {
   ChatMessage,
   ChatSnapshot,
   FocusNode,
+  GroupItem,
   ProcessItem,
+  ResourceAttachment,
   SendChatRequest,
 } from "@/types/aiida";
 
@@ -261,12 +269,40 @@ function mergeUniquePks(...sources: number[][]): number[] {
   return merged;
 }
 
+function normalizeGroups(raw: unknown): GroupItem[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const seen = new Set<number>();
+  const groups: GroupItem[] = [];
+  raw.forEach((entry) => {
+    if (!entry || typeof entry !== "object") {
+      return;
+    }
+    const item = entry as Record<string, unknown>;
+    const label = String(item.label ?? "").trim();
+    const pk = Number.parseInt(String(item.pk ?? ""), 10);
+    const count = Number.parseInt(String(item.count ?? 0), 10);
+    if (!label || Number.isNaN(pk) || pk <= 0 || seen.has(pk)) {
+      return;
+    }
+    seen.add(pk);
+    groups.push({
+      pk,
+      label,
+      count: Number.isNaN(count) || count < 0 ? 0 : count,
+      type_string:
+        typeof item.type_string === "string" && item.type_string.trim() ? item.type_string.trim() : null,
+    });
+  });
+  return groups;
+}
+
 export default function App() {
   const queryClient = useQueryClient();
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("");
-  const [selectedType, setSelectedType] = useState("");
   const [processLimit, setProcessLimit] = useState(15);
   const [pendingProcessLimit, setPendingProcessLimit] = useState<number | null>(null);
   const [contextNodes, setContextNodes] = useState<FocusNode[]>([]);
@@ -292,8 +328,8 @@ export default function App() {
   });
 
   const processesQuery = useQuery({
-    queryKey: ["processes", selectedGroup, selectedType, processLimit],
-    queryFn: () => getProcesses(processLimit, selectedGroup || undefined, selectedType || undefined),
+    queryKey: ["processes", selectedGroup, processLimit],
+    queryFn: () => getProcesses(processLimit, selectedGroup || undefined),
     enabled: bootstrapQuery.isSuccess,
     refetchInterval: 3_000,
   });
@@ -436,8 +472,46 @@ export default function App() {
     },
   });
 
+  const createGroupMutation = useMutation({
+    mutationFn: (label: string) => createGroup(label),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+    },
+  });
+
+  const renameGroupMutation = useMutation({
+    mutationFn: ({ pk, label }: { pk: number; label: string }) => renameGroup(pk, label),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+    },
+  });
+
+  const deleteGroupMutation = useMutation({
+    mutationFn: (pk: number) => deleteGroup(pk),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+    },
+  });
+
+  const addNodesToGroupMutation = useMutation({
+    mutationFn: ({ groupPk, nodePks }: { groupPk: number; nodePks: number[] }) => addNodesToGroup(groupPk, nodePks),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+    },
+  });
+
+  const softDeleteNodeMutation = useMutation({
+    mutationFn: (pk: number) => softDeleteNode(pk, true),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
+    },
+  });
+
   const processes = processesQuery.data?.items ?? bootstrapQuery.data?.processes ?? [];
-  const groups = groupsQuery.data?.items ?? bootstrapQuery.data?.groups ?? [];
+  const groups = normalizeGroups(groupsQuery.data?.items ?? bootstrapQuery.data?.groups ?? []);
   const polledLogsVersion = logsQuery.data?.version ?? bootstrapQuery.data?.logs.version ?? -1;
   const polledLogs = logsQuery.data?.lines ?? bootstrapQuery.data?.logs.lines ?? [];
   const logs =
@@ -503,7 +577,7 @@ export default function App() {
     if (!selectedGroup) {
       return;
     }
-    if (!groups.includes(selectedGroup)) {
+    if (!groups.some((group) => group.label === selectedGroup)) {
       setSelectedGroup("");
     }
   }, [groups, selectedGroup]);
@@ -548,11 +622,38 @@ export default function App() {
   }, [bootstrapQuery.isError, bootstrapQuery.isLoading]);
 
   const handleSendMessage = useCallback(
-    async (text: string) => {
+    async (text: string, options?: { resourceAttachments?: ResourceAttachment[] }) => {
       const intent = text.trim();
       if (!intent || isChatBusy || requestInFlightRef.current) {
         return;
       }
+      const rawResourceAttachments = Array.isArray(options?.resourceAttachments) ? options.resourceAttachments : [];
+      const resourceAttachmentMap = new Map<string, ResourceAttachment>();
+      rawResourceAttachments.forEach((attachment) => {
+        const kind = typeof attachment.kind === "string" ? attachment.kind.trim().toLowerCase() : "";
+        const value = typeof attachment.value === "string" ? attachment.value.trim() : "";
+        if (!value || (kind !== "computer" && kind !== "code" && kind !== "plugin")) {
+          return;
+        }
+        const key = `${kind}:${value.toLowerCase()}`;
+        if (resourceAttachmentMap.has(key)) {
+          return;
+        }
+        resourceAttachmentMap.set(key, {
+          kind,
+          value,
+          label: typeof attachment.label === "string" && attachment.label.trim() ? attachment.label.trim() : value,
+          plugin:
+            typeof attachment.plugin === "string" && attachment.plugin.trim() ? attachment.plugin.trim() : null,
+          computerLabel:
+            typeof attachment.computerLabel === "string" && attachment.computerLabel.trim()
+              ? attachment.computerLabel.trim()
+              : null,
+          hostname:
+            typeof attachment.hostname === "string" && attachment.hostname.trim() ? attachment.hostname.trim() : null,
+        });
+      });
+      const resourceAttachments = [...resourceAttachmentMap.values()];
       const selectedContextNodes = [...contextNodes];
       const contextPks = selectedContextNodes.map((node) => node.pk);
       const textReferencedPks = extractPkReferences(intent);
@@ -578,6 +679,14 @@ export default function App() {
               label: node.label,
               formula: node.formula,
               node_type: node.node_type,
+            })),
+            resource_attachments: resourceAttachments.map((attachment) => ({
+              kind: attachment.kind,
+              value: attachment.value,
+              label: attachment.label,
+              plugin: attachment.plugin,
+              computer_label: attachment.computerLabel,
+              hostname: attachment.hostname,
             })),
           },
         };
@@ -623,21 +732,74 @@ export default function App() {
       });
   }, [activeTurnId, isChatBusy, queryClient]);
 
+  const handleAddMultipleContextNodes = useCallback((selectedProcesses: ProcessItem[]) => {
+    selectedProcesses.forEach((process) => {
+      appendContextNode({
+        pk: process.pk,
+        label: process.label,
+        formula: process.formula ?? null,
+        node_type: process.node_type,
+      });
+    });
+  }, [appendContextNode]);
+
+  const handleCreateGroup = useCallback(async (label: string) => {
+    await createGroupMutation.mutateAsync(label);
+  }, [createGroupMutation]);
+
+  const handleRenameGroup = useCallback(async (pk: number, label: string) => {
+    await renameGroupMutation.mutateAsync({ pk, label });
+  }, [renameGroupMutation]);
+
+  const handleDeleteGroup = useCallback(async (pk: number) => {
+    const deletedGroup = groups.find((group) => group.pk === pk) ?? null;
+    await deleteGroupMutation.mutateAsync(pk);
+    if (deletedGroup && selectedGroup === deletedGroup.label) {
+      setSelectedGroup("");
+    }
+  }, [deleteGroupMutation, groups, selectedGroup]);
+
+  const handleAssignNodesToGroup = useCallback(async (groupPk: number, nodePks: number[]) => {
+    await addNodesToGroupMutation.mutateAsync({ groupPk, nodePks });
+  }, [addNodesToGroupMutation]);
+
+  const handleSoftDeleteNode = useCallback(async (pk: number) => {
+    await softDeleteNodeMutation.mutateAsync(pk);
+    setContextNodes((current) => current.filter((node) => node.pk !== pk));
+  }, [softDeleteNodeMutation]);
+
+  const handleExportGroup = useCallback(async (group: GroupItem) => {
+    const payload = await exportGroup(group.pk);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${group.label.replace(/[^\w.-]+/g, "_") || `group-${group.pk}`}.json`;
+      anchor.click();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }, []);
+
+  const handleConsultFailedProcess = useCallback((process: ProcessItem) => {
+    const prompt = `Please diagnose failed process #${process.pk} (${process.label || process.node_type}). Explain the likely root cause and propose concrete next actions.`;
+    void handleSendMessage(prompt);
+  }, [handleSendMessage]);
+
   return (
     <main className="dashboard-shell h-screen overflow-hidden p-2">
       <div className="mx-auto flex h-full min-h-0 w-full max-w-[1600px] flex-col gap-2 xl:flex-row">
         <Sidebar
           processes={processes}
-          groupOptions={groups}
+          groups={groups}
           selectedGroup={selectedGroup}
-          selectedType={selectedType}
           processLimit={processLimit}
           contextNodeIds={contextNodeIds}
           isUpdatingProcessLimit={pendingProcessLimit !== null}
           isDarkMode={theme === "dark"}
           onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
           onGroupChange={setSelectedGroup}
-          onTypeChange={setSelectedType}
           onProcessLimitChange={(nextLimit) => {
             if (nextLimit === processLimit) {
               return;
@@ -646,7 +808,15 @@ export default function App() {
             setPendingProcessLimit(nextLimit);
           }}
           onAddContextNode={handleAddContextNode}
+          onAddContextNodes={handleAddMultipleContextNodes}
           onOpenProcessDetail={setActiveProcess}
+          onCreateGroup={handleCreateGroup}
+          onRenameGroup={handleRenameGroup}
+          onDeleteGroup={handleDeleteGroup}
+          onAssignNodesToGroup={handleAssignNodesToGroup}
+          onSoftDeleteNode={handleSoftDeleteNode}
+          onExportGroup={handleExportGroup}
+          onConsultFailedProcess={handleConsultFailedProcess}
         />
 
         <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden xl:pt-10">

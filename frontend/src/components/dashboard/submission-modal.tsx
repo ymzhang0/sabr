@@ -44,6 +44,28 @@ type SubmissionInputGroup = {
   ports?: SubmissionInputPort[];
 };
 
+type SubmissionAvailableCode = {
+  value?: string;
+  label?: string;
+  code_label?: string;
+  computer_label?: string;
+  plugin?: string | null;
+  pk?: number | null;
+};
+
+type SubmissionPortSpecPort = {
+  path?: string;
+  kind?: string;
+  required?: boolean;
+};
+
+type SubmissionPortSpec = {
+  entry_point?: string;
+  namespaces?: string[];
+  ports?: SubmissionPortSpecPort[];
+  code_paths?: string[];
+};
+
 export type SubmissionValidationSummary = {
   status?: string;
   is_valid?: boolean;
@@ -58,6 +80,12 @@ type SubmissionPrimaryInputField = {
   label?: string;
   value?: unknown;
   pk?: number;
+};
+
+type SubmissionPrimaryFields = {
+  code: SubmissionPrimaryInputField | null;
+  structure: SubmissionPrimaryInputField | null;
+  pseudos: SubmissionPrimaryInputField | null;
 };
 
 export type SubmissionSubmitDraft = Record<string, unknown> | Array<Record<string, unknown>>;
@@ -84,6 +112,9 @@ export type SubmissionDraftPayload = {
     symmetry?: string | null;
     num_atoms?: number | null;
     estimated_runtime?: unknown;
+    available_codes?: SubmissionAvailableCode[] | null;
+    required_code_plugin?: string | null;
+    port_spec?: SubmissionPortSpec | null;
   };
 };
 
@@ -200,6 +231,160 @@ function formatSettingKey(key: string): string {
     .replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+type NormalizedCodeOption = {
+  value: string;
+  label: string;
+  codeLabel: string | null;
+  computerLabel: string | null;
+  plugin: string | null;
+  pk: number | null;
+};
+
+type NormalizedPortSpec = {
+  namespaces: string[];
+  codePaths: Set<string>;
+  requiredCodePaths: Set<string>;
+};
+
+function normalizeCodeOptions(raw: unknown): NormalizedCodeOption[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const options: NormalizedCodeOption[] = [];
+  const seen = new Set<string>();
+  raw.forEach((item) => {
+    if (typeof item === "string" && item.trim()) {
+      const text = item.trim();
+      if (seen.has(text)) {
+        return;
+      }
+      seen.add(text);
+      const [codeLabel, computerLabelRaw] = text.split("@", 2);
+      options.push({
+        value: text,
+        label: text,
+        codeLabel: codeLabel?.trim() || text,
+        computerLabel: computerLabelRaw?.trim() || null,
+        plugin: null,
+        pk: null,
+      });
+      return;
+    }
+
+    const record = asRecord(item);
+    if (!record) {
+      return;
+    }
+    const codeLabel =
+      typeof record.code_label === "string" && record.code_label.trim()
+        ? record.code_label.trim()
+        : typeof record.label === "string" && record.label.trim()
+          ? record.label.trim()
+          : typeof record.value === "string" && record.value.trim()
+            ? record.value.trim()
+            : "";
+    const computerLabel =
+      typeof record.computer_label === "string" && record.computer_label.trim()
+        ? record.computer_label.trim()
+        : null;
+    const value =
+      typeof record.value === "string" && record.value.trim()
+        ? record.value.trim()
+        : computerLabel && codeLabel
+          ? `${codeLabel}@${computerLabel}`
+          : codeLabel;
+    if (!value) {
+      return;
+    }
+    if (seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+    options.push({
+      value,
+      label:
+        typeof record.label === "string" && record.label.trim()
+          ? record.label.trim()
+          : value,
+      codeLabel: codeLabel || null,
+      computerLabel,
+      plugin:
+        typeof record.plugin === "string" && record.plugin.trim() ? record.plugin.trim() : null,
+      pk: toPositiveInteger(record.pk),
+    });
+  });
+  return options.sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function normalizePortSpec(raw: unknown): NormalizedPortSpec {
+  const record = asRecord(raw);
+  if (!record) {
+    return { namespaces: [], codePaths: new Set<string>(), requiredCodePaths: new Set<string>() };
+  }
+
+  const namespaceSet = new Set<string>();
+  const rawNamespaces = Array.isArray(record.namespaces) ? record.namespaces : [];
+  rawNamespaces.forEach((entry) => {
+    if (typeof entry !== "string") {
+      return;
+    }
+    const cleaned = entry.trim();
+    if (!cleaned) {
+      return;
+    }
+    const segments = cleaned.split(".").map((segment) => segment.trim()).filter(Boolean);
+    segments.forEach((_, index) => {
+      namespaceSet.add(segments.slice(0, index + 1).join("."));
+    });
+  });
+
+  const codePaths = new Set<string>();
+  const requiredCodePaths = new Set<string>();
+  const rawCodePaths = Array.isArray(record.code_paths) ? record.code_paths : [];
+  rawCodePaths.forEach((entry) => {
+    if (typeof entry !== "string") {
+      return;
+    }
+    const cleaned = entry.trim();
+    if (cleaned) {
+      codePaths.add(cleaned);
+    }
+  });
+
+  const rawPorts = Array.isArray(record.ports) ? record.ports : [];
+  rawPorts.forEach((entry) => {
+    const portRecord = asRecord(entry);
+    if (!portRecord) {
+      return;
+    }
+    const path = typeof portRecord.path === "string" ? portRecord.path.trim() : "";
+    if (!path) {
+      return;
+    }
+    const kind = typeof portRecord.kind === "string" ? portRecord.kind.trim().toLowerCase() : "";
+    if (kind === "code") {
+      codePaths.add(path);
+      if (portRecord.required === true) {
+        requiredCodePaths.add(path);
+      }
+    }
+  });
+
+  return {
+    namespaces: [...namespaceSet].sort((left, right) => {
+      const depthDelta = left.split(".").length - right.split(".").length;
+      return depthDelta !== 0 ? depthDelta : left.localeCompare(right);
+    }),
+    codePaths,
+    requiredCodePaths,
+  };
+}
+
+function sortPathsByDepth(left: string, right: string): number {
+  const depthDelta = left.split(".").length - right.split(".").length;
+  return depthDelta !== 0 ? depthDelta : left.localeCompare(right);
+}
+
 function findFirstNamedValue(payload: unknown, candidateKeys: Set<string>): unknown {
   if (Array.isArray(payload)) {
     for (const item of payload) {
@@ -253,14 +438,6 @@ function normalizePkMapEntries(value: unknown): SubmissionDraftPkMapEntry[] {
   return entries;
 }
 
-function buildParallelEntries(parallel: unknown): Array<[string, unknown]> {
-  const record = asRecord(parallel);
-  if (!record) {
-    return [];
-  }
-  return Object.entries(record).filter(([, value]) => !isMissingValue(value));
-}
-
 function normalizePrimaryField(
   label: string,
   value: unknown,
@@ -295,7 +472,7 @@ function normalizePrimaryField(
   };
 }
 
-function extractPrimaryFields(submissionDraft: SubmissionDraftPayload): Record<string, SubmissionPrimaryInputField | null> {
+function extractPrimaryFields(submissionDraft: SubmissionDraftPayload): SubmissionPrimaryFields {
   const source = asRecord(submissionDraft.primary_inputs);
   const fromSource = (key: string, label: string): SubmissionPrimaryInputField | null => {
     const entry = source?.[key];
@@ -390,20 +567,6 @@ type SubmissionAllInputEntry = {
   value: unknown;
   isRecommended: boolean;
 };
-
-const DRAFT_TOP_LEVEL_OVERRIDE_SKIP = new Set([
-  "workchain",
-  "structure_pk",
-  "code",
-  "protocol",
-  "overrides",
-  "inputs",
-  "primary_inputs",
-  "recommended_inputs",
-  "advanced_settings",
-  "all_inputs",
-  "meta",
-]);
 
 function inferFieldKind(value: unknown): DraftFieldEditorKind {
   if (typeof value === "boolean") {
@@ -975,11 +1138,33 @@ type NamespaceTreeIndex = {
   atomicEntries: SubmissionAllInputEntry[];
 };
 
-function buildNamespaceTreeIndex(entries: SubmissionAllInputEntry[]): NamespaceTreeIndex {
+function buildNamespaceTreeIndex(
+  entries: SubmissionAllInputEntry[],
+  specNamespaces: string[] = [],
+): NamespaceTreeIndex {
   const namespaceSet = new Set<string>([""]);
   const childrenMap = new Map<string, Set<string>>();
   const leavesMap = new Map<string, SubmissionAllInputEntry[]>();
   const atomicEntries: SubmissionAllInputEntry[] = [];
+
+  const registerNamespace = (namespace: string) => {
+    const cleaned = namespace.trim();
+    if (cleaned) {
+      namespaceSet.add(cleaned);
+    }
+  };
+
+  const registerChildNamespace = (parent: string, child: string) => {
+    const parentKey = parent.trim();
+    const childKey = child.trim();
+    if (!childKey) {
+      return;
+    }
+    registerNamespace(childKey);
+    const parentChildren = childrenMap.get(parentKey) ?? new Set<string>();
+    parentChildren.add(childKey);
+    childrenMap.set(parentKey, parentChildren);
+  };
 
   const appendLeaf = (namespace: string, entry: SubmissionAllInputEntry) => {
     const current = leavesMap.get(namespace) ?? [];
@@ -1003,13 +1188,25 @@ function buildNamespaceTreeIndex(entries: SubmissionAllInputEntry[]): NamespaceT
 
     for (let index = 1; index < segments.length; index += 1) {
       const namespace = segments.slice(0, index).join(".");
-      namespaceSet.add(namespace);
       const parent = index === 1 ? "" : segments.slice(0, index - 1).join(".");
-      const parentChildren = childrenMap.get(parent) ?? new Set<string>();
-      parentChildren.add(namespace);
-      childrenMap.set(parent, parentChildren);
+      registerChildNamespace(parent, namespace);
     }
     appendLeaf(segments.slice(0, -1).join("."), entry);
+  });
+
+  specNamespaces.forEach((namespacePath) => {
+    const segments = namespacePath
+      .split(".")
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length === 0) {
+      return;
+    }
+    for (let index = 1; index <= segments.length; index += 1) {
+      const namespace = segments.slice(0, index).join(".");
+      const parent = index === 1 ? "" : segments.slice(0, index - 1).join(".");
+      registerChildNamespace(parent, namespace);
+    }
   });
 
   const childrenByNamespace: Record<string, string[]> = {};
@@ -1057,18 +1254,204 @@ function flattenNamespaceTree(childrenByNamespace: Record<string, string[]>): Na
   return flattened;
 }
 
+function collectCodePaths(
+  entries: SubmissionAllInputEntry[],
+  portSpec: NormalizedPortSpec,
+): Set<string> {
+  const codePaths = new Set<string>();
+  portSpec.codePaths.forEach((path) => codePaths.add(path));
+  entries.forEach((entry) => {
+    const leaf = entry.path.split(".").pop()?.toLowerCase() ?? "";
+    if (leaf === "code") {
+      codePaths.add(entry.path);
+    }
+  });
+  return codePaths;
+}
+
+function buildEntryValueMap(entries: SubmissionAllInputEntry[]): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  entries.forEach((entry) => {
+    const path = entry.path.trim();
+    if (path) {
+      values[path] = entry.value;
+    }
+  });
+  return values;
+}
+
+function findFirstPathByLeafCandidates(
+  entries: SubmissionAllInputEntry[],
+  candidates: string[],
+): string | null {
+  if (entries.length === 0 || candidates.length === 0) {
+    return null;
+  }
+  const candidateSet = new Set(candidates.map((candidate) => candidate.trim().toLowerCase()).filter(Boolean));
+  const matched = entries
+    .filter((entry) => {
+      const leaf = entry.path.split(".").pop()?.trim().toLowerCase() ?? "";
+      return candidateSet.has(leaf);
+    })
+    .sort((left, right) => sortPathsByDepth(left.path, right.path));
+  return matched[0]?.path ?? null;
+}
+
+const METADATA_OPTION_PATHS: Array<{ path: string; parallelKey?: string; fallback: unknown }> = [
+  { path: "metadata.options.max_wallclock_seconds", parallelKey: "max_wallclock_seconds", fallback: 3600 },
+  { path: "metadata.options.workdir", fallback: "" },
+  { path: "metadata.options.queue_name", parallelKey: "queue_name", fallback: "" },
+  { path: "metadata.options.account", parallelKey: "account", fallback: "" },
+  { path: "metadata.options.qos", parallelKey: "qos", fallback: "" },
+  { path: "metadata.options.withmpi", parallelKey: "withmpi", fallback: true },
+  { path: "metadata.options.resources.num_machines", parallelKey: "num_machines", fallback: 1 },
+  {
+    path: "metadata.options.resources.num_mpiprocs_per_machine",
+    parallelKey: "num_mpiprocs_per_machine",
+    fallback: 1,
+  },
+  { path: "metadata.options.resources.tot_num_mpiprocs", parallelKey: "tot_num_mpiprocs", fallback: 1 },
+  {
+    path: "metadata.options.resources.num_cores_per_machine",
+    parallelKey: "num_cores_per_machine",
+    fallback: 1,
+  },
+  {
+    path: "metadata.options.resources.num_cores_per_mpiproc",
+    parallelKey: "num_cores_per_mpiproc",
+    fallback: 1,
+  },
+];
+
+function buildMetadataFallbackEntries(
+  entries: SubmissionAllInputEntry[],
+  submissionDraft: SubmissionDraftPayload | null,
+): SubmissionAllInputEntry[] {
+  if (!submissionDraft) {
+    return entries;
+  }
+
+  const hasMetadata = entries.some((entry) => entry.path.toLowerCase().startsWith("metadata."));
+  const processLabel = submissionDraft.process_label.toLowerCase();
+  const shouldSeedMetadata = hasMetadata || processLabel.includes("quantumespresso.pw") || processLabel.includes("pw");
+  if (!shouldSeedMetadata) {
+    return entries;
+  }
+
+  const existing = new Set(entries.map((entry) => entry.path.toLowerCase()));
+  const parallelSettings = asRecord(submissionDraft.meta.parallel_settings) ?? {};
+  const additions: SubmissionAllInputEntry[] = [];
+
+  METADATA_OPTION_PATHS.forEach((candidate) => {
+    const normalized = candidate.path.toLowerCase();
+    if (existing.has(normalized)) {
+      return;
+    }
+    let value: unknown = candidate.fallback;
+    if (candidate.parallelKey) {
+      const fromParallel = parallelSettings[candidate.parallelKey];
+      if (!isMissingValue(fromParallel)) {
+        value = fromParallel;
+      }
+    }
+    additions.push({
+      path: candidate.path,
+      value,
+      isRecommended: false,
+    });
+  });
+
+  if (additions.length === 0) {
+    return entries;
+  }
+  return [...entries, ...additions].sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function buildFallbackCodeOptions(
+  codePaths: Set<string>,
+  entryValueByPath: Record<string, unknown>,
+  primaryCodeValue: unknown,
+): NormalizedCodeOption[] {
+  const options: NormalizedCodeOption[] = [];
+  const seen = new Set<string>();
+  const append = (rawValue: unknown) => {
+    const text = stringifyCompact(rawValue);
+    if (!text || seen.has(text)) {
+      return;
+    }
+    seen.add(text);
+    const [codeLabel, computerLabelRaw] = text.split("@", 2);
+    options.push({
+      value: text,
+      label: text,
+      codeLabel: codeLabel?.trim() || text,
+      computerLabel: computerLabelRaw?.trim() || null,
+      plugin: null,
+      pk: null,
+    });
+  };
+
+  codePaths.forEach((path) => append(entryValueByPath[path]));
+  append(primaryCodeValue);
+  return options.sort((left, right) => left.label.localeCompare(right.label));
+}
+
+function ensureSpecCodeEntries(
+  entries: SubmissionAllInputEntry[],
+  specCodePaths: Set<string>,
+  fallbackCodeValue: unknown,
+): SubmissionAllInputEntry[] {
+  if (specCodePaths.size === 0) {
+    return entries;
+  }
+
+  const existingNormalized = new Set(entries.map((entry) => entry.path.trim().toLowerCase()));
+  const firstExistingCodeValue =
+    entries.find((entry) => entry.path.split(".").pop()?.toLowerCase() === "code" && !isMissingValue(entry.value))
+      ?.value ?? null;
+  const seededCodeValue = isMissingValue(firstExistingCodeValue)
+    ? isMissingValue(fallbackCodeValue)
+      ? ""
+      : fallbackCodeValue
+    : firstExistingCodeValue;
+
+  const additions: SubmissionAllInputEntry[] = [];
+  [...specCodePaths]
+    .sort(sortPathsByDepth)
+    .forEach((path) => {
+      const normalizedPath = path.trim().toLowerCase();
+      if (!normalizedPath || existingNormalized.has(normalizedPath)) {
+        return;
+      }
+      existingNormalized.add(normalizedPath);
+      additions.push({
+        path,
+        value: seededCodeValue,
+        isRecommended: false,
+      });
+    });
+
+  if (additions.length === 0) {
+    return entries;
+  }
+  return [...entries, ...additions].sort((left, right) => left.path.localeCompare(right.path));
+}
+
 function buildDraftFieldEditorState(
   entries: SubmissionAllInputEntry[],
 ): Record<string, DraftFieldEditorValue> {
   const editors: Record<string, DraftFieldEditorValue> = {};
   entries.forEach((entry) => {
     const path = entry.path.trim();
-    if (!path || isMissingValue(entry.value) || editors[path]) {
+    if (!path || editors[path]) {
       return;
     }
-    const kind = inferFieldKind(entry.value);
+    const valueIsMissing = isMissingValue(entry.value);
+    const kind = valueIsMissing ? "string" : inferFieldKind(entry.value);
     let nextValue: boolean | string;
-    if (kind === "boolean") {
+    if (valueIsMissing) {
+      nextValue = "";
+    } else if (kind === "boolean") {
       nextValue = Boolean(entry.value);
     } else if (kind === "json") {
       nextValue = JSON.stringify(entry.value, null, 2);
@@ -1150,15 +1533,25 @@ function cloneDraftRecord(draft: Record<string, unknown>): Record<string, unknow
   return JSON.parse(JSON.stringify(draft)) as Record<string, unknown>;
 }
 
-function setValueByPath(target: Record<string, unknown>, path: string, value: unknown): boolean {
+function setValueByPath(
+  target: Record<string, unknown>,
+  path: string,
+  value: unknown,
+  options?: { createMissing?: boolean },
+): boolean {
   const segments = path.split(".").map((segment) => segment.trim()).filter(Boolean);
   if (segments.length === 0) {
     return false;
   }
+  const createMissing = Boolean(options?.createMissing);
   let cursor: Record<string, unknown> = target;
   for (let index = 0; index < segments.length - 1; index += 1) {
     const segment = segments[index];
-    const next = cursor[segment];
+    let next = cursor[segment];
+    if ((next === undefined || next === null) && createMissing) {
+      next = {};
+      cursor[segment] = next;
+    }
     const nextRecord = asRecord(next);
     if (!nextRecord) {
       return false;
@@ -1166,36 +1559,49 @@ function setValueByPath(target: Record<string, unknown>, path: string, value: un
     cursor = nextRecord;
   }
   const leaf = segments[segments.length - 1];
-  if (!Object.prototype.hasOwnProperty.call(cursor, leaf)) {
+  if (!createMissing && !Object.prototype.hasOwnProperty.call(cursor, leaf)) {
     return false;
   }
   cursor[leaf] = value;
   return true;
 }
 
-function applyLeafKeyRecursively(node: unknown, leafKey: string, value: unknown): boolean {
-  if (Array.isArray(node)) {
-    return node.reduce<boolean>(
-      (applied, item) => applyLeafKeyRecursively(item, leafKey, value) || applied,
-      false,
-    );
-  }
-  const record = asRecord(node);
-  if (!record) {
+function setValueByCandidatePaths(target: Record<string, unknown>, path: string, value: unknown): boolean {
+  const normalizedPath = path.trim();
+  if (!normalizedPath) {
     return false;
   }
-  let applied = false;
-  Object.entries(record).forEach(([key, nested]) => {
-    if (key.trim().toLowerCase() === leafKey) {
-      record[key] = value;
-      applied = true;
-      return;
+  const candidates = [
+    normalizedPath,
+    `inputs.${normalizedPath}`,
+    `builder.${normalizedPath}`,
+    `draft.${normalizedPath}`,
+  ];
+  for (const candidatePath of candidates) {
+    if (setValueByPath(target, candidatePath, value, { createMissing: false })) {
+      return true;
     }
-    if (Array.isArray(nested) || asRecord(nested)) {
-      applied = applyLeafKeyRecursively(nested, leafKey, value) || applied;
-    }
-  });
-  return applied;
+  }
+
+  const inputsRecord = asRecord(target.inputs);
+  if (inputsRecord && setValueByPath(target, `inputs.${normalizedPath}`, value, { createMissing: true })) {
+    return true;
+  }
+
+  const builderRecord = asRecord(target.builder);
+  if (builderRecord && setValueByPath(target, `builder.${normalizedPath}`, value, { createMissing: true })) {
+    return true;
+  }
+
+  const draftRecord = asRecord(target.draft);
+  if (draftRecord && setValueByPath(target, `draft.${normalizedPath}`, value, { createMissing: true })) {
+    return true;
+  }
+
+  if (setValueByPath(target, normalizedPath, value, { createMissing: true })) {
+    return true;
+  }
+  return false;
 }
 
 function mergeEditorValuesIntoDraft(
@@ -1207,48 +1613,15 @@ function mergeEditorValuesIntoDraft(
   }
 
   const next = cloneDraftRecord(draft);
-  const hasBuilderShape =
-    typeof next.workchain === "string" &&
-    toPositiveInteger(next.structure_pk) !== null &&
-    typeof next.code === "string";
-  const existingOverrides = asRecord(next.overrides);
-  const nextOverrides: Record<string, unknown> = existingOverrides ? { ...existingOverrides } : {};
-  const allInputsRecord = asRecord(next.all_inputs) ?? {};
-  const recommendedInputsRecord = asRecord(next.recommended_inputs) ?? {};
 
   Object.entries(valuesByPath).forEach(([path, value]) => {
     const normalizedPath = path.trim();
     if (!normalizedPath) {
       return;
     }
-    const appliedByPath = setValueByPath(next, normalizedPath, value);
-    const leaf = normalizedPath.toLowerCase().split(".").pop() ?? normalizedPath.toLowerCase();
-    const topLevelKey = normalizedPath.toLowerCase().split(".")[0] ?? "";
-    const appliedByLeaf = appliedByPath ? true : applyLeafKeyRecursively(next, leaf, value);
-    if ((hasBuilderShape || !appliedByLeaf) && !DRAFT_TOP_LEVEL_OVERRIDE_SKIP.has(topLevelKey)) {
-      nextOverrides[leaf] = value;
-    }
-    allInputsRecord[normalizedPath] = {
-      value,
-      is_recommended:
-        asRecord(allInputsRecord[normalizedPath])?.is_recommended ??
-        asRecord(allInputsRecord[normalizedPath])?.isRecommended ??
-        false,
-    };
-    if (Object.prototype.hasOwnProperty.call(recommendedInputsRecord, leaf)) {
-      recommendedInputsRecord[leaf] = value;
-    }
+    setValueByCandidatePaths(next, normalizedPath, value);
   });
 
-  if (Object.keys(nextOverrides).length > 0) {
-    next.overrides = nextOverrides;
-  }
-  if (Object.keys(allInputsRecord).length > 0) {
-    next.all_inputs = allInputsRecord;
-  }
-  if (Object.keys(recommendedInputsRecord).length > 0) {
-    next.recommended_inputs = recommendedInputsRecord;
-  }
   return next;
 }
 
@@ -1642,6 +2015,7 @@ export function SubmissionModal({
   const [expandedJsonFields, setExpandedJsonFields] = useState<Record<string, boolean>>({});
   const [globalOverridePath, setGlobalOverridePath] = useState("");
   const [globalOverrideValue, setGlobalOverrideValue] = useState("");
+  const [codeSearchByPath, setCodeSearchByPath] = useState<Record<string, string>>({});
   const [selectedNamespace, setSelectedNamespace] = useState("");
   const [showValidationDetails, setShowValidationDetails] = useState(false);
 
@@ -1662,25 +2036,183 @@ export function SubmissionModal({
     () => normalizePkMapEntries(submissionDraft?.meta.pk_map),
     [submissionDraft],
   );
-  const primaryFields = useMemo(
+  const basePrimaryFields = useMemo<SubmissionPrimaryFields>(
     () => (submissionDraft ? extractPrimaryFields(submissionDraft) : { code: null, structure: null, pseudos: null }),
     [submissionDraft],
+  );
+  const portSpec = useMemo(
+    () => normalizePortSpec(submissionDraft?.meta.port_spec),
+    [submissionDraft?.meta.port_spec],
+  );
+  const availableCodeOptions = useMemo(
+    () => normalizeCodeOptions(submissionDraft?.meta.available_codes),
+    [submissionDraft?.meta.available_codes],
   );
   const allInputEntries = useMemo(
     () => (submissionDraft ? allInputEntriesFromDraft(submissionDraft) : []),
     [submissionDraft],
   );
-  const inspectorInputEntries = useMemo(
-    () => buildInspectorInputEntries(allInputEntries),
-    [allInputEntries],
+  const allInputEntriesWithMetadata = useMemo(
+    () => buildMetadataFallbackEntries(allInputEntries, submissionDraft ?? null),
+    [allInputEntries, submissionDraft],
   );
+  const fallbackCodeValue = useMemo(() => {
+    const fromInputs = stringifyCompact(
+      findFirstNamedValue(
+        submissionDraft?.inputs ?? {},
+        new Set(["code", "code_label", "pw_code", "qe_code", "codes"]),
+      ),
+    );
+    if (fromInputs) {
+      return fromInputs;
+    }
+    const primaryCodeRaw = asRecord(submissionDraft?.primary_inputs)?.code;
+    const primaryCode = normalizePrimaryField("Code", primaryCodeRaw);
+    const fromPrimary = stringifyCompact(primaryCode?.value ?? "");
+    if (fromPrimary) {
+      return fromPrimary;
+    }
+    return availableCodeOptions[0]?.value ?? "";
+  }, [availableCodeOptions, submissionDraft?.inputs, submissionDraft?.primary_inputs]);
+  const inspectorInputEntries = useMemo(
+    () =>
+      ensureSpecCodeEntries(
+        buildInspectorInputEntries(allInputEntriesWithMetadata),
+        portSpec.codePaths,
+        fallbackCodeValue,
+      ),
+    [allInputEntriesWithMetadata, fallbackCodeValue, portSpec.codePaths],
+  );
+  const entryValueByPath = useMemo(
+    () => buildEntryValueMap(inspectorInputEntries),
+    [inspectorInputEntries],
+  );
+  const codeFieldPaths = useMemo(
+    () => collectCodePaths(inspectorInputEntries, portSpec),
+    [inspectorInputEntries, portSpec],
+  );
+  const existingCodePaths = useMemo(() => {
+    const existing = new Set<string>();
+    inspectorInputEntries.forEach((entry) => {
+      const leaf = entry.path.split(".").pop()?.toLowerCase() ?? "";
+      if (leaf === "code" || codeFieldPaths.has(entry.path)) {
+        existing.add(entry.path);
+      }
+    });
+    return existing;
+  }, [codeFieldPaths, inspectorInputEntries]);
+  const primaryCodePath = useMemo(() => {
+    const orderedSpecPaths = [...portSpec.codePaths].sort(sortPathsByDepth);
+    const requiredSpecPaths = orderedSpecPaths.filter((path) => portSpec.requiredCodePaths.has(path));
+    const preferredSpecPaths = requiredSpecPaths.length > 0 ? requiredSpecPaths : orderedSpecPaths;
+    for (const specPath of preferredSpecPaths) {
+      if (existingCodePaths.has(specPath)) {
+        return specPath;
+      }
+    }
+    if (preferredSpecPaths.length > 0) {
+      return preferredSpecPaths[0] ?? null;
+    }
+    const fallbackCandidates = [...existingCodePaths];
+    if (fallbackCandidates.length === 0) {
+      fallbackCandidates.push(...codeFieldPaths);
+    }
+    if (fallbackCandidates.length === 0) {
+      return null;
+    }
+    fallbackCandidates.sort(sortPathsByDepth);
+    return fallbackCandidates[0] ?? null;
+  }, [codeFieldPaths, existingCodePaths, portSpec.codePaths, portSpec.requiredCodePaths]);
+  const primaryCodeValue = useMemo(() => {
+    if (!primaryCodePath) {
+      return "";
+    }
+    const editorValue = draftState[primaryCodePath];
+    if (editorValue) {
+      return String(editorValue.value ?? "").trim();
+    }
+    return stringifyCompact(entryValueByPath[primaryCodePath] ?? "");
+  }, [draftState, entryValueByPath, primaryCodePath]);
+  const primaryFields = useMemo<SubmissionPrimaryFields>(() => {
+    if (!submissionDraft) {
+      return { code: null, structure: null, pseudos: null };
+    }
+    const resolvedCode = normalizePrimaryField("Code", primaryCodeValue);
+    return {
+      ...basePrimaryFields,
+      code: resolvedCode ?? basePrimaryFields.code,
+    };
+  }, [basePrimaryFields, primaryCodeValue, submissionDraft]);
+  const effectiveCodeOptions = useMemo(() => {
+    if (availableCodeOptions.length > 0) {
+      return availableCodeOptions;
+    }
+    return buildFallbackCodeOptions(codeFieldPaths, entryValueByPath, primaryCodeValue);
+  }, [availableCodeOptions, codeFieldPaths, entryValueByPath, primaryCodeValue]);
+  const inheritedCodePaths = useMemo(() => {
+    const inherited = new Set<string>();
+    if (!primaryCodePath) {
+      return inherited;
+    }
+    codeFieldPaths.forEach((path) => {
+      if (path === primaryCodePath) {
+        return;
+      }
+      const editorValue = draftState[path];
+      const currentValue = editorValue
+        ? String(editorValue.value ?? "").trim()
+        : stringifyCompact(entryValueByPath[path] ?? "");
+      const pathHasField = Boolean(draftState[path]);
+      const primaryHasField = Boolean(primaryCodePath && draftState[primaryCodePath]);
+      if (pathHasField && primaryHasField && !currentValue) {
+        inherited.add(path);
+        return;
+      }
+      if (pathHasField && primaryHasField && primaryCodeValue && currentValue === primaryCodeValue) {
+        inherited.add(path);
+      }
+    });
+    return inherited;
+  }, [codeFieldPaths, draftState, entryValueByPath, primaryCodePath, primaryCodeValue]);
   const groupedInputSections = useMemo(
     () => (submissionDraft ? buildInputGroupsForModal(submissionDraft, inspectorInputEntries) : []),
     [inspectorInputEntries, submissionDraft],
   );
-  const namespaceTree = useMemo(
-    () => buildNamespaceTreeIndex(inspectorInputEntries),
+  const structureSummaryPath = useMemo(
+    () => findFirstPathByLeafCandidates(inspectorInputEntries, ["structure", "structure_pk", "structure_id"]),
     [inspectorInputEntries],
+  );
+  const pseudosSummaryPath = useMemo(
+    () =>
+      findFirstPathByLeafCandidates(inspectorInputEntries, [
+        "pseudos",
+        "pseudo",
+        "pseudopotentials",
+        "pseudo_family",
+        "pseudo_family_label",
+      ]),
+    [inspectorInputEntries],
+  );
+  const kpointsSummaryPath = useMemo(
+    () =>
+      findFirstPathByLeafCandidates(inspectorInputEntries, [
+        "kpoints",
+        "k_points",
+        "kpoint_mesh",
+        "kpoints_mesh",
+        "mesh",
+        "kpoints_distance",
+        "kpoint_distance",
+      ]),
+    [inspectorInputEntries],
+  );
+  const protocolSummaryPath = useMemo(
+    () => findFirstPathByLeafCandidates(inspectorInputEntries, ["protocol", "relax_type"]),
+    [inspectorInputEntries],
+  );
+  const namespaceTree = useMemo(
+    () => buildNamespaceTreeIndex(inspectorInputEntries, portSpec.namespaces),
+    [inspectorInputEntries, portSpec.namespaces],
   );
   const namespaceSidebarItems = useMemo(
     () => flattenNamespaceTree(namespaceTree.childrenByNamespace),
@@ -1720,10 +2252,6 @@ export function SubmissionModal({
   const globalOverrideOptions = useMemo(
     () => allDraftFields.filter((field) => field.kind !== "json"),
     [allDraftFields],
-  );
-  const parallelEntries = useMemo(
-    () => buildParallelEntries(submissionDraft?.meta.parallel_settings),
-    [submissionDraft],
   );
   const validationSummary = useMemo(
     () => normalizeValidationSummary(submissionDraft?.meta.validation_summary, asRecord(submissionDraft?.meta.validation)),
@@ -1776,14 +2304,22 @@ export function SubmissionModal({
       setExpandedJsonFields({});
       setGlobalOverridePath("");
       setGlobalOverrideValue("");
+      setCodeSearchByPath({});
       setSelectedNamespace("");
       setShowValidationDetails(false);
       return;
     }
-    const nextDraftState = buildDraftFieldEditorState(allInputEntries);
+    const nextDraftState = buildDraftFieldEditorState(inspectorInputEntries);
+    const nextCodeSearch: Record<string, string> = {};
+    Object.keys(nextDraftState).forEach((path) => {
+      if (codeFieldPaths.has(path)) {
+        nextCodeSearch[path] = "";
+      }
+    });
     setDraftState(nextDraftState);
     setDraftStateErrors({});
     setExpandedJsonFields({});
+    setCodeSearchByPath(nextCodeSearch);
     const preferredOverride =
       Object.values(nextDraftState).find((field) =>
         ["kpoints_distance", "kpoint_distance", "ecutwfc", "ecutrho"].includes(
@@ -1798,7 +2334,7 @@ export function SubmissionModal({
       setGlobalOverrideValue("");
     }
     setShowValidationDetails(false);
-  }, [allInputEntries, open, submissionDraft]);
+  }, [codeFieldPaths, inspectorInputEntries, open, submissionDraft]);
 
   useEffect(() => {
     if (!open) {
@@ -1815,6 +2351,18 @@ export function SubmissionModal({
     typeof submissionDraft?.meta.target_computer === "string" && submissionDraft.meta.target_computer.trim()
       ? submissionDraft.meta.target_computer.trim()
       : null;
+  const targetWorkdirPath = useMemo(
+    () =>
+      findFirstPathByLeafCandidates(inspectorInputEntries, ["workdir", "remote_workdir", "working_directory"]) ??
+      null,
+    [inspectorInputEntries],
+  );
+  const targetWorkdirValue = targetWorkdirPath
+    ? draftState[targetWorkdirPath]?.value ?? entryValueByPath[targetWorkdirPath]
+    : null;
+  const targetWorkdirUiType = targetWorkdirPath
+    ? inferUiTypeFromPathAndValue(targetWorkdirPath, targetWorkdirValue)
+    : "text";
   const selectedJobsForSummary = isBatchDraft && selectedBatchJobs.length > 0 ? selectedBatchJobs : batchJobs;
   const symmetrySummary = useMemo(() => {
     if (isBatchDraft) {
@@ -1870,21 +2418,17 @@ export function SubmissionModal({
     return direct ? `${direct} atoms` : "N/A";
   }, [isBatchDraft, selectedJobsForSummary, singleDraftPayload, submissionDraft?.meta.num_atoms]);
   const keyParameterEntries = useMemo(() => {
-    const source = submissionDraft?.inputs ?? {};
     const kpoints =
-      findFirstNamedValue(source, new Set(["kpoints_distance", "kpoint_distance", "kpoints_mesh", "kpoints"])) ??
+      (kpointsSummaryPath ? draftState[kpointsSummaryPath]?.value ?? entryValueByPath[kpointsSummaryPath] : null) ??
       findFirstNamedValue(submissionDraft?.meta.validation, new Set(["kpoints_distance", "kpoint_distance", "kpoints_mesh", "kpoints"]));
-    const ecutwfc = findFirstNamedValue(source, new Set(["ecutwfc"]));
-    const ecutrho = findFirstNamedValue(source, new Set(["ecutrho"]));
-    const cutoffs = [ecutwfc !== null && ecutwfc !== undefined ? `ecutwfc=${stringifyCompact(ecutwfc)}` : null, ecutrho !== null && ecutrho !== undefined ? `ecutrho=${stringifyCompact(ecutrho)}` : null]
-      .filter((item): item is string => Boolean(item))
-      .join(", ");
+    const protocol =
+      (protocolSummaryPath ? draftState[protocolSummaryPath]?.value ?? entryValueByPath[protocolSummaryPath] : null) ??
+      findFirstNamedValue(submissionDraft?.meta.validation, new Set(["protocol", "relax_type"]));
     return [
-      { label: "Code", value: primaryFields.code?.value ?? "System Selected" },
-      { label: "K-points", value: kpoints ?? "Default" },
-      { label: "Cutoffs", value: cutoffs || "Default" },
+      { label: "K-points", value: kpoints ?? "Default", path: kpointsSummaryPath },
+      { label: "Protocol", value: protocol ?? "Default", path: protocolSummaryPath },
     ];
-  }, [primaryFields.code?.value, submissionDraft?.inputs, submissionDraft?.meta.validation]);
+  }, [draftState, entryValueByPath, kpointsSummaryPath, protocolSummaryPath, submissionDraft?.meta.validation]);
   const isInlineMode = mode === "inline";
   const isExpanded = isInlineMode ? expanded : true;
   const canClose = state.status !== "submitting";
@@ -1957,6 +2501,7 @@ export function SubmissionModal({
     title: string,
     field: SubmissionPrimaryInputField | null,
     missingLabel: string,
+    pathHint?: string | null,
   ) => {
     const fieldPk = toPositiveInteger(field?.pk);
     return (
@@ -1965,6 +2510,11 @@ export function SubmissionModal({
         className="rounded-xl border border-slate-200/85 bg-white/85 px-3 py-3 dark:border-slate-800 dark:bg-slate-950/50"
       >
         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">{title}</p>
+        {pathHint ? (
+          <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${pathHint}`}>
+            inputs.{pathHint}
+          </p>
+        ) : null}
         {field && !isMissingValue(field.value) ? (
           <div className="mt-2 text-sm text-slate-800 dark:text-slate-100">
             {fieldPk !== null ? (
@@ -1993,8 +2543,14 @@ export function SubmissionModal({
     path: string,
     uiType: string,
     compact = false,
+    options?: {
+      isCodeField?: boolean;
+      isInheritedCode?: boolean;
+    },
   ): ReactNode => {
     const field = draftState[path];
+    const isCodeField = Boolean(options?.isCodeField);
+    const isInheritedCode = Boolean(options?.isInheritedCode);
     if (!field) {
       return (
         <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">
@@ -2003,6 +2559,111 @@ export function SubmissionModal({
       );
     }
     const error = draftStateErrors[path];
+
+    if (isCodeField) {
+      const currentValue = String(field.value ?? "");
+      const searchValue = codeSearchByPath[path] ?? "";
+      const normalizedFilter = searchValue.trim().toLowerCase();
+      const filteredOptions = effectiveCodeOptions
+        .filter((option) =>
+          !normalizedFilter ||
+          option.label.toLowerCase().includes(normalizedFilter) ||
+          option.value.toLowerCase().includes(normalizedFilter),
+        )
+        .slice(0, 80);
+      const hasSelectableOptions = effectiveCodeOptions.length > 0;
+      const hasCurrentOption = effectiveCodeOptions.some((option) => option.value === currentValue);
+
+      if (hasSelectableOptions) {
+        return (
+          <div className="min-w-0 space-y-1">
+            {isInheritedCode ? (
+              <p className="text-[10px] text-slate-500 dark:text-slate-400">
+                Inherited from inputs.{primaryCodePath ?? "code"} (edit to override)
+              </p>
+            ) : null}
+            <input
+              type="text"
+              value={searchValue}
+              onChange={(event) =>
+                setCodeSearchByPath((current) => ({
+                  ...current,
+                  [path]: event.currentTarget.value,
+                }))
+              }
+              className={cn(
+                "w-full rounded-md border px-2 py-1 text-[11px] text-slate-700 outline-none transition-colors dark:bg-slate-900 dark:text-slate-200",
+                error
+                  ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
+                  : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+              )}
+              placeholder="Search available codes"
+            />
+            <select
+              value={currentValue}
+              onChange={(event) => updateDraftFieldValue(path, event.currentTarget.value)}
+              className={cn(
+                "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+                compact ? "h-8" : "h-9",
+                error
+                  ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
+                  : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+              )}
+            >
+              {!hasCurrentOption && currentValue ? (
+                <option value={currentValue}>{`Current: ${currentValue}`}</option>
+              ) : null}
+              {filteredOptions.length === 0 ? (
+                <option value={currentValue} disabled>
+                  No matching codes
+                </option>
+              ) : null}
+              {filteredOptions.map((option) => (
+                <option key={`${turnId}-${path}-${option.value}`} value={option.value}>
+                  {option.plugin ? `${option.label} (${option.plugin})` : option.label}
+                </option>
+              ))}
+            </select>
+            {error ? (
+              <p className="text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
+            ) : null}
+          </div>
+        );
+      }
+
+      return (
+        <div className="min-w-0">
+          {isInheritedCode ? (
+            <p className="mb-1 text-[10px] text-slate-500 dark:text-slate-400">
+              Inherited from inputs.{primaryCodePath ?? "code"} (edit to override)
+            </p>
+          ) : null}
+          <input
+            type="text"
+            value={currentValue}
+            onChange={(event) => updateDraftFieldValue(path, event.currentTarget.value)}
+            className={cn(
+              "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+              compact ? "h-8" : "h-9",
+              error
+                ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
+                : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+            )}
+            placeholder={
+              submissionDraft?.meta.required_code_plugin
+                ? `Select ${submissionDraft.meta.required_code_plugin} code`
+                : "Select code label"
+            }
+          />
+          <p className="mt-1 text-[10px] text-slate-500 dark:text-slate-400">
+            No code list available from worker; manual value is required.
+          </p>
+          {error ? (
+            <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
+          ) : null}
+        </div>
+      );
+    }
 
     if (uiType === "mesh") {
       const [m1, m2, m3] = parseMeshTriplet(field.value);
@@ -2345,6 +3006,11 @@ export function SubmissionModal({
               <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                 {entry.label}
               </p>
+              {entry.path ? (
+                <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${entry.path}`}>
+                  inputs.{entry.path}
+                </p>
+              ) : null}
               <p className="mt-1 break-all text-sm text-slate-800 dark:text-slate-100" title={stringifyCompact(entry.value)}>
                 {renderValueNode(entry.value, `${turnId}-key-parameter-${entry.label}`, onOpenDetail)}
               </p>
@@ -2527,11 +3193,58 @@ export function SubmissionModal({
           </div>
         ) : (
           <div className="mt-4 grid gap-3 sm:grid-cols-3">
-            {renderPrimaryCell("code", "Code", primaryFields.code, "System Selected")}
-            {renderPrimaryCell("structure", "Structure", primaryFields.structure, "Default")}
-            {renderPrimaryCell("pseudos", "Pseudopotentials", primaryFields.pseudos, "System Selected")}
+            {renderPrimaryCell(
+              "code",
+              primaryCodePath ? `Code (${primaryCodePath.split(".").pop()})` : "Code",
+              primaryFields.code,
+              "System Selected",
+              primaryCodePath,
+            )}
+            {renderPrimaryCell("structure", "Structure", primaryFields.structure, "Default", structureSummaryPath)}
+            {renderPrimaryCell(
+              "pseudos",
+              "Pseudopotentials",
+              primaryFields.pseudos,
+              "System Selected",
+              pseudosSummaryPath,
+            )}
           </div>
         )}
+
+        <div className="mt-3 rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900/35">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Target Computer</p>
+          <div className="mt-1.5 grid gap-3 sm:grid-cols-2">
+            <div className="min-w-0">
+              <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">Computer</p>
+              <div className="mt-1 text-sm text-slate-800 dark:text-slate-100">
+                {targetComputer ? (
+                  renderValueNode(targetComputer, `${turnId}-target`, onOpenDetail)
+                ) : (
+                  <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                    System Selected
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="min-w-0">
+              <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">Workdir</p>
+              {targetWorkdirPath ? (
+                <p className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${targetWorkdirPath}`}>
+                  inputs.{targetWorkdirPath}
+                </p>
+              ) : null}
+              <div className="mt-1">
+                {targetWorkdirPath ? (
+                  renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, false)
+                ) : (
+                  <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                    Not available
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
 
         <div className="mt-3 rounded-xl border border-slate-200/85 bg-slate-50/75 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/35">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2681,6 +3394,8 @@ export function SubmissionModal({
                         const uiType = inferUiTypeFromPathAndValue(entry.path, entry.value);
                         const field = draftState[entry.path];
                         const isModified = field ? isFieldModified(field) : false;
+                        const isCodeField = codeFieldPaths.has(entry.path) || leafKey.toLowerCase() === "code";
+                        const isInheritedCode = isCodeField && inheritedCodePaths.has(entry.path);
                         return (
                           <tr
                             key={`${turnId}-namespace-entry-${entry.path}`}
@@ -2704,9 +3419,24 @@ export function SubmissionModal({
                                     Modified
                                   </span>
                                 ) : null}
+                                {isCodeField ? (
+                                  <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                                    Code
+                                  </span>
+                                ) : null}
+                                {isInheritedCode ? (
+                                  <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                                    Inherited
+                                  </span>
+                                ) : null}
                               </div>
                             </td>
-                            <td className="px-2 py-1.5">{renderEditableFieldControl(entry.path, uiType, true)}</td>
+                            <td className="px-2 py-1.5">
+                              {renderEditableFieldControl(entry.path, uiType, true, {
+                                isCodeField,
+                                isInheritedCode,
+                              })}
+                            </td>
                           </tr>
                         );
                       })}
@@ -2719,40 +3449,6 @@ export function SubmissionModal({
                 </p>
               )}
             </div>
-          </div>
-        </div>
-
-        <div className="mt-3 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900/35">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Target Computer</p>
-            <div className="mt-1.5 text-sm text-slate-800 dark:text-slate-100">
-              {targetComputer ? (
-                renderValueNode(targetComputer, `${turnId}-target`, onOpenDetail)
-              ) : (
-                <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                  System Selected
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900/35">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Parallel Settings</p>
-            {parallelEntries.length > 0 ? (
-              <div className="mt-1.5 flex flex-wrap gap-1.5 text-xs text-slate-700 dark:text-slate-200">
-                {parallelEntries.map(([key, value]) => (
-                  <span
-                    key={`${turnId}-parallel-${key}`}
-                    className="rounded-full bg-white/90 px-2 py-0.5 dark:bg-slate-800/90"
-                  >
-                    {formatSettingKey(key)}: {renderValueNode(value, `${turnId}-parallel-${key}`, onOpenDetail)}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <span className="mt-1.5 inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                Default
-              </span>
-            )}
           </div>
         </div>
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { type DragEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Code2, Cpu, Loader2, PlugZap } from "lucide-react";
 
@@ -9,6 +9,7 @@ import {
   switchBridgeProfile,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import type { BridgeCodeResource, BridgeComputerResource, ResourceAttachment } from "@/types/aiida";
 
 const STATUS_POLL_INTERVAL_MS = 10_000;
 const DETAILS_POLL_INTERVAL_MS = 30_000;
@@ -16,6 +17,13 @@ const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001";
 const DEFAULT_ENVIRONMENT = "Remote Bridge";
 
 type HoveredDetail = "computers" | "codes" | "plugins" | null;
+const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
+
+type HoveredResourceItem = {
+  id: string;
+  label: string;
+  attachment: ResourceAttachment;
+};
 
 function resolvePortLabel(url: string): string {
   try {
@@ -46,6 +54,45 @@ function formatCodeDetail(item: { label: string; default_plugin: string | null; 
   const plugin = item.default_plugin ? ` • ${item.default_plugin}` : "";
   const computer = item.computer_label ? ` @ ${item.computer_label}` : "";
   return `${item.label}${plugin}${computer}`;
+}
+
+function toComputerAttachment(item: BridgeComputerResource): ResourceAttachment {
+  const label = formatComputerDetail(item);
+  const value = item.label?.trim() || item.hostname?.trim() || label;
+  return {
+    kind: "computer",
+    value,
+    label,
+    plugin: null,
+    computerLabel: item.label?.trim() || null,
+    hostname: item.hostname?.trim() || null,
+  };
+}
+
+function toCodeAttachment(item: BridgeCodeResource): ResourceAttachment {
+  const codeLabel = item.label?.trim() || "code";
+  const computerLabel = item.computer_label?.trim() || null;
+  const value = computerLabel ? `${codeLabel}@${computerLabel}` : codeLabel;
+  return {
+    kind: "code",
+    value,
+    label: formatCodeDetail(item),
+    plugin: item.default_plugin?.trim() || null,
+    computerLabel,
+    hostname: null,
+  };
+}
+
+function toPluginAttachment(pluginName: string): ResourceAttachment {
+  const value = pluginName.trim();
+  return {
+    kind: "plugin",
+    value,
+    label: value,
+    plugin: value || null,
+    computerLabel: null,
+    hostname: null,
+  };
 }
 
 export function BridgeStatus() {
@@ -96,23 +143,56 @@ export function BridgeStatus() {
   const computers = resourcesQuery.data?.computers ?? [];
   const codes = resourcesQuery.data?.codes ?? [];
   const profileOptions = profilesQuery.data?.profiles ?? [];
-  const pluginCount = pluginNames.length;
+  const pluginCount = pluginNames.length || resourceCounts.workchains;
   const computerCount = computers.length || resourceCounts.computers;
   const codeCount = codes.length || resourceCounts.codes;
   const portLabel = useMemo(() => resolvePortLabel(bridgeUrl), [bridgeUrl]);
 
   const hoveredItems = useMemo(() => {
     if (hoveredDetail === "computers") {
-      return computers.map((item) => formatComputerDetail(item));
+      return computers.map((item) => {
+        const attachment = toComputerAttachment(item);
+        return {
+          id: `computer:${attachment.value}`,
+          label: attachment.label,
+          attachment,
+        } satisfies HoveredResourceItem;
+      });
     }
     if (hoveredDetail === "codes") {
-      return codes.map((item) => formatCodeDetail(item));
+      return codes.map((item) => {
+        const attachment = toCodeAttachment(item);
+        return {
+          id: `code:${attachment.value}`,
+          label: attachment.label,
+          attachment,
+        } satisfies HoveredResourceItem;
+      });
     }
     if (hoveredDetail === "plugins") {
-      return pluginNames;
+      return pluginNames
+        .filter((pluginName) => pluginName.trim())
+        .map((pluginName) => {
+          const attachment = toPluginAttachment(pluginName);
+          return {
+            id: `plugin:${attachment.value}`,
+            label: attachment.label,
+            attachment,
+          } satisfies HoveredResourceItem;
+        });
     }
     return [];
   }, [codes, computers, hoveredDetail, pluginNames]);
+
+  const handleResourceDragStart = (event: DragEvent<HTMLDivElement>, attachment: ResourceAttachment) => {
+    const cleanedValue = attachment.value.trim();
+    if (!cleanedValue) {
+      return;
+    }
+    event.dataTransfer.effectAllowed = "copy";
+    event.dataTransfer.setData(RESOURCE_ATTACHMENT_DRAG_MIME, JSON.stringify(attachment));
+    event.dataTransfer.setData("text/plain", cleanedValue);
+  };
 
   return (
     <section className="relative z-40 min-h-[220px] overflow-visible rounded-2xl border border-zinc-200/80 bg-white/65 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/45">
@@ -230,14 +310,23 @@ export function BridgeStatus() {
               <p className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
                 {hoveredDetail === "computers" ? "Computers" : hoveredDetail === "codes" ? "Codes" : "Plugins"}
               </p>
+              <p className="mb-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
+                Drag items to the chat composer to attach.
+              </p>
               {hoveredItems.length === 0 ? (
                 <p className="text-[11px] text-zinc-500 dark:text-zinc-400">No details reported.</p>
               ) : (
                 <div className="space-y-1">
                   {hoveredItems.map((item) => (
-                    <p key={item} className="truncate rounded-md px-2 py-1 text-[11px] text-zinc-700 dark:text-zinc-200">
-                      {item}
-                    </p>
+                    <div
+                      key={item.id}
+                      draggable
+                      onDragStart={(event) => handleResourceDragStart(event, item.attachment)}
+                      className="cursor-grab truncate rounded-md border border-transparent px-2 py-1 text-[11px] text-zinc-700 transition-colors active:cursor-grabbing hover:border-zinc-200 hover:bg-zinc-100/80 dark:text-zinc-200 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
+                      title={item.label}
+                    >
+                      {item.label}
+                    </div>
                   ))}
                 </div>
               )}

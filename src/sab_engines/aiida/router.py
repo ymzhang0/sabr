@@ -29,7 +29,7 @@ from .presenters.node_view import (
     attach_tree_links as _attach_tree_links,
     enrich_process_detail_payload as _enrich_process_detail_payload,
     extract_folder_preview as _extract_folder_preview,
-    serialize_group_labels as _serialize_group_labels,
+    serialize_groups as _serialize_groups,
     serialize_processes as _serialize_processes,
 )
 from .presenters.workflow_view import (
@@ -38,9 +38,15 @@ from .presenters.workflow_view import (
     format_single_submission_response,
 )
 from .service import (
+    add_nodes_to_group,
+    create_group,
+    delete_group,
+    export_group,
     get_context_nodes,
     get_recent_nodes,
-    list_group_labels,
+    list_groups,
+    rename_group,
+    soft_delete_node,
     hub,
 )
 
@@ -137,6 +143,22 @@ class BridgeSwitchProfileRequest(BaseModel):
 class BridgeSwitchProfileResponse(BaseModel):
     status: str = "switched"
     current_profile: str | None = None
+
+
+class FrontendGroupCreateRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=255)
+
+
+class FrontendGroupRenameRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=255)
+
+
+class FrontendGroupAssignNodesRequest(BaseModel):
+    node_pks: list[int] = Field(default_factory=list)
+
+
+class FrontendNodeSoftDeleteRequest(BaseModel):
+    deleted: bool = True
 
 
 class NodeHoverMetadataResponse(BaseModel):
@@ -330,10 +352,10 @@ def _clear_pending_submission_memory(state: Any) -> None:
         logger.warning(log_event("aiida.frontend.pending_submission.clear_failed", error=str(error)))
 
 
-def _get_frontend_group_labels() -> list[str]:
+def _get_frontend_groups() -> list[dict[str, Any]]:
     if not hub.current_profile:
         hub.start()
-    return list_group_labels()
+    return list_groups()
 
 
 def _get_frontend_nodes(
@@ -344,6 +366,15 @@ def _get_frontend_nodes(
     if not hub.current_profile:
         hub.start()
     return get_recent_nodes(limit=limit, group_label=group_label, node_type=node_type)
+
+
+def _raise_worker_http_error(exc: Exception) -> None:
+    if isinstance(exc, BridgeOfflineError):
+        raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
+    if isinstance(exc, BridgeAPIError):
+        detail = exc.payload if isinstance(exc.payload, dict) else {"error": exc.message, "details": exc.payload}
+        raise HTTPException(status_code=max(400, int(exc.status_code or 502)), detail=detail) from exc
+    raise HTTPException(status_code=500, detail={"error": str(exc)}) from exc
 
 
 def _normalize_model_name(name: str) -> str:
@@ -617,7 +648,7 @@ async def frontend_bootstrap(request: Request):
         processes = []
 
     try:
-        groups = _get_frontend_group_labels()
+        groups = _get_frontend_groups()
     except Exception as error:  # noqa: BLE001
         logger.exception(log_event("aiida.frontend.bootstrap.groups.failed", error=str(error)))
         groups = []
@@ -629,7 +660,7 @@ async def frontend_bootstrap(request: Request):
 
     return {
         "processes": _serialize_processes(processes),
-        "groups": _serialize_group_labels(groups),
+        "groups": _serialize_groups(groups),
         "chat": {
             "messages": chat_history,
             "version": int(getattr(state, "chat_version", 0)),
@@ -647,11 +678,77 @@ async def frontend_bootstrap(request: Request):
 @router.get("/frontend/groups", tags=[FRONTEND_TAG])
 async def frontend_groups():
     try:
-        items = _get_frontend_group_labels()
+        items = _get_frontend_groups()
     except Exception as error:  # noqa: BLE001
         logger.exception(log_event("aiida.frontend.groups.failed", error=str(error)))
         items = []
-    return {"items": _serialize_group_labels(items)}
+    return {"items": _serialize_groups(items)}
+
+
+@router.post("/frontend/groups/create", tags=[FRONTEND_TAG])
+async def frontend_create_group(payload: FrontendGroupCreateRequest):
+    if not hub.current_profile:
+        hub.start()
+    try:
+        response = create_group(payload.label)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    return {"item": _serialize_groups([response])[0] if isinstance(response, dict) else None}
+
+
+@router.put("/frontend/groups/{pk}/label", tags=[FRONTEND_TAG])
+async def frontend_rename_group(pk: int, payload: FrontendGroupRenameRequest):
+    if not hub.current_profile:
+        hub.start()
+    try:
+        response = rename_group(pk, payload.label)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    return {"item": _serialize_groups([response])[0] if isinstance(response, dict) else None}
+
+
+@router.delete("/frontend/groups/{pk}", tags=[FRONTEND_TAG])
+async def frontend_delete_group(pk: int):
+    if not hub.current_profile:
+        hub.start()
+    try:
+        response = delete_group(pk)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    return response if isinstance(response, dict) else {"status": "deleted", "pk": int(pk)}
+
+
+@router.post("/frontend/groups/{pk}/nodes", tags=[FRONTEND_TAG])
+async def frontend_add_nodes_to_group(pk: int, payload: FrontendGroupAssignNodesRequest):
+    if not hub.current_profile:
+        hub.start()
+    try:
+        response = add_nodes_to_group(pk, payload.node_pks)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    if not isinstance(response, dict):
+        return {"group": None, "added": [], "missing": []}
+    group_payload = response.get("group")
+    response_payload = dict(response)
+    response_payload["group"] = _serialize_groups([group_payload])[0] if isinstance(group_payload, dict) else None
+    return response_payload
+
+
+@router.get("/frontend/groups/{pk}/export", tags=[FRONTEND_TAG])
+async def frontend_export_group(pk: int):
+    if not hub.current_profile:
+        hub.start()
+    try:
+        response = export_group(pk)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    if not isinstance(response, dict):
+        return {"group": None, "nodes": []}
+    group_payload = response.get("group")
+    return {
+        "group": _serialize_groups([group_payload])[0] if isinstance(group_payload, dict) else None,
+        "nodes": response.get("nodes") if isinstance(response.get("nodes"), list) else [],
+    }
 
 
 @router.post("/frontend/archives/upload", tags=[FRONTEND_TAG])
@@ -701,6 +798,21 @@ async def frontend_processes(
 )
 async def frontend_node_hover_metadata(pk: int = ApiPath(..., ge=1)) -> NodeHoverMetadataResponse:
     return _get_node_hover_metadata(pk)
+
+
+@router.post("/frontend/nodes/{pk}/soft-delete", tags=[FRONTEND_TAG])
+async def frontend_node_soft_delete(
+    pk: int = ApiPath(..., ge=1),
+    payload: FrontendNodeSoftDeleteRequest | None = None,
+):
+    if not hub.current_profile:
+        hub.start()
+    deleted = bool(payload.deleted) if isinstance(payload, FrontendNodeSoftDeleteRequest) else True
+    try:
+        response = soft_delete_node(pk, deleted=deleted)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    return response if isinstance(response, dict) else {"pk": int(pk), "soft_deleted": deleted}
 
 
 @router.get("/frontend/processes/stream", tags=[FRONTEND_TAG])

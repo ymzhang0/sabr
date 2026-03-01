@@ -1,4 +1,4 @@
-import { Bot, ChevronDown, Copy, Paperclip, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
+import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, PlugZap, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
 import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { cancelPendingSubmission, getNodeHoverMetadata, submitPreviewDraft } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { ChatMessage, FocusNode, NodeHoverMetadataResponse } from "@/types/aiida";
+import type { ChatMessage, FocusNode, NodeHoverMetadataResponse, ResourceAttachment } from "@/types/aiida";
 
 type ChatTurn = {
   turnId: number;
@@ -49,6 +49,7 @@ type NodeHoverMetadataState = {
 const SUBMISSION_DRAFT_TAG = "[SUBMISSION_DRAFT]";
 const SUBMISSION_DRAFT_JSON_GLOBAL_REGEX = /(?:\[SUBMISSION_DRAFT\])\s*(\{[\s\S]*?\})/gis;
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
+const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
 
 const FRIENDLY_TOOL_STEP_MAP: Record<string, string> = {
   inspect_process: "Inspecting process details...",
@@ -237,6 +238,12 @@ function normalizeSubmissionDraftPreview(rawSubmissionDraft: Record<string, unkn
       all_inputs: rawAllInputs ?? {},
       input_groups: rawInputGroups,
       structure_metadata: Array.isArray(metaRecord.structure_metadata) ? metaRecord.structure_metadata : [],
+      available_codes: Array.isArray(metaRecord.available_codes) ? metaRecord.available_codes : [],
+      required_code_plugin:
+        typeof metaRecord.required_code_plugin === "string" && metaRecord.required_code_plugin.trim()
+          ? metaRecord.required_code_plugin.trim()
+          : null,
+      port_spec: asRecord(metaRecord.port_spec),
     },
   };
 
@@ -1104,7 +1111,7 @@ type ChatPanelProps = {
   contextNodes: FocusNode[];
   isLoading: boolean;
   activeTurnId: number | null;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, options?: { resourceAttachments?: ResourceAttachment[] }) => void;
   onStopResponse: () => void;
   onModelChange: (model: string) => void;
   onAttachFile: (file: File) => void;
@@ -1158,6 +1165,54 @@ function parseDroppedContextNode(event: DragEvent<HTMLElement>): FocusNode | nul
   };
 }
 
+function normalizeDroppedResourceAttachment(raw: unknown): ResourceAttachment | null {
+  const record = asRecord(raw);
+  if (!record) {
+    return null;
+  }
+  const rawKind = typeof record.kind === "string" ? record.kind.trim().toLowerCase() : "";
+  if (rawKind !== "computer" && rawKind !== "code" && rawKind !== "plugin") {
+    return null;
+  }
+  const value = typeof record.value === "string" ? record.value.trim() : "";
+  if (!value) {
+    return null;
+  }
+  const label =
+    typeof record.label === "string" && record.label.trim() ? record.label.trim() : value;
+  const plugin =
+    typeof record.plugin === "string" && record.plugin.trim() ? record.plugin.trim() : null;
+  const computerLabel =
+    typeof record.computerLabel === "string" && record.computerLabel.trim()
+      ? record.computerLabel.trim()
+      : typeof record.computer_label === "string" && record.computer_label.trim()
+        ? record.computer_label.trim()
+        : null;
+  const hostname =
+    typeof record.hostname === "string" && record.hostname.trim() ? record.hostname.trim() : null;
+  return {
+    kind: rawKind,
+    value,
+    label,
+    plugin,
+    computerLabel,
+    hostname,
+  };
+}
+
+function parseDroppedResourceAttachment(event: DragEvent<HTMLElement>): ResourceAttachment | null {
+  const rawPayload = event.dataTransfer.getData(RESOURCE_ATTACHMENT_DRAG_MIME);
+  if (!rawPayload) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(rawPayload);
+    return normalizeDroppedResourceAttachment(parsed);
+  } catch {
+    return null;
+  }
+}
+
 function insertPkTokenAtSelection(
   text: string,
   pk: number,
@@ -1174,6 +1229,20 @@ function insertPkTokenAtSelection(
   const inserted = `${needsLeadingSpace ? " " : ""}${token}${needsTrailingSpace ? " " : ""}`;
   const value = `${prefix}${inserted}${suffix}`;
   return { value, caret: prefix.length + inserted.length };
+}
+
+function resourceAttachmentIcon(kind: ResourceAttachment["kind"]) {
+  if (kind === "computer") {
+    return <Cpu className="h-3 w-3" />;
+  }
+  if (kind === "code") {
+    return <Code2 className="h-3 w-3" />;
+  }
+  return <PlugZap className="h-3 w-3" />;
+}
+
+function resourceAttachmentKey(attachment: ResourceAttachment): string {
+  return `${attachment.kind}:${attachment.value.trim().toLowerCase()}`;
 }
 
 export function ChatPanel({
@@ -1201,6 +1270,7 @@ export function ChatPanel({
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollRafRef = useRef<number | null>(null);
   const [draft, setDraft] = useState("");
+  const [resourceAttachments, setResourceAttachments] = useState<ResourceAttachment[]>([]);
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
@@ -1580,11 +1650,13 @@ export function ChatPanel({
     }
     setIsAutoScrollEnabled(true);
     scrollToBottom("smooth");
-    onSendMessage(text);
+    onSendMessage(text, { resourceAttachments });
   };
 
   const isDraftEmpty = !draft.trim();
   const hasContextNodes = contextNodes.length > 0;
+  const hasResourceAttachments = resourceAttachments.length > 0;
+  const hasAnyAttachments = hasContextNodes || hasResourceAttachments;
   const structureContextNodes = useMemo(
     () => contextNodes.filter((node) => node.node_type === STRUCTURE_NODE_TYPE),
     [contextNodes],
@@ -1668,13 +1740,33 @@ export function ChatPanel({
       const intent = buildQuickActionIntent(label, prompt, structureContextPks);
       setIsAutoScrollEnabled(true);
       scrollToBottom("smooth");
-      onSendMessage(intent);
+      onSendMessage(intent, { resourceAttachments });
     },
-    [onSendMessage, scrollToBottom, structureContextPks],
+    [onSendMessage, resourceAttachments, scrollToBottom, structureContextPks],
   );
+
+  const handleAttachResource = useCallback((attachment: ResourceAttachment) => {
+    const normalizedValue = attachment.value.trim();
+    if (!normalizedValue) {
+      return;
+    }
+    setResourceAttachments((current) => {
+      const key = resourceAttachmentKey(attachment);
+      if (current.some((item) => resourceAttachmentKey(item) === key)) {
+        return current;
+      }
+      return [...current, { ...attachment, value: normalizedValue }];
+    });
+  }, []);
+
+  const handleRemoveResourceAttachment = useCallback((attachment: ResourceAttachment) => {
+    const key = resourceAttachmentKey(attachment);
+    setResourceAttachments((current) => current.filter((item) => resourceAttachmentKey(item) !== key));
+  }, []);
 
   useEffect(() => {
     setDraft("");
+    setResourceAttachments([]);
     setDragOverZone(null);
     if (textareaRef.current) {
       textareaRef.current.style.height = "56px";
@@ -2039,6 +2131,12 @@ export function ChatPanel({
                 if (isLoading) {
                   return;
                 }
+                const droppedResource = parseDroppedResourceAttachment(event);
+                if (droppedResource) {
+                  handleAttachResource(droppedResource);
+                  setDragOverZone(null);
+                  return;
+                }
                 const droppedNode = parseDroppedContextNode(event);
                 if (!droppedNode) {
                   setDragOverZone(null);
@@ -2096,6 +2194,12 @@ export function ChatPanel({
                   setDragOverZone(null);
                   return;
                 }
+                const droppedResource = parseDroppedResourceAttachment(event);
+                if (droppedResource) {
+                  handleAttachResource(droppedResource);
+                  setDragOverZone(null);
+                  return;
+                }
                 const droppedNode = parseDroppedContextNode(event);
                 if (!droppedNode) {
                   setDragOverZone(null);
@@ -2105,27 +2209,47 @@ export function ChatPanel({
                 setDragOverZone(null);
               }}
             >
-              {hasContextNodes ? (
-                contextNodes.map((node) => (
-                  <span
-                    key={`context-chip-${node.pk}`}
-                    className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-zinc-300/80 bg-white/95 px-1.5 text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/85 dark:text-zinc-200"
-                  >
-                    <span aria-hidden>⚛️</span>
-                    <span className="font-mono">#{node.pk}</span>
-                    <button
-                      type="button"
-                      className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200/90 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
-                      onClick={() => onRemoveContextNode(node.pk)}
-                      aria-label={`Remove node ${node.pk} from context`}
+              {hasAnyAttachments ? (
+                <>
+                  {resourceAttachments.map((attachment) => (
+                    <span
+                      key={`resource-chip-${resourceAttachmentKey(attachment)}`}
+                      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-sky-300/80 bg-sky-50/95 px-1.5 text-[10px] text-sky-700 dark:border-sky-800/70 dark:bg-sky-950/40 dark:text-sky-200"
+                      title={attachment.label}
                     >
-                      <X className="h-2.5 w-2.5" />
-                    </button>
-                  </span>
-                ))
+                      <span aria-hidden>{resourceAttachmentIcon(attachment.kind)}</span>
+                      <span className="max-w-[180px] truncate">{attachment.value}</span>
+                      <button
+                        type="button"
+                        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-sky-600 transition-colors hover:bg-sky-200/90 hover:text-sky-900 dark:text-sky-300 dark:hover:bg-sky-800 dark:hover:text-sky-100"
+                        onClick={() => handleRemoveResourceAttachment(attachment)}
+                        aria-label={`Remove ${attachment.kind} attachment ${attachment.value}`}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                  {contextNodes.map((node) => (
+                    <span
+                      key={`context-chip-${node.pk}`}
+                      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-zinc-300/80 bg-white/95 px-1.5 text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/85 dark:text-zinc-200"
+                    >
+                      <span aria-hidden>⚛️</span>
+                      <span className="font-mono">#{node.pk}</span>
+                      <button
+                        type="button"
+                        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200/90 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                        onClick={() => onRemoveContextNode(node.pk)}
+                        aria-label={`Remove node ${node.pk} from context`}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </span>
+                  ))}
+                </>
               ) : (
                 <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
-                  Drop node here to attach context
+                  Drop node/resource here to attach context
                 </p>
               )}
             </div>

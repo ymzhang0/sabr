@@ -314,6 +314,42 @@ def test_normalize_submission_draft_payload_derives_primary_and_advanced() -> No
     assert normalized["meta"]["input_groups"] == normalized["input_groups"]
 
 
+def test_extract_submission_inputs_ignores_request_wrapper_only_payload() -> None:
+    draft = {
+        "workchain": "quantumespresso.pw.relax",
+        "structure_pk": 264,
+        "code": "pw-7.5@localhost",
+        "protocol": "moderate",
+        "overrides": {},
+    }
+
+    extracted = chat_service._extract_submission_inputs(draft)
+
+    assert extracted == {}
+
+
+def test_extract_submission_inputs_prefers_nested_inputs_namespace() -> None:
+    draft = {
+        "builder": {
+            "inputs": {
+                "base": {
+                    "pw": {
+                        "code": "pw-7.5@localhost",
+                    }
+                },
+                "structure": 264,
+            },
+            "code": "pw-7.5@localhost",
+            "protocol": "moderate",
+        }
+    }
+
+    extracted = chat_service._extract_submission_inputs(draft)
+
+    assert "base" in extracted
+    assert "code" not in extracted
+
+
 def test_normalize_submission_draft_payload_builds_port_grouping_with_ui_types() -> None:
     normalized = chat_service._normalize_submission_draft_payload(
         {

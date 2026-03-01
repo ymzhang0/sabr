@@ -65,6 +65,30 @@ def serialize_group_labels(labels: list[Any]) -> list[str]:
     return normalized
 
 
+def serialize_groups(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        label = _coerce_text(group.get("label"))
+        pk = _coerce_int(group.get("pk"))
+        if not label or pk is None or pk in seen:
+            continue
+        seen.add(pk)
+        count = _coerce_int(group.get("count")) or 0
+        item: dict[str, Any] = {
+            "pk": pk,
+            "label": label,
+            "count": max(0, count),
+        }
+        type_string = _coerce_text(group.get("type_string"))
+        if type_string:
+            item["type_string"] = type_string
+        payload.append(item)
+    return payload
+
+
 def _coerce_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -600,6 +624,7 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
 __all__ = [
     "serialize_processes",
     "serialize_group_labels",
+    "serialize_groups",
     "extract_folder_preview",
     "attach_tree_links",
     "enrich_process_detail_payload",

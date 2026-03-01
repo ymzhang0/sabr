@@ -11,11 +11,29 @@ export type ProcessItem = {
   preview_info?: Record<string, unknown> | null;
 };
 
+export type GroupItem = {
+  pk: number;
+  label: string;
+  count: number;
+  type_string?: string | null;
+};
+
 export type FocusNode = {
   pk: number;
   label: string;
   formula: string | null;
   node_type: string;
+};
+
+export type ResourceAttachmentKind = "computer" | "code" | "plugin";
+
+export type ResourceAttachment = {
+  kind: ResourceAttachmentKind;
+  value: string;
+  label: string;
+  plugin: string | null;
+  computerLabel: string | null;
+  hostname: string | null;
 };
 
 export type ChatMessage = {
@@ -38,7 +56,7 @@ export type LogsSnapshot = {
 
 export type BootstrapResponse = {
   processes: ProcessItem[];
-  groups: string[];
+  groups: GroupItem[];
   chat: ChatSnapshot;
   logs: LogsSnapshot;
   models: string[];
@@ -51,7 +69,7 @@ export type ProcessesResponse = {
 };
 
 export type GroupsResponse = {
-  items: string[];
+  items: GroupItem[];
 };
 
 export type UploadArchiveResponse = {
@@ -80,6 +98,33 @@ export type NodeHoverMetadataResponse = {
   formula: string | null;
   spacegroup: string | null;
   node_type: string;
+};
+
+export type GroupMutationResponse = {
+  item: GroupItem | null;
+};
+
+export type GroupAssignNodesResponse = {
+  group: GroupItem | null;
+  added: number[];
+  missing: number[];
+};
+
+export type GroupDeleteResponse = {
+  status: string;
+  pk: number;
+  label?: string;
+  count?: number;
+};
+
+export type GroupExportResponse = {
+  group: GroupItem | null;
+  nodes: Record<string, unknown>[];
+};
+
+export type SoftDeleteNodeResponse = {
+  pk: number;
+  soft_deleted: boolean;
 };
 
 export type BridgeStatusResponse = {

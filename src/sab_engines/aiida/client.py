@@ -403,6 +403,13 @@ class AiiDAWorkerClient:
                 return
 
         normalized = self._normalize_status_payload(payload)
+        if normalized["status"] == "online":
+            if not normalized["plugins"]:
+                fallback_plugins = await self._fetch_plugins_from_known_endpoints()
+                if fallback_plugins:
+                    normalized["plugins"] = fallback_plugins
+            if normalized["resources"].workchains == 0 and normalized["plugins"]:
+                normalized["resources"].workchains = len(normalized["plugins"])
         self._snapshot.status = normalized["status"]
         self._snapshot.environment = normalized["environment"]
         self._snapshot.profile = normalized["profile"]
@@ -462,6 +469,11 @@ class AiiDAWorkerClient:
             return_exceptions=True,
         )
 
+        if isinstance(plugins_result, Exception):
+            fallback_plugins = await self._fetch_plugins_from_known_endpoints(prefer_legacy=False)
+            if fallback_plugins:
+                plugins_result = fallback_plugins
+
         any_success = not all(
             isinstance(item, Exception)
             for item in (plugins_result, system_result, resources_result)
@@ -488,6 +500,22 @@ class AiiDAWorkerClient:
             payload["resources"] = resources_result
 
         return payload
+
+    async def _fetch_plugins_from_known_endpoints(self, *, prefer_legacy: bool = True) -> list[str]:
+        if prefer_legacy:
+            candidates = ("/plugins", "/submission/plugins", "/system/plugins")
+        else:
+            candidates = ("/submission/plugins", "/system/plugins", "/plugins")
+
+        for path in candidates:
+            try:
+                payload = await self._fetch_json(path)
+            except Exception:
+                continue
+            normalized = self._normalize_plugins(payload)
+            if normalized:
+                return normalized
+        return []
 
     @staticmethod
     def _is_http_not_found(error: Exception) -> bool:
@@ -516,11 +544,9 @@ class AiiDAWorkerClient:
 
     def _mark_online(self) -> None:
         self._snapshot.status = "online"
-        self._snapshot.checked_at = time.monotonic()
 
     def _mark_offline(self) -> None:
         self._snapshot.status = "offline"
-        self._snapshot.checked_at = time.monotonic()
 
     @property
     def _worker_target(self) -> str:
@@ -659,12 +685,54 @@ class AiiDAWorkerClient:
         if isinstance(payload, list):
             raw_plugins = payload
         elif isinstance(payload, dict):
-            plugins = payload.get("plugins")
-            if isinstance(plugins, list):
-                raw_plugins = plugins
-            else:
-                items = payload.get("items")
-                raw_plugins = items if isinstance(items, list) else []
+            raw_plugins = []
+            for key in (
+                "plugins",
+                "items",
+                "workchains",
+                "plugin_names",
+                "entry_points",
+                "entries",
+                "available_plugins",
+                "available_workchains",
+            ):
+                candidate = payload.get(key)
+                if isinstance(candidate, list):
+                    raw_plugins = candidate
+                    break
+
+            if not raw_plugins:
+                for key in ("data", "result", "payload", "response"):
+                    nested = payload.get(key)
+                    normalized_nested = self._normalize_plugins(nested)
+                    if normalized_nested:
+                        return normalized_nested
+
+            if not raw_plugins:
+                values = list(payload.values())
+                if any(isinstance(value, dict) and any(k in value for k in ("name", "entry_point", "plugin", "id")) for value in values):
+                    raw_plugins = values
+
+            if not raw_plugins:
+                ignored_keys = {
+                    "status",
+                    "message",
+                    "detail",
+                    "error",
+                    "count",
+                    "total",
+                    "data",
+                    "result",
+                    "payload",
+                    "response",
+                }
+                mapping_keys = [
+                    key
+                    for key in payload.keys()
+                    if isinstance(key, str) and key not in ignored_keys and (":" in key or "." in key)
+                ]
+                if mapping_keys:
+                    raw_plugins = mapping_keys
         else:
             raw_plugins = []
 

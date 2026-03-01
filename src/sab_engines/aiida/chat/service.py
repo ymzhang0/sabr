@@ -309,11 +309,54 @@ def _build_user_message_payload(
 
 
 def _extract_submission_inputs(draft: dict[str, Any]) -> dict[str, Any]:
-    for key in ("inputs", "builder", "draft"):
-        value = draft.get(key)
-        if isinstance(value, dict):
-            return value
-    return draft
+    request_wrapper_keys = {
+        "workchain",
+        "workchain_label",
+        "workchain_entry_point",
+        "entry_point",
+        "structure_pk",
+        "code",
+        "protocol",
+        "overrides",
+        "pseudo_family",
+        "pseudo_family_label",
+    }
+    visited: set[int] = set()
+
+    def unwrap(node: Any, depth: int = 0) -> dict[str, Any] | None:
+        if not isinstance(node, dict) or depth > 8:
+            return None
+        marker = id(node)
+        if marker in visited:
+            return None
+        visited.add(marker)
+
+        direct_inputs = node.get("inputs")
+        if isinstance(direct_inputs, dict):
+            nested_inputs = unwrap(direct_inputs, depth + 1)
+            return nested_inputs if isinstance(nested_inputs, dict) else direct_inputs
+
+        for key in ("builder", "draft", "submission", "payload", "result"):
+            nested = node.get(key)
+            if not isinstance(nested, dict):
+                continue
+            extracted = unwrap(nested, depth + 1)
+            if isinstance(extracted, dict):
+                return extracted
+
+        has_wrapper_markers = any(key in node for key in request_wrapper_keys)
+        if has_wrapper_markers:
+            namespace_like = any(
+                isinstance(value, dict) and key not in request_wrapper_keys
+                for key, value in node.items()
+            )
+            if not namespace_like:
+                return None
+
+        return node
+
+    extracted = unwrap(draft)
+    return extracted if isinstance(extracted, dict) else {}
 
 
 def _find_first_named_value(payload: Any, candidate_keys: set[str]) -> Any:

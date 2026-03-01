@@ -18,6 +18,38 @@ def _ctx() -> SimpleNamespace:
     return SimpleNamespace(deps=AiiDADeps())
 
 
+def test_extract_submission_inputs_ignores_request_wrapper_only_payload() -> None:
+    draft = {
+        "workchain": "quantumespresso.pw.relax",
+        "structure_pk": 264,
+        "code": "pw-7.5@localhost",
+        "protocol": "moderate",
+        "overrides": {},
+    }
+
+    extracted = researcher._extract_submission_inputs(draft)
+
+    assert extracted == {}
+
+
+def test_extract_submission_inputs_prefers_nested_inputs_namespace() -> None:
+    draft = {
+        "builder": {
+            "inputs": {
+                "base": {"pw": {"code": "pw-7.5@localhost"}},
+                "structure": 264,
+            },
+            "code": "pw-7.5@localhost",
+            "protocol": "moderate",
+        }
+    }
+
+    extracted = researcher._extract_submission_inputs(draft)
+
+    assert "base" in extracted
+    assert "code" not in extracted
+
+
 @pytest.mark.anyio
 async def test_submit_new_workflow_validates_before_submission(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []

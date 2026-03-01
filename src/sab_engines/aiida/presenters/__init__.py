@@ -3,6 +3,7 @@ from .node_view import (
     enrich_process_detail_payload,
     extract_folder_preview,
     serialize_group_labels,
+    serialize_groups,
     serialize_processes,
 )
 from .workflow_view import (
@@ -14,6 +15,7 @@ from .workflow_view import (
 __all__ = [
     "serialize_processes",
     "serialize_group_labels",
+    "serialize_groups",
     "extract_folder_preview",
     "attach_tree_links",
     "enrich_process_detail_payload",

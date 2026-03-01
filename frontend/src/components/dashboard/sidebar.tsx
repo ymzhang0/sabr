@@ -1,11 +1,25 @@
-import { ChevronDown, Loader2, Moon, Sun } from "lucide-react";
+import {
+  Bot,
+  CheckSquare2,
+  ChevronDown,
+  Copy,
+  Download,
+  FolderOpen,
+  Loader2,
+  Moon,
+  Pencil,
+  Plus,
+  Search,
+  Sun,
+  Trash2,
+} from "lucide-react";
 import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
 import { cn } from "@/lib/utils";
-import type { ProcessItem } from "@/types/aiida";
+import type { GroupItem, ProcessItem } from "@/types/aiida";
 
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 

@@ -7,6 +7,10 @@ import type {
   BridgeSwitchProfileResponse,
   BootstrapResponse,
   ChatResponse,
+  GroupAssignNodesResponse,
+  GroupDeleteResponse,
+  GroupExportResponse,
+  GroupMutationResponse,
   GroupsResponse,
   LogsResponse,
   NodeHoverMetadataResponse,
@@ -14,6 +18,7 @@ import type {
   ProcessLogsResponse,
   ProcessesResponse,
   SendChatRequest,
+  SoftDeleteNodeResponse,
   SubmissionResponse,
   UploadArchiveResponse,
 } from "@/types/aiida";
@@ -108,6 +113,40 @@ export async function getNodeHoverMetadata(pk: number): Promise<NodeHoverMetadat
 
 export async function getGroups(): Promise<GroupsResponse> {
   const { data } = await frontendApi.get<GroupsResponse>("/groups");
+  return data;
+}
+
+export async function createGroup(label: string): Promise<GroupMutationResponse> {
+  const { data } = await frontendApi.post<GroupMutationResponse>("/groups/create", { label });
+  return data;
+}
+
+export async function renameGroup(pk: number, label: string): Promise<GroupMutationResponse> {
+  const { data } = await frontendApi.put<GroupMutationResponse>(`/groups/${pk}/label`, { label });
+  return data;
+}
+
+export async function deleteGroup(pk: number): Promise<GroupDeleteResponse> {
+  const { data } = await frontendApi.delete<GroupDeleteResponse>(`/groups/${pk}`);
+  return data;
+}
+
+export async function addNodesToGroup(pk: number, nodePks: number[]): Promise<GroupAssignNodesResponse> {
+  const { data } = await frontendApi.post<GroupAssignNodesResponse>(`/groups/${pk}/nodes`, {
+    node_pks: nodePks,
+  });
+  return data;
+}
+
+export async function exportGroup(pk: number): Promise<GroupExportResponse> {
+  const { data } = await frontendApi.get<GroupExportResponse>(`/groups/${pk}/export`);
+  return data;
+}
+
+export async function softDeleteNode(pk: number, deleted = true): Promise<SoftDeleteNodeResponse> {
+  const { data } = await frontendApi.post<SoftDeleteNodeResponse>(`/nodes/${pk}/soft-delete`, {
+    deleted,
+  });
   return data;
 }
 

@@ -93,3 +93,12 @@ Add a sidebar within the modal for "Common Overrides":
 Goal: Transform the modal from a simple confirmation box into a high-fidelity validation and optimization cockpit.
 
 给那个“流光效果”加一个“流光色彩随任务状态变化”的功能？比如跑脚本时是蓝色流光，报错时是红色流光，这样你不用看字都能知道进度。
+
+
+5. 交互式“工作流回溯” (Provenance Visualizer)
+
+AiiDA 的核心是数据溯源（Provenance）。
+
+优化方案：在任务预览或详情中，增加一个简单的 溯源树状图。
+
+丝滑点：你可以一眼看到这个结构是从哪个 Parent 节点优化过来的，或者是通过哪个初始 CIF 文件导入的。这能极大减少你在高通量计算中迷失方向的概率。

@@ -28,6 +28,9 @@ export type SubmissionDraftPayload = {
     validation_summary?: SubmissionValidationSummary | null;
     validation?: Record<string, unknown> | null;
     draft?: Record<string, unknown>;
+    available_codes?: Array<Record<string, unknown>>;
+    required_code_plugin?: string | null;
+    port_spec?: Record<string, unknown> | null;
   };
 };
 

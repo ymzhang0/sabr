@@ -43,6 +43,70 @@ def list_group_labels(search: str | None = None) -> list[str]:
     return [str(item) for item in payload] if isinstance(payload, list) else []
 
 
+def _normalize_group_item(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+
+    label = str(raw.get("label") or "").strip()
+    if not label:
+        return None
+
+    try:
+        pk = int(raw.get("pk", 0))
+    except (TypeError, ValueError):
+        pk = 0
+
+    try:
+        count = int(raw.get("count", 0))
+    except (TypeError, ValueError):
+        count = 0
+
+    payload: dict[str, Any] = {
+        "pk": pk,
+        "label": label,
+        "count": max(0, count),
+    }
+
+    type_string = raw.get("type_string")
+    if isinstance(type_string, str) and type_string.strip():
+        payload["type_string"] = type_string.strip()
+
+    return payload
+
+
+def list_groups(search: str | None = None) -> list[dict[str, Any]]:
+    params = {"search": search} if search else None
+    try:
+        payload = request_json_sync("GET", "/management/groups", params=params, timeout=6.0)
+    except (BridgeOfflineError, BridgeAPIError):
+        return []
+    except Exception:  # noqa: BLE001
+        return []
+
+    items: list[Any]
+    if isinstance(payload, dict):
+        raw_items = payload.get("items")
+        items = raw_items if isinstance(raw_items, list) else []
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        items = []
+
+    groups: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for item in items:
+        normalized = _normalize_group_item(item)
+        if not normalized:
+            continue
+        pk = int(normalized["pk"])
+        if pk in seen:
+            continue
+        seen.add(pk)
+        groups.append(normalized)
+
+    return groups
+
+
 def get_recent_nodes(
     limit: int = 15,
     group_label: str | None = None,
@@ -83,3 +147,38 @@ def get_context_nodes(node_ids: list[int]) -> list[dict[str, Any]]:
         items = payload.get("items")
         return items if isinstance(items, list) else []
     return payload if isinstance(payload, list) else []
+
+
+def create_group(label: str) -> dict[str, Any]:
+    return request_json_sync("POST", "/management/groups/create", json={"label": str(label)}, timeout=8.0)
+
+
+def delete_group(pk: int) -> dict[str, Any]:
+    return request_json_sync("DELETE", f"/management/groups/{int(pk)}", timeout=8.0)
+
+
+def rename_group(pk: int, label: str) -> dict[str, Any]:
+    return request_json_sync("PUT", f"/management/groups/{int(pk)}/label", json={"label": str(label)}, timeout=8.0)
+
+
+def add_nodes_to_group(pk: int, node_pks: list[int]) -> dict[str, Any]:
+    ids = [int(raw_pk) for raw_pk in node_pks if isinstance(raw_pk, int) or str(raw_pk).isdigit()]
+    return request_json_sync(
+        "POST",
+        f"/management/groups/{int(pk)}/nodes",
+        json={"node_pks": ids[:200]},
+        timeout=10.0,
+    )
+
+
+def export_group(pk: int) -> dict[str, Any]:
+    return request_json_sync("GET", f"/management/groups/{int(pk)}/export", timeout=10.0)
+
+
+def soft_delete_node(pk: int, *, deleted: bool = True) -> dict[str, Any]:
+    return request_json_sync(
+        "POST",
+        f"/management/nodes/{int(pk)}/soft-delete",
+        json={"deleted": bool(deleted)},
+        timeout=8.0,
+    )
