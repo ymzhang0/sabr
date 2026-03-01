@@ -23,6 +23,7 @@ export type ChatMessage = {
   text: string;
   status: "thinking" | "done" | "error" | string;
   turn_id: number;
+  payload?: Record<string, unknown> | null;
 };
 
 export type ChatSnapshot = {
@@ -71,6 +72,8 @@ export type SendChatRequest = {
   context_pks?: number[];
   metadata?: Record<string, unknown>;
 };
+
+export type SubmissionResponse = Record<string, unknown>;
 
 export type BridgeStatusResponse = {
   status: "online" | "offline";

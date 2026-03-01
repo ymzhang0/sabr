@@ -90,3 +90,33 @@ body,
 .context-tag-enter {
   animation: contextTagFadeIn 180ms ease-out;
 }
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  display: inline-block;
+  background:
+    linear-gradient(
+      90deg,
+      transparent 40%,
+      rgba(255, 255, 255, 0.4) 50%,
+      transparent 60%
+    );
+  background-size: 200% 100%;
+  background-position: -200% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: rgba(71, 85, 105, 0.8);
+  animation: shimmer 2.5s infinite linear;
+}
+
+.dark .animate-shimmer {
+  color: rgba(226, 232, 240, 0.85);
+}

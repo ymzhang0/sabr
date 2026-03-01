@@ -313,6 +313,10 @@ if __name__ == "__main__":
         reload_excludes.extend([
             "src/sab_engines/aiida/data/memories",
             "src/sab_engines/aiida/data/memories/*",
+            # Script archive files are generated during chat turns; exclude to prevent
+            # dev hot-reload from killing active SSE/stream responses.
+            "src/sab_engines/aiida/data/scripts",
+            "src/sab_engines/aiida/data/scripts/*",
             "default",
             "default/*",
         ])

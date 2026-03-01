@@ -1,8 +1,18 @@
+import json
 from typing import Any
 
 from pydantic_ai import Agent, RunContext
 
 from src.sab_engines.aiida.deps import AiiDADeps
+from src.sab_core.config import settings
+from src.sab_engines.aiida.agent.prompts import (
+    REFERENCED_NODES_HEADER,
+    REFERENCED_NODES_INTRO,
+    REFERENCED_NODES_OMITTED_TEMPLATE,
+    SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE,
+    SUBMISSION_DRAFT_PREFIX,
+    build_system_prompt,
+)
 from src.sab_engines.aiida.agent.tools import (
     draft_workchain_builder,
     fetch_recent_processes,
@@ -24,34 +34,62 @@ from src.sab_engines.aiida.agent.tools import (
     list_remote_plugins as list_remote_plugins_via_bridge,
     list_system_profiles,
     run_python_code,
-    submit_workflow,
+    search_script_archive,
+    submit_job,
     switch_profile,
+    validate_job,
 )
+from src.sab_engines.aiida.presenters.workflow_view import enrich_submission_draft_payload
 from src.sab_core.schema.response import SABRResponse
 
-SYSTEM_PROMPT = """
-You are a proactive AiiDA Research Intelligence (SABR v2).
-Your mission is to provide high-level scientific insights and automate complex data exploration.
-
-### OPERATIONAL RULES
-- ENVIRONMENT SYNC: The aiida-worker bridge is the source of truth for profile, resources, and workflow metadata.
-- CYCLIC RETRY: If a calculation fails, use 'inspect_process' to read logs, diagnose, and retry with new parameters.
-- SUGGESTIONS: Always provide 2-3 "Smart Chips" (suggestions) under 5 words in your response.
-
-### TOOLBOX USAGE
-- DB Analysis: Use 'get_database_statistics' and 'list_groups' to navigate.
-- Deep Dive: Use 'inspect_group' to see attributes of many nodes, or 'inspect_node' for one.
-- Available WorkChains: When asked about plugins/workchains, call 'list_remote_plugins' first; this is the source of truth from the active worker bridge.
-- WorkChain Spec: Use 'get_remote_workchain_spec' (or 'check_workflow_spec') before drafting a builder.
-- Submission readiness: call 'inspect_lab_infrastructure' before submission to confirm required computers/codes exist.
-- Custom Logic: If standard tools fail, use 'run_aiida_code' to execute targeted worker-side scripts.
-"""
+_PENDING_SUBMISSION_KEY = "aiida_pending_submission"
+_SCRIPT_ARCHIVE_TURN_COUNTER_KEY = "aiida_script_archive_turn_counter"
+_KNOWN_PARALLEL_KEYS = {
+    "num_machines",
+    "num_mpiprocs_per_machine",
+    "tot_num_mpiprocs",
+    "num_cores_per_machine",
+    "num_cores_per_mpiproc",
+    "max_wallclock_seconds",
+    "queue_name",
+    "withmpi",
+    "account",
+    "qos",
+    "npool",
+    "nk",
+    "ntg",
+    "ndiag",
+}
+_CRITICAL_ADVANCED_KEYS = {
+    "kpoints_distance",
+    "kpoints_mesh",
+    "kpoints",
+    "mesh",
+    "ecutwfc",
+    "ecutrho",
+    "occupations",
+    "smearing",
+    "degauss",
+    "conv_thr",
+    "mixing_beta",
+    "diagonalization",
+    "electron_maxstep",
+    "nstep",
+    "hubbard_u",
+    "hubbard_v",
+    "spin_type",
+    "tot_charge",
+    "tot_magnetization",
+    "press_conv_thr",
+    "forc_conv_thr",
+    *_KNOWN_PARALLEL_KEYS,
+}
 
 aiida_researcher = Agent(
-    "google-gla:gemini-1.5-flash",
+    f"google-gla:{settings.DEFAULT_MODEL}",
     deps_type=AiiDADeps,
     output_type=SABRResponse,
-    system_prompt=SYSTEM_PROMPT,
+    system_prompt=build_system_prompt(),
     retries=3,
 )
 
@@ -76,6 +114,518 @@ def _format_context_node_line(node: dict[str, Any]) -> str:
     return "- " + " | ".join(details)
 
 
+def _extract_messages(payload: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    raw_messages: list[str] = []
+    for key in keys:
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    text = item.get("message") or item.get("error") or item.get("detail") or item.get("reason")
+                    raw_messages.append(str(text if text is not None else item))
+                else:
+                    raw_messages.append(str(item))
+            continue
+        if isinstance(value, dict):
+            for nested in value.values():
+                if isinstance(nested, list):
+                    raw_messages.extend(str(entry) for entry in nested)
+                else:
+                    raw_messages.append(str(nested))
+            continue
+        raw_messages.append(str(value))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for message in raw_messages:
+        cleaned = message.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        deduped.append(cleaned)
+    return deduped
+
+
+def _build_validation_summary(validation: dict[str, Any]) -> dict[str, Any]:
+    errors = _extract_messages(
+        validation,
+        ("error", "errors", "validation_errors", "blocking_errors", "missing_inputs", "missing"),
+    )
+    warnings = _extract_messages(
+        validation,
+        ("warnings", "validation_warnings", "non_blocking_warnings"),
+    )
+    notes = _extract_messages(validation, ("notes", "messages", "summary"))
+
+    status_raw = validation.get("status")
+    status = str(status_raw).strip() if status_raw is not None else ""
+    status_upper = status.upper()
+    is_valid_field = validation.get("is_valid")
+    if isinstance(is_valid_field, bool):
+        is_valid = is_valid_field
+    elif status_upper in {"VALID", "VALIDATION_OK", "OK", "SUCCESS", "PASSED"}:
+        is_valid = True
+    elif status_upper in {"INVALID", "VALIDATION_FAILED", "FAILED", "ERROR"}:
+        is_valid = False
+    else:
+        is_valid = not errors
+
+    normalized_status = status or ("VALIDATION_OK" if is_valid else "VALIDATION_FAILED")
+    summary_lines = [
+        f"Status: {normalized_status}",
+        f"Valid: {'yes' if is_valid else 'no'}",
+        f"Blocking errors: {len(errors)}",
+        f"Warnings: {len(warnings)}",
+    ]
+    if errors:
+        summary_lines.append(f"Top error: {errors[0]}")
+    if warnings:
+        summary_lines.append(f"Top warning: {warnings[0]}")
+    if notes and not errors and not warnings:
+        summary_lines.append(f"Note: {notes[0]}")
+
+    return {
+        "status": normalized_status,
+        "is_valid": is_valid,
+        "blocking_error_count": len(errors),
+        "warning_count": len(warnings),
+        "errors": errors,
+        "warnings": warnings,
+        "notes": notes,
+        "summary_text": "\n".join(summary_lines),
+    }
+
+
+def _flatten_text_payload(payload: Any) -> str:
+    if payload is None:
+        return ""
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        pieces: list[str] = []
+        for key, value in payload.items():
+            pieces.append(str(key))
+            nested = _flatten_text_payload(value)
+            if nested:
+                pieces.append(nested)
+        return " ".join(pieces)
+    if isinstance(payload, (list, tuple, set)):
+        return " ".join(_flatten_text_payload(item) for item in payload)
+    return str(payload)
+
+
+def _looks_like_missing_pseudopotential_error(payload: Any) -> bool:
+    text = _flatten_text_payload(payload).strip().lower()
+    if not text:
+        return False
+    if "pseudo" not in text and "pseudopotential" not in text:
+        return False
+    if not any(token in text for token in ("missing", "not found", "failed", "cannot", "unable", "unknown")):
+        return False
+    return any(token in text for token in ("sssp", "pseudo family", "pseudo_family", "pseudopotential family"))
+
+
+def _build_pseudodojo_overrides() -> dict[str, Any]:
+    return {
+        "pseudo_family": "PseudoDojo",
+        "pseudo_family_label": "PseudoDojo",
+        "pseudopotential_family": "PseudoDojo",
+    }
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _collect_context_node_pks(ctx: RunContext[AiiDADeps]) -> list[int]:
+    context_nodes = getattr(ctx.deps, "context_nodes", None) or []
+    pks: list[int] = []
+    seen: set[int] = set()
+    for node in context_nodes:
+        if not isinstance(node, dict):
+            continue
+        parsed = _coerce_positive_int(node.get("pk"))
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        pks.append(parsed)
+    return pks
+
+
+def _merge_node_pk_filters(explicit_nodes: list[int] | None, fallback_nodes: list[int]) -> list[int]:
+    merged: list[int] = []
+    seen: set[int] = set()
+    for source in (explicit_nodes or [], fallback_nodes):
+        for value in source:
+            parsed = _coerce_positive_int(value)
+            if parsed is None or parsed in seen:
+                continue
+            seen.add(parsed)
+            merged.append(parsed)
+    return merged
+
+
+def _next_script_turn_index(ctx: RunContext[AiiDADeps]) -> int:
+    current = _coerce_positive_int(ctx.deps.get_registry_value(_SCRIPT_ARCHIVE_TURN_COUNTER_KEY)) or 0
+    next_value = current + 1
+    ctx.deps.set_registry_value(_SCRIPT_ARCHIVE_TURN_COUNTER_KEY, next_value)
+    return next_value
+
+
+def _find_first_named_value(payload: Any, candidate_keys: set[str]) -> Any:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered = str(key).strip().lower()
+            if lowered in candidate_keys and value not in (None, "", [], {}):
+                return value
+            nested = _find_first_named_value(value, candidate_keys)
+            if nested is not None:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = _find_first_named_value(item, candidate_keys)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _extract_submission_inputs(draft: dict[str, Any]) -> dict[str, Any]:
+    for key in ("inputs", "builder", "draft"):
+        value = draft.get(key)
+        if isinstance(value, dict):
+            return value
+    return draft
+
+
+def _extract_process_label(draft: dict[str, Any], fallback: str | None = None) -> str:
+    value = _find_first_named_value(
+        draft,
+        {
+            "process_label",
+            "workchain",
+            "workchain_label",
+            "entry_point",
+            "workflow",
+            "workflow_label",
+        },
+    )
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return fallback or "AiiDA Workflow"
+
+
+def _collect_pk_map(payload: Any) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    explicit_pk_list_keys = {"input_pks", "node_pks", "structure_pks"}
+
+    def append_entry(pk: int, path: str, label: str) -> None:
+        dedupe_key = (pk, path)
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        entries.append({"pk": pk, "path": path, "label": label})
+
+    def walk(node: Any, path: str = "") -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_text = str(key)
+                lowered = key_text.strip().lower()
+                key_path = f"{path}.{key_text}" if path else key_text
+                if lowered == "pk" or lowered.endswith("_pk"):
+                    pk = _coerce_positive_int(value)
+                    if pk is not None:
+                        append_entry(pk, key_path, key_text)
+                elif lowered in explicit_pk_list_keys and isinstance(value, list):
+                    for index, item in enumerate(value):
+                        pk = _coerce_positive_int(item)
+                        if pk is None:
+                            continue
+                        append_entry(pk, f"{key_path}[{index}]", key_text)
+
+                if isinstance(value, (dict, list)):
+                    walk(value, key_path)
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                item_path = f"{path}[{index}]" if path else f"[{index}]"
+                walk(item, item_path)
+
+    walk(payload)
+    return entries[:120]
+
+
+def _extract_target_computer(draft: dict[str, Any]) -> str | None:
+    value = _find_first_named_value(
+        draft,
+        {"computer", "computer_label", "computer_name", "target_computer"},
+    )
+    if isinstance(value, dict):
+        for key in ("label", "name", "computer_label", "computer_name"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        pk = _coerce_positive_int(value.get("pk"))
+        return f"PK #{pk}" if pk else None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return None
+
+
+def _extract_parallel_settings(draft: dict[str, Any]) -> dict[str, Any]:
+    settings: dict[str, Any] = {}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                lowered = str(key).strip().lower()
+                if lowered in _KNOWN_PARALLEL_KEYS and lowered not in settings:
+                    settings[lowered] = value
+                if isinstance(value, (dict, list)):
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(draft)
+    return settings
+
+
+def _is_empty_submission_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    return False
+
+
+def _normalize_primary_input_field(label: str, value: Any) -> dict[str, Any] | None:
+    if _is_empty_submission_value(value):
+        return None
+
+    field: dict[str, Any] = {"label": label}
+    if isinstance(value, dict):
+        pk = _coerce_positive_int(value.get("pk") or value.get("structure_pk") or value.get("code_pk"))
+        display: str | None = None
+        for key in ("label", "name", "value", "formula", "code_label", "family"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                display = candidate.strip()
+                break
+        if display is None and pk is not None:
+            display = f"PK #{pk}"
+        if display is None:
+            display = json.dumps(value, ensure_ascii=True)
+        field["value"] = display
+        if pk is not None:
+            field["pk"] = pk
+        return field
+
+    if isinstance(value, list):
+        preview = ", ".join(str(item) for item in value[:4])
+        suffix = " ..." if len(value) > 4 else ""
+        field["value"] = preview + suffix
+        return field
+
+    scalar_pk = _coerce_positive_int(value)
+    if scalar_pk is not None and label.lower() == "structure":
+        field["value"] = f"PK #{scalar_pk}"
+        field["pk"] = scalar_pk
+        return field
+
+    field["value"] = str(value)
+    return field
+
+
+def _extract_primary_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    primary_inputs: dict[str, Any] = {}
+
+    code_value = _find_first_named_value(
+        inputs,
+        {"code", "code_label", "pw_code", "qe_code", "codes"},
+    )
+    code_field = _normalize_primary_input_field("Code", code_value)
+    if isinstance(code_field, dict):
+        primary_inputs["code"] = code_field
+
+    structure_value = _find_first_named_value(
+        inputs,
+        {"structure", "structure_pk", "structure_id"},
+    )
+    structure_field = _normalize_primary_input_field("Structure", structure_value)
+    if isinstance(structure_field, dict):
+        primary_inputs["structure"] = structure_field
+
+    pseudos_value = _find_first_named_value(
+        inputs,
+        {"pseudos", "pseudo", "pseudopotentials", "pseudo_family", "pseudo_family_label"},
+    )
+    pseudos_field = _normalize_primary_input_field("Pseudopotentials", pseudos_value)
+    if isinstance(pseudos_field, dict):
+        primary_inputs["pseudos"] = pseudos_field
+
+    return primary_inputs
+
+
+def _is_default_advanced_setting(key: str, value: Any) -> bool:
+    lowered = key.strip().lower()
+    if lowered in {
+        "num_machines",
+        "num_mpiprocs_per_machine",
+        "tot_num_mpiprocs",
+        "num_cores_per_machine",
+        "num_cores_per_mpiproc",
+        "npool",
+        "nk",
+        "ntg",
+        "ndiag",
+    }:
+        parsed = _coerce_positive_int(value)
+        return parsed == 1
+    if lowered == "withmpi":
+        return value is True
+    if lowered == "protocol":
+        return str(value).strip().lower() in {"default", "moderate"}
+    return False
+
+
+def _collect_advanced_settings(payload: Any) -> dict[str, Any]:
+    settings: dict[str, Any] = {}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                lowered = str(key).strip().lower()
+                if (
+                    lowered in _CRITICAL_ADVANCED_KEYS
+                    and lowered not in settings
+                    and not _is_empty_submission_value(value)
+                    and not _is_default_advanced_setting(lowered, value)
+                ):
+                    settings[lowered] = value
+                if isinstance(value, (dict, list)):
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return settings
+
+
+def _normalize_recommended_inputs(
+    raw_recommended: Any,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    source = raw_recommended if isinstance(raw_recommended, dict) else fallback
+    normalized: dict[str, Any] = {}
+    for key, value in source.items():
+        normalized_key = str(key).strip().lower()
+        if not normalized_key:
+            continue
+        if _is_empty_submission_value(value) or _is_default_advanced_setting(normalized_key, value):
+            continue
+        normalized[normalized_key] = value
+    return normalized
+
+
+def _build_submission_draft_payload(
+    draft: dict[str, Any],
+    *,
+    fallback_process_label: str | None = None,
+) -> dict[str, Any]:
+    inputs = _extract_submission_inputs(draft)
+    advanced_settings = _collect_advanced_settings(inputs)
+    parallel_settings = _extract_parallel_settings(draft)
+    for key, value in parallel_settings.items():
+        if key in advanced_settings:
+            continue
+        if _is_empty_submission_value(value) or _is_default_advanced_setting(key, value):
+            continue
+        advanced_settings[key] = value
+    recommended_inputs = _normalize_recommended_inputs(None, advanced_settings)
+
+    payload = {
+        "process_label": _extract_process_label(draft, fallback=fallback_process_label),
+        "inputs": inputs,
+        "primary_inputs": _extract_primary_inputs(inputs),
+        "recommended_inputs": recommended_inputs,
+        "advanced_settings": advanced_settings,
+        "meta": {
+            "pk_map": _collect_pk_map(inputs),
+            "target_computer": _extract_target_computer(draft),
+            "parallel_settings": parallel_settings,
+        },
+    }
+    return enrich_submission_draft_payload(payload)
+
+
+def _format_submission_draft_tag(submission_draft: dict[str, Any]) -> str:
+    return f"{SUBMISSION_DRAFT_PREFIX}\n" + json.dumps(
+        submission_draft,
+        ensure_ascii=True,
+        indent=2,
+    )
+
+
+def _cache_pending_submission(
+    ctx: RunContext[AiiDADeps],
+    draft: dict[str, Any],
+    validation: dict[str, Any],
+    validation_summary: dict[str, Any],
+    submission_draft: dict[str, Any] | None = None,
+) -> None:
+    cached_payload = {
+        "draft": draft,
+        "validation": validation,
+        "validation_summary": validation_summary,
+    }
+    if isinstance(submission_draft, dict):
+        cached_payload["submission_draft"] = submission_draft
+    ctx.deps.set_registry_value(_PENDING_SUBMISSION_KEY, cached_payload)
+    memory = getattr(ctx.deps, "memory", None)
+    if memory:
+        memory.set_kv(_PENDING_SUBMISSION_KEY, cached_payload)
+
+
+def _get_pending_submission(ctx: RunContext[AiiDADeps]) -> dict[str, Any] | None:
+    cached = ctx.deps.get_registry_value(_PENDING_SUBMISSION_KEY)
+    if isinstance(cached, dict):
+        return cached
+
+    memory = getattr(ctx.deps, "memory", None)
+    if memory:
+        persisted = memory.get_kv(_PENDING_SUBMISSION_KEY)
+        if isinstance(persisted, dict):
+            ctx.deps.set_registry_value(_PENDING_SUBMISSION_KEY, persisted)
+            return persisted
+    return None
+
+
+def _clear_pending_submission(ctx: RunContext[AiiDADeps]) -> None:
+    if isinstance(ctx.deps.registry, dict):
+        ctx.deps.registry.pop(_PENDING_SUBMISSION_KEY, None)
+
+    memory = getattr(ctx.deps, "memory", None)
+    if memory:
+        memory.set_kv(_PENDING_SUBMISSION_KEY, None)
+
+
 @aiida_researcher.system_prompt(dynamic=True)
 def add_referenced_nodes_prompt(ctx: RunContext[AiiDADeps]) -> str:
     context_nodes = getattr(ctx.deps, "context_nodes", None) or []
@@ -84,13 +634,17 @@ def add_referenced_nodes_prompt(ctx: RunContext[AiiDADeps]) -> str:
 
     max_items = 12
     lines = [
-        "### REFERENCED AiiDA NODES",
-        "Treat these user-selected nodes as first-class context for this turn:",
+        REFERENCED_NODES_HEADER,
+        REFERENCED_NODES_INTRO,
     ]
     for node in context_nodes[:max_items]:
         lines.append(_format_context_node_line(node))
     if len(context_nodes) > max_items:
-        lines.append(f"- ... {len(context_nodes) - max_items} more referenced nodes omitted.")
+        lines.append(
+            REFERENCED_NODES_OMITTED_TEMPLATE.format(
+                omitted_count=len(context_nodes) - max_items,
+            )
+        )
     return "\n".join(lines)
 
 
@@ -208,12 +762,110 @@ async def submit_new_workflow(
     code: str,
     protocol: str = "moderate",
 ):
-    """Draft and submit a new WorkChain through worker-side builder endpoints."""
-    ctx.deps.log_step(f"Submitting workflow: {workchain}")
+    """Draft and validate a new WorkChain; do not submit until user confirmation."""
+    ctx.deps.log_step(f"Preparing workflow for validation: {workchain}")
     draft = await draft_workchain_builder(workchain, structure_pk, code, protocol)
+    if not (isinstance(draft, dict) and draft.get("status") == "DRAFT_READY"):
+        if _looks_like_missing_pseudopotential_error(draft):
+            ctx.deps.log_step("Protocol builder missing pseudo family; retrying with PseudoDojo override")
+            draft = await draft_workchain_builder(
+                workchain,
+                structure_pk,
+                code,
+                protocol,
+                overrides=_build_pseudodojo_overrides(),
+            )
     if isinstance(draft, dict) and draft.get("status") == "DRAFT_READY":
-        return await submit_workflow(draft)
+        validation = await validate_job(draft)
+        if isinstance(validation, str):
+            return {
+                "error": "Failed to validate workflow draft",
+                "details": validation,
+                "draft": draft,
+            }
+        if not isinstance(validation, dict):
+            return {
+                "error": "Validation returned an unexpected payload",
+                "details": validation,
+                "draft": draft,
+            }
+        if validation.get("error"):
+            return {
+                "error": "Failed to validate workflow draft",
+                "details": validation,
+                "draft": draft,
+            }
+
+        validation_summary = _build_validation_summary(validation)
+        submission_draft = _build_submission_draft_payload(
+            draft,
+            fallback_process_label=workchain,
+        )
+        submission_draft_meta = submission_draft.get("meta")
+        if isinstance(submission_draft_meta, dict):
+            submission_draft_meta["validation"] = validation
+            submission_draft_meta["validation_summary"] = validation_summary
+            submission_draft_meta["draft"] = draft
+        _cache_pending_submission(
+            ctx,
+            draft,
+            validation,
+            validation_summary,
+            submission_draft=submission_draft,
+        )
+        return {
+            "status": "SUBMISSION_DRAFT",
+            "workchain": workchain,
+            "submission_draft": submission_draft,
+            "submission_draft_tag": _format_submission_draft_tag(submission_draft),
+            "validation_summary": validation_summary,
+            "validation": validation,
+            "next_step": SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE,
+        }
+
     return {"error": "Failed to draft workflow", "details": draft}
+
+
+@aiida_researcher.tool
+async def submit_validated_workflow(ctx: RunContext[AiiDADeps]):
+    """Submit the latest validated workflow only after explicit user confirmation."""
+    pending = _get_pending_submission(ctx)
+    if not isinstance(pending, dict):
+        return {
+            "error": "No validated workflow is pending submission. Run submit_new_workflow first."
+        }
+
+    draft = pending.get("draft")
+    validation_summary = pending.get("validation_summary")
+    if not isinstance(draft, dict):
+        return {
+            "error": "Pending draft is unavailable. Please run submit_new_workflow again."
+        }
+    if isinstance(validation_summary, dict) and not validation_summary.get("is_valid", False):
+        return {
+            "error": "Validation contains blocking issues; submission aborted.",
+            "validation_summary": validation_summary,
+        }
+
+    ctx.deps.log_step("Submitting workflow after explicit user confirmation")
+    submission = await submit_job(draft)
+    if isinstance(submission, str):
+        return {
+            "error": "Workflow submission failed",
+            "details": submission,
+        }
+    if isinstance(submission, dict) and submission.get("error"):
+        return {
+            "error": "Workflow submission failed",
+            "details": submission,
+        }
+
+    _clear_pending_submission(ctx)
+    return {
+        "status": "SUBMITTED",
+        "submission": submission,
+        "validation_summary": validation_summary,
+    }
 
 
 @aiida_researcher.tool
@@ -241,7 +893,48 @@ async def get_node_file(ctx: RunContext[AiiDADeps], pk: int, filename: str):
 
 
 @aiida_researcher.tool
-async def run_aiida_code_script(ctx: RunContext[AiiDADeps], script: str):
+async def search_past_scripts(
+    ctx: RunContext[AiiDADeps],  # noqa: ARG001
+    keyword: str | None = None,
+    nodes_involved: list[int] | None = None,
+    limit: int = 20,
+    include_source: bool = True,
+    script_id: str | None = None,
+):
+    """Search and optionally read archived custom scripts by intent and involved PKs."""
+    return await search_script_archive(
+        keyword=keyword,
+        nodes_involved=nodes_involved,
+        limit=limit,
+        include_source=include_source,
+        script_id=script_id,
+    )
+
+
+@aiida_researcher.tool
+async def run_aiida_code_script(
+    ctx: RunContext[AiiDADeps],
+    script: str,
+    intent: str | None = None,
+    nodes_involved: list[int] | None = None,
+):
     """Execute targeted Python/AiiDA code on the worker."""
     ctx.deps.log_step("Running custom research script on worker")
-    return await run_python_code(script)
+    merged_nodes = _merge_node_pk_filters(nodes_involved, _collect_context_node_pks(ctx))
+    result = await run_python_code(
+        script,
+        intent=intent,
+        nodes_involved=merged_nodes,
+        turn_id=_next_script_turn_index(ctx),
+    )
+    if isinstance(result, dict):
+        missing_module = result.get("missing_module")
+        if isinstance(missing_module, str) and missing_module.strip():
+            ctx.deps.log_step(f"Custom script missing module: {missing_module}")
+            if missing_module.startswith("aiida_pseudo"):
+                result["recovery_suggestion"] = (
+                    "aiida_pseudo import is unavailable on worker. "
+                    "Use submit_new_workflow with pseudo override, or inspect pseudo families via bridge/group labels "
+                    "without importing aiida_pseudo modules."
+                )
+    return result

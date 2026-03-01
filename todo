@@ -6,14 +6,90 @@ or another specifically created new folder if necessary? done
 now since frontend is in the top dir. why not move also the backend to the top level and put the 
 aiida-related code inside it. done
 
-since aiida_bridge is moved into ../aiida_worker why not remove it from this package.
+since aiida_bridge is moved into ../aiida_worker why not remove it from this package. done
 
-please make sure to exclude those temporary files that are generated when creating the webpage and are not important.
+please make sure to exclude those temporary files that are generated when creating the webpage and are not important. done
 
-find a cleaner way to organize the structure of this package
+find a cleaner way to organize the structure of this package done
 
-clean unused code
+clean unused code done
 
 optimize the log
 
 for the construction of the workchainnode, we should prefer get_builder_from_protocol than filling in the inputs item by item since in each workchain there are valuable logic defined in this class function. if we use plain get_builder or even worse we fill in the ports by ourself, we might miss a lot of detail or even the process will crash.
+
+optimize the process tree. now inputs and outputs are not shown correctly
+
+Task: Implement "Research Skill Engine" for High-Throughput Workflows
+
+1. Skill Definition (Backend):
+
+Create a SkillRegistry in the SABR backend. Each skill (e.g., SuperconSkill) should link to:
+
+A specific AiiDA WorkChain.
+
+A Domain Prompt: Contextual physics rules (e.g., "For superconductivity, use dense q-points").
+
+A Validation Tool: To check if selected structures are compatible with the workflow.
+
+2. High-Throughput (HTP) Support:
+
+Modify the SubmissionModal to handle Multiple Nodes.
+
+If more than 3 structures are selected, display an "HTP Batch Table" showing: PK | Label | Estimated Cost | Status.
+
+Add a "Global Override" section to set parameters for all 50+ tasks at once.
+
+3. Skill UI (Frontend):
+
+Add a "Skill Sidebar" or a dropdown menu next to the Chat Input.
+
+When a Skill is activated:
+
+The Chat Input automatically populates with a specialized prompt.
+
+The UI theme changes color slightly (e.g., Purple for Supercon, Orange for Transport) to indicate "Expert Mode".
+
+4. Post-Processing Hooks:
+
+After HTP tasks are submitted, the Skill should provide a Summary Dashboard tool to visualize results across all materials (e.g., T 
+c
+​	
+  vs. Atomic Mass plot).
+
+Goal: Transform the AI from a general assistant into a collection of domain-specific experts capable of managing high-throughput projects.
+
+
+Task: Advanced Intelligence in Submission Modal
+
+1. Predictive Analytics:
+
+Walltime Prediction: Add a predict_runtime tool. It should query the AiiDA database for similar previous calculations (process_type, num_atoms, computer) to give an empirical time estimate.
+
+Memory Check: Estimate the RAM requirement based on the plane-wave cutoff and cell volume. Show a warning if it exceeds 80% of node capacity.
+
+2. Physics Verification:
+
+Symmetry Info: Display the Space Group (e.g., Fm-3m) in the modal header using spglib.
+
+Input Highlighting: Color-code parameters: Blue for user-modified, Grey for defaults, Orange for AI-suggested.
+
+3. HTP Summary View (Batch Mode):
+
+If the user selects multiple structures, change the modal to a Grid/Table view.
+
+Show the "Total Estimated Core-Hours" for the entire batch.
+
+4. Actionable Toggles:
+
+Add a sidebar within the modal for "Common Overrides":
+
+[ ] Enable Magnetization
+
+[ ] Enable Hubbard U
+
+[ ] Automatic Parallelization (Pools)
+
+Goal: Transform the modal from a simple confirmation box into a high-fidelity validation and optimization cockpit.
+
+给那个“流光效果”加一个“流光色彩随任务状态变化”的功能？比如跑脚本时是蓝色流光，报错时是红色流光，这样你不用看字都能知道进度。

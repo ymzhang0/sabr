@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.sab_engines.aiida.client import BridgeAPIError, BridgeOfflineError, request_json_sync
+from src.sab_engines.aiida.client import (
+    BridgeAPIError,
+    BridgeOfflineError,
+    aiida_worker_client,
+    request_json_sync,
+)
+
+
+def is_worker_connected() -> bool:
+    return aiida_worker_client.is_connected
 
 
 def get_recent_processes(limit: int = 5) -> list[dict[str, Any]]:

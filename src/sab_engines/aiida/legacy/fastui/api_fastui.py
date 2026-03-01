@@ -15,6 +15,7 @@ from fastui import components as c
 from fastui import events as e
 from google import genai
 from loguru import logger
+from pydantic_ai.settings import ModelSettings
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from tkinter import filedialog
@@ -59,11 +60,15 @@ def ask_for_folder_path():
 
 router = APIRouter()
 API_ROUTE_ROOT = "/api/aiida"
-DEFAULT_MODELS = ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"]
+DEFAULT_MODELS = [settings.DEFAULT_MODEL]
 QUICK_PROMPTS: list[tuple[str, str]] = [
-    ("Check Profile", "check the current profile"),
-    ("List Groups", "list all groups in current profile"),
-    ("DB Summary", "show database summary"),
+    ("structure relaxation", "perform vc-relax using PseudoDojo"),
+    ("band structure", "calculate the electron band structure using PseudoDojo"),
+    (
+        "relax+band",
+        "perform vc-relax and then use the optimized structure to calculate the electron band structure",
+    ),
+    ("check pseudopotential", "check the PseudoDojo library in the database"),
 ]
 ARCHIVE_EXTENSIONS = {".aiida", ".zip"}
 
@@ -268,13 +273,60 @@ def _to_agent_model_name(name: str) -> str:
     return f"google-gla:{name}"
 
 
+def _build_agent_model(name: str) -> Any:
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        raise ValueError("Model name cannot be empty.")
+    model_name = cleaned.split(":", 1)[1] if ":" in cleaned else cleaned
+
+    api_version = str(getattr(settings, "GEMINI_API_VERSION", "") or "").strip()
+    if not api_version:
+        return _to_agent_model_name(cleaned)
+
+    try:
+        from google.genai.types import HttpOptions
+        from pydantic_ai.models.google import GoogleModel
+        from pydantic_ai.providers.google import GoogleProvider
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            log_event(
+                "aiida.models.runtime_init_fallback",
+                model=model_name,
+                api_version=api_version,
+                error=str(error),
+            )
+        )
+        return _to_agent_model_name(cleaned)
+
+    api_key = settings.GEMINI_API_KEY
+    if api_key == "your-key-here":
+        api_key = None
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options=HttpOptions(api_version=api_version),
+    )
+    provider = GoogleProvider(client=client)
+    return GoogleModel(model_name, provider=provider)
+
+
+def _build_model_settings() -> ModelSettings | None:
+    max_tokens = int(getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 0) or 0)
+    if max_tokens <= 0:
+        return None
+    return ModelSettings(max_tokens=max_tokens)
+
+
 def _fetch_genai_models() -> list[str]:
     """Query Gemini model list and keep only generation-capable Gemini models."""
     api_key = settings.GEMINI_API_KEY
     if api_key == "your-key-here":
         api_key = None
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"api_version": settings.GEMINI_API_VERSION},
+    )
     discovered: list[str] = []
     for model in client.models.list():
         model_name = _normalize_model_name(getattr(model, "name", "") or "")
@@ -305,6 +357,10 @@ def _get_available_models(state) -> list[str]:
         models = _fetch_genai_models()
         if not models:
             models = DEFAULT_MODELS
+        elif settings.DEFAULT_MODEL in models:
+            models = [settings.DEFAULT_MODEL, *[model for model in models if model != settings.DEFAULT_MODEL]]
+        else:
+            models = [settings.DEFAULT_MODEL, *models]
     except Exception as e:
         logger.warning(log_event("aiida.models.fetch.fallback", error=str(e)))
         models = DEFAULT_MODELS
@@ -553,7 +609,8 @@ async def _execute_chat_turn(
             result = await agent.run(
                 user_intent,
                 deps=current_deps,
-                model=_to_agent_model_name(selected_model),
+                model=_build_agent_model(selected_model),
+                model_settings=_build_model_settings(),
             )
             spinner_stop.set()
             if spinner_task:

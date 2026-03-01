@@ -5,15 +5,279 @@ Thin-client rule: all domain operations are delegated to aiida-worker HTTP APIs.
 
 from __future__ import annotations
 
-from typing import Any
+import json
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Mapping
 from urllib.parse import quote
+
+from loguru import logger
 
 from src.sab_engines.aiida.client import (
     OFFLINE_WORKER_MESSAGE,
     BridgeOfflineError,
+    aiida_worker_client,
     format_bridge_error,
-    request_json,
 )
+from src.sab_core.logging_utils import log_event
+
+_SCRIPT_ARCHIVE_DIR = Path(__file__).resolve().parent.parent / "data" / "scripts"
+_SCRIPT_ID_DATE_FMT = "%Y%m%d"
+_SCRIPT_ID_PREFIX = "script_"
+_SCRIPT_PK_TOKEN_PATTERN = re.compile(r"\b(?:pk|node|process)\s*#?\s*(\d+)\b", re.IGNORECASE)
+_SCRIPT_PK_HASH_PATTERN = re.compile(r"#(\d+)\b")
+_MODULE_NOT_FOUND_PATTERN = re.compile(
+    r"ModuleNotFoundError:\s*No module named ['\"]([^'\"]+)['\"]",
+    re.IGNORECASE,
+)
+
+
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned.isdigit():
+            parsed = int(cleaned)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _normalize_nodes_involved(nodes_involved: Any) -> list[int]:
+    if nodes_involved is None:
+        return []
+    if isinstance(nodes_involved, str):
+        candidates: list[Any] = [part.strip() for part in nodes_involved.split(",")]
+    elif isinstance(nodes_involved, (list, tuple, set)):
+        candidates = list(nodes_involved)
+    else:
+        candidates = [nodes_involved]
+
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for value in candidates:
+        parsed = _coerce_positive_int(value)
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        deduped.append(parsed)
+    return deduped
+
+
+def _extract_missing_module_name(error_text: str) -> str | None:
+    match = _MODULE_NOT_FOUND_PATTERN.search(str(error_text or ""))
+    if match:
+        return match.group(1).strip() or None
+    return None
+
+
+def _ensure_script_archive_dir() -> Path | None:
+    try:
+        _SCRIPT_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            log_event(
+                "aiida.worker.script_archive.prepare_failed",
+                error=str(exc)[:220],
+                archive_dir=str(_SCRIPT_ARCHIVE_DIR),
+            )
+        )
+        return None
+    return _SCRIPT_ARCHIVE_DIR
+
+
+def _build_next_script_id(archive_dir: Path, turn_id: int | None = None) -> str:
+    date_fragment = datetime.now(timezone.utc).strftime(_SCRIPT_ID_DATE_FMT)
+    normalized_turn = _coerce_positive_int(turn_id) or 1
+    base = f"{_SCRIPT_ID_PREFIX}{date_fragment}_turn{normalized_turn}"
+    version = 1
+    while True:
+        candidate = f"{base}_v{version}"
+        if not (archive_dir / f"{candidate}.py").exists() and not (archive_dir / f"{candidate}.json").exists():
+            return candidate
+        version += 1
+
+
+def _write_script_metadata(metadata_path: Path, payload: dict[str, Any]) -> None:
+    metadata_path.write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _archive_script_pending(
+    script: str,
+    *,
+    intent: str | None = None,
+    nodes_involved: list[int] | None = None,
+    turn_id: int | None = None,
+) -> tuple[str, Path, dict[str, Any]] | None:
+    archive_dir = _ensure_script_archive_dir()
+    if archive_dir is None:
+        return None
+
+    script_id = _build_next_script_id(archive_dir, turn_id=turn_id)
+    script_path = archive_dir / f"{script_id}.py"
+    metadata_path = archive_dir / f"{script_id}.json"
+    normalized_nodes = _normalize_nodes_involved(nodes_involved)
+    metadata: dict[str, Any] = {
+        "script_id": script_id,
+        "timestamp": _utc_timestamp(),
+        "intent": str(intent).strip() if isinstance(intent, str) and intent.strip() else "ad-hoc worker script",
+        "nodes_involved": normalized_nodes,
+        "status": "pending",
+        "error_message": None,
+        "missing_module": None,
+        "created_pks": [],
+        "turn_index": _coerce_positive_int(turn_id),
+    }
+
+    try:
+        script_path.write_text(script, encoding="utf-8")
+        _write_script_metadata(metadata_path, metadata)
+    except OSError as exc:
+        logger.warning(
+            log_event(
+                "aiida.worker.script_archive.write_failed",
+                error=str(exc)[:220],
+                script_id=script_id,
+            )
+        )
+        return None
+
+    logger.info(
+        log_event(
+            "aiida.worker.script_archive.pending_saved",
+            script_id=script_id,
+            nodes=len(normalized_nodes),
+            intent=metadata["intent"][:120],
+        )
+    )
+    return script_id, metadata_path, metadata
+
+
+def _extract_created_pks(payload: Any, output_text: str = "") -> list[int]:
+    found: set[int] = set()
+    scalar_pk_keys = {
+        "pk",
+        "node_pk",
+        "process_pk",
+        "workflow_pk",
+        "submitted_pk",
+        "created_pk",
+    }
+    list_pk_keys = {
+        "pks",
+        "node_pks",
+        "process_pks",
+        "workflow_pks",
+        "submitted_pks",
+        "created_pks",
+        "new_pks",
+    }
+
+    def _collect(value: Any, key_hint: str | None = None) -> None:
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                lowered = str(nested_key).strip().lower()
+                if lowered in scalar_pk_keys:
+                    parsed = _coerce_positive_int(nested_value)
+                    if parsed is not None:
+                        found.add(parsed)
+                elif lowered in list_pk_keys and isinstance(nested_value, list):
+                    for item in nested_value:
+                        parsed = _coerce_positive_int(item)
+                        if parsed is not None:
+                            found.add(parsed)
+                _collect(nested_value, key_hint=lowered)
+            return
+
+        if isinstance(value, list):
+            for item in value:
+                _collect(item, key_hint=key_hint)
+            return
+
+        if key_hint in scalar_pk_keys | list_pk_keys:
+            parsed = _coerce_positive_int(value)
+            if parsed is not None:
+                found.add(parsed)
+
+    _collect(payload)
+
+    text = str(output_text or "")
+    for pattern in (_SCRIPT_PK_TOKEN_PATTERN, _SCRIPT_PK_HASH_PATTERN):
+        for match in pattern.finditer(text):
+            parsed = _coerce_positive_int(match.group(1))
+            if parsed is not None:
+                found.add(parsed)
+
+    return sorted(found)
+
+
+def _archive_script_finalize(
+    archive_entry: tuple[str, Path, dict[str, Any]] | None,
+    *,
+    status: str,
+    error_message: str | None = None,
+    created_pks: list[int] | None = None,
+    missing_module: str | None = None,
+) -> None:
+    if archive_entry is None:
+        return
+
+    script_id, metadata_path, metadata = archive_entry
+    metadata["status"] = status
+    metadata["updated_at"] = _utc_timestamp()
+    metadata["error_message"] = (error_message or None)
+    metadata["missing_module"] = (missing_module or None)
+    metadata["created_pks"] = sorted(set(_normalize_nodes_involved(created_pks)))
+    try:
+        _write_script_metadata(metadata_path, metadata)
+    except OSError as exc:
+        logger.warning(
+            log_event(
+                "aiida.worker.script_archive.finalize_failed",
+                script_id=script_id,
+                error=str(exc)[:220],
+            )
+        )
+        return
+
+    logger.info(
+        log_event(
+            "aiida.worker.script_archive.finalized",
+            script_id=script_id,
+            status=status,
+            created_pks=len(metadata["created_pks"]),
+        )
+    )
+
+
+async def request_json(
+    method: str,
+    path: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    json: Mapping[str, Any] | None = None,
+    timeout: float = 10.0,
+) -> Any:
+    """Tool-side worker JSON helper backed by unified singleton client."""
+    retry_budget = 2 if method.upper() == "GET" else 0
+    return await aiida_worker_client.request_json(
+        method,
+        path,
+        params=params,
+        json=json,
+        timeout=timeout,
+        retries=retry_budget,
+    )
 
 
 async def list_system_profiles() -> dict[str, Any] | str:
@@ -330,32 +594,11 @@ async def get_remote_workchain_spec(entry_point: str) -> dict[str, Any] | str:
 async def inspect_lab_infrastructure() -> dict[str, Any] | str:
     """Inspect worker profile/daemon/computers/codes before submission."""
     try:
-        system_payload = await request_json("GET", "/system/info")
-        resources_payload = await request_json("GET", "/resources")
+        return await aiida_worker_client.inspect_infrastructure()
     except BridgeOfflineError:
         return OFFLINE_WORKER_MESSAGE
     except Exception as exc:  # noqa: BLE001
         return format_bridge_error(exc)
-
-    if not isinstance(system_payload, dict) or not isinstance(resources_payload, dict):
-        return {"error": "Bridge returned invalid infrastructure payload"}
-
-    computers = resources_payload.get("computers") if isinstance(resources_payload.get("computers"), list) else []
-    codes = resources_payload.get("codes") if isinstance(resources_payload.get("codes"), list) else []
-
-    return {
-        "profile": str(system_payload.get("profile") or "unknown"),
-        "daemon_status": bool(system_payload.get("daemon_status", False)),
-        "counts": system_payload.get("counts") if isinstance(system_payload.get("counts"), dict) else {},
-        "computers": computers,
-        "codes": codes,
-        "code_targets": [
-            f"{code.get('label')}@{code.get('computer_label')}"
-            if isinstance(code, dict) and code.get("computer_label")
-            else str(code.get("label") if isinstance(code, dict) else code)
-            for code in codes
-        ],
-    }
 
 
 async def inspect_workchain_spec(entry_point_name: str):
@@ -388,8 +631,10 @@ async def draft_workchain_builder(
         return format_bridge_error(exc)
 
 
-async def submit_workchain_builder(draft_data: dict[str, Any]) -> dict[str, Any] | str:
-    """Submit a previously drafted builder (`POST /submission/submit`)."""
+async def submit_workchain_builder(
+    draft_data: dict[str, Any] | list[dict[str, Any]],
+) -> dict[str, Any] | str:
+    """Submit one or many previously drafted builders (`POST /submission/submit`)."""
     try:
         payload = await request_json("POST", "/submission/submit", json={"draft": draft_data})
         return payload if isinstance(payload, dict) else {"result": payload}
@@ -399,27 +644,220 @@ async def submit_workchain_builder(draft_data: dict[str, Any]) -> dict[str, Any]
         return format_bridge_error(exc)
 
 
-async def submit_workflow(draft_data: dict[str, Any]) -> dict[str, Any] | str:
-    """Consistent submission interface for agents."""
-    return await submit_workchain_builder(draft_data)
-
-
-async def run_python_code(script: str) -> str | dict[str, Any]:
-    """Execute ad-hoc Python/AiiDA logic on worker (`POST /management/run-python`)."""
+async def validate_workchain_builder(draft_data: dict[str, Any]) -> dict[str, Any] | str:
+    """Validate a previously drafted builder (`POST /submission/validate`)."""
     try:
-        payload = await request_json("POST", "/management/run-python", json={"script": script})
-        if isinstance(payload, dict):
-            if payload.get("success"):
-                return str(payload.get("output") or "Code executed successfully (No output).")
-            return {
-                "error": str(payload.get("error") or "Worker script execution failed"),
-                "output": payload.get("output"),
-            }
-        return str(payload)
+        payload = await request_json("POST", "/submission/validate", json={"draft": draft_data})
+        return payload if isinstance(payload, dict) else {"result": payload}
     except BridgeOfflineError:
         return OFFLINE_WORKER_MESSAGE
     except Exception as exc:  # noqa: BLE001
         return format_bridge_error(exc)
+
+
+async def validate_job(draft_data: dict[str, Any]) -> dict[str, Any] | str:
+    """Consistent validation interface for agents."""
+    return await validate_workchain_builder(draft_data)
+
+
+async def submit_job(
+    draft_data: dict[str, Any] | list[dict[str, Any]],
+) -> dict[str, Any] | str:
+    """Consistent submission interface for agents (single or batch)."""
+    return await submit_workchain_builder(draft_data)
+
+
+async def submit_workflow(
+    draft_data: dict[str, Any] | list[dict[str, Any]],
+) -> dict[str, Any] | str:
+    """Consistent submission interface for agents (single or batch)."""
+    return await submit_job(draft_data)
+
+
+async def run_python_code(
+    script: str,
+    *,
+    intent: str | None = None,
+    nodes_involved: list[int] | None = None,
+    turn_id: int | None = None,
+) -> str | dict[str, Any]:
+    """Execute ad-hoc Python/AiiDA logic on worker (`POST /management/run-python`)."""
+    archive_entry = _archive_script_pending(
+        script,
+        intent=intent,
+        nodes_involved=nodes_involved,
+        turn_id=turn_id,
+    )
+    try:
+        # Custom worker scripts can be substantially slower than regular bridge calls.
+        payload = await request_json(
+            "POST",
+            "/management/run-python",
+            json={"script": script},
+            timeout=180.0,
+        )
+        if isinstance(payload, dict):
+            if payload.get("success"):
+                output_text = str(payload.get("output") or "Code executed successfully (No output).")
+                created_pks = _extract_created_pks(payload, output_text)
+                _archive_script_finalize(
+                    archive_entry,
+                    status="success",
+                    created_pks=created_pks,
+                )
+                logger.info(
+                    log_event(
+                        "aiida.worker.run_python.completed",
+                        success=True,
+                        output_chars=len(output_text),
+                        created_pks=",".join(str(pk) for pk in created_pks) or None,
+                    )
+                )
+                return output_text
+            output_text = str(payload.get("output") or "")
+            error_text = str(payload.get("error") or "Worker script execution failed")
+            missing_module = _extract_missing_module_name(error_text)
+            created_pks = _extract_created_pks(payload, output_text)
+            _archive_script_finalize(
+                archive_entry,
+                status="error",
+                error_message=error_text,
+                created_pks=created_pks,
+                missing_module=missing_module,
+            )
+            error_for_log = error_text if "traceback" in error_text.lower() else error_text[:220]
+            logger.warning(
+                log_event(
+                    "aiida.worker.run_python.completed",
+                    success=False,
+                    error=error_for_log,
+                    output_chars=len(output_text),
+                    created_pks=",".join(str(pk) for pk in created_pks) or None,
+                    missing_module=missing_module,
+                )
+            )
+            response: dict[str, Any] = {
+                "error": error_text,
+                "output": output_text,
+            }
+            if missing_module:
+                response["missing_module"] = missing_module
+                response["hint"] = (
+                    "Worker environment is missing this Python module. "
+                    "Avoid importing it in custom scripts or install it in aiida-worker."
+                )
+            return response
+        payload_text = str(payload)
+        created_pks = _extract_created_pks(payload, payload_text)
+        _archive_script_finalize(
+            archive_entry,
+            status="success",
+            created_pks=created_pks,
+        )
+        return payload_text
+    except BridgeOfflineError:
+        _archive_script_finalize(
+            archive_entry,
+            status="error",
+            error_message=OFFLINE_WORKER_MESSAGE,
+        )
+        return OFFLINE_WORKER_MESSAGE
+    except Exception as exc:  # noqa: BLE001
+        _archive_script_finalize(
+            archive_entry,
+            status="error",
+            error_message=str(exc),
+        )
+        return format_bridge_error(exc)
+
+
+async def search_script_archive(
+    keyword: str | None = None,
+    nodes_involved: list[int] | None = None,
+    limit: int = 20,
+    include_source: bool = True,
+    script_id: str | None = None,
+) -> dict[str, Any]:
+    """List/read archived custom scripts filtered by intent keyword and involved node PKs."""
+    archive_dir = _ensure_script_archive_dir()
+    if archive_dir is None:
+        return {"items": [], "count": 0, "error": "Script archive directory is unavailable."}
+
+    normalized_keyword = (keyword or "").strip().lower()
+    normalized_nodes = set(_normalize_nodes_involved(nodes_involved))
+    try:
+        parsed_limit = int(limit)
+    except (TypeError, ValueError):
+        parsed_limit = 20
+    safe_limit = max(1, min(parsed_limit, 100))
+
+    metadata_files: list[Path]
+    if isinstance(script_id, str) and script_id.strip():
+        candidate = archive_dir / f"{script_id.strip()}.json"
+        metadata_files = [candidate] if candidate.exists() else []
+    else:
+        metadata_files = sorted(
+            archive_dir.glob(f"{_SCRIPT_ID_PREFIX}*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+
+    results: list[dict[str, Any]] = []
+    for metadata_path in metadata_files:
+        if len(results) >= safe_limit:
+            break
+        try:
+            raw = metadata_path.read_text(encoding="utf-8")
+            metadata = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                log_event(
+                    "aiida.worker.script_archive.read_failed",
+                    metadata_file=str(metadata_path),
+                    error=str(exc)[:220],
+                )
+            )
+            continue
+
+        if not isinstance(metadata, dict):
+            continue
+        archived_intent = str(metadata.get("intent") or "")
+        archived_nodes = _normalize_nodes_involved(metadata.get("nodes_involved"))
+
+        if normalized_keyword and normalized_keyword not in archived_intent.lower():
+            continue
+        if normalized_nodes and not normalized_nodes.intersection(archived_nodes):
+            continue
+
+        item: dict[str, Any] = {
+            "script_id": str(metadata.get("script_id") or metadata_path.stem),
+            "timestamp": metadata.get("timestamp"),
+            "intent": archived_intent,
+            "status": metadata.get("status"),
+            "nodes_involved": archived_nodes,
+            "created_pks": _normalize_nodes_involved(metadata.get("created_pks")),
+            "error_message": metadata.get("error_message"),
+            "missing_module": metadata.get("missing_module"),
+        }
+        if include_source:
+            script_path = archive_dir / f"{item['script_id']}.py"
+            try:
+                if script_path.exists():
+                    item["script"] = script_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                item["script_read_error"] = str(exc)
+        results.append(item)
+
+    return {
+        "count": len(results),
+        "items": results,
+        "filters": {
+            "keyword": normalized_keyword or None,
+            "nodes_involved": sorted(normalized_nodes),
+            "script_id": script_id,
+            "include_source": include_source,
+        },
+    }
 
 
 async def get_bands_plot_data(pk: int) -> dict[str, Any] | str:
@@ -520,9 +958,13 @@ __all__ = [
     "get_remote_workchain_spec",
     "inspect_lab_infrastructure",
     "draft_workchain_builder",
+    "validate_workchain_builder",
+    "validate_job",
     "submit_workchain_builder",
+    "submit_job",
     "submit_workflow",
     "run_python_code",
+    "search_script_archive",
     "get_bands_plot_data",
     "list_remote_files",
     "get_remote_file_content",

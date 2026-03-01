@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     ENGINE_TYPE: str = os.getenv("SABR_ENGINE_TYPE", "")
     DEPS_CLASS: str = os.getenv("SABR_DEPS_CLASS", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "your-key-here")
+    DEFAULT_MODEL: str = os.getenv("SABR_DEFAULT_MODEL", "gemini-3-pro-preview")
+    GEMINI_API_VERSION: str = os.getenv("SABR_GEMINI_API_VERSION", "v1beta")
+    GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "32768"))
+    GEMINI_UNAVAILABLE_RETRIES: int = int(os.getenv("SABR_GEMINI_UNAVAILABLE_RETRIES", "2"))
+    GEMINI_UNAVAILABLE_RETRY_BACKOFF_SECONDS: float = float(
+        os.getenv("SABR_GEMINI_UNAVAILABLE_RETRY_BACKOFF_SECONDS", "2.0")
+    )
     SABR_MEMORY_DIR: str = os.getenv("SABR_MEMORY_DIR",  "default")
 
     # --- Observability ---

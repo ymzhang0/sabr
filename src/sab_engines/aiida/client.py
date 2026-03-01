@@ -1,41 +1,809 @@
-"""Canonical AiiDA worker client facade.
+"""Unified AiiDA worker client.
 
-This module centralizes both low-level HTTP helpers and higher-level bridge
-snapshot service used by SABR thin-client routes.
+This module is the single transport/service surface for aiida-worker calls.
+It combines low-level JSON request helpers and higher-level bridge snapshot
+logic in one singleton-backed class.
 """
 
-from .bridge_client import (
-    DEFAULT_BRIDGE_URL,
-    OFFLINE_WORKER_MESSAGE,
-    BridgeAPIError,
-    BridgeOfflineError,
-    bridge_endpoint,
-    bridge_url,
-    format_bridge_error,
-    request_json,
-    request_json_sync,
+from __future__ import annotations
+
+import asyncio
+import contextvars
+import copy
+import time
+from dataclasses import dataclass, field
+from typing import Any, Callable, Literal, Mapping
+from urllib.parse import urlparse
+
+import httpx
+from loguru import logger
+
+from src.sab_core.logging_utils import log_event
+from src.sab_engines.aiida.config import aiida_engine_settings
+
+DEFAULT_BRIDGE_URL = aiida_engine_settings.default_bridge_url
+OFFLINE_WORKER_MESSAGE = aiida_engine_settings.offline_worker_message
+
+BridgeCallListener = Callable[[str], None]
+_bridge_call_listener: contextvars.ContextVar[BridgeCallListener | None] = contextvars.ContextVar(
+    "aiida_bridge_call_listener",
+    default=None,
 )
-from .bridge_service import (
-    AiiDABridgeService,
-    BridgeConnectionState,
-    BridgeResourceCounts,
-    BridgeSnapshot,
-    bridge_service,
-)
+
+BridgeConnectionState = Literal["online", "offline"]
+
+
+@dataclass
+class BridgeAPIError(Exception):
+    status_code: int
+    message: str
+    payload: Any
+
+    def __str__(self) -> str:
+        return f"HTTP {self.status_code}: {self.message}"
+
+
+class BridgeOfflineError(Exception):
+    def __str__(self) -> str:
+        return OFFLINE_WORKER_MESSAGE
+
+
+@dataclass
+class BridgeResourceCounts:
+    computers: int = 0
+    codes: int = 0
+    workchains: int = 0
+
+
+@dataclass
+class BridgeSnapshot:
+    status: BridgeConnectionState = "offline"
+    url: str = aiida_engine_settings.default_bridge_url
+    environment: str = aiida_engine_settings.bridge_environment
+    profile: str = "unknown"
+    daemon_status: bool = False
+    resources: BridgeResourceCounts = field(default_factory=BridgeResourceCounts)
+    plugins: list[str] = field(default_factory=list)
+    checked_at: float = 0.0
+
+
+def _is_identifier_segment(segment: str) -> bool:
+    cleaned = segment.strip().lower()
+    if not cleaned:
+        return False
+    if cleaned.isdigit():
+        return True
+    if len(cleaned) >= 8 and all(char in "0123456789abcdef-" for char in cleaned):
+        return True
+    return False
+
+
+def _infer_bridge_call_name(method: str, path: str) -> str:
+    parts = [part for part in path.strip("/").split("/") if part]
+    normalized_parts = ["{id}" if _is_identifier_segment(part) else part for part in parts]
+    compact = ".".join(normalized_parts[-3:]) if normalized_parts else "root"
+    return f"{method.upper()} {compact}"
+
+
+def _emit_bridge_call_event(method: str, path: str) -> None:
+    listener = _bridge_call_listener.get()
+    if listener is None:
+        return
+    try:
+        listener(_infer_bridge_call_name(method, path))
+    except Exception:  # noqa: BLE001
+        # Listener errors should never block bridge calls.
+        pass
+
+
+def _extract_error_payload(response: httpx.Response) -> tuple[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = response.text
+
+    if isinstance(payload, dict):
+        detail = payload.get("detail")
+        if isinstance(detail, dict):
+            message = str(detail.get("error") or detail.get("message") or response.reason_phrase)
+        else:
+            message = str(payload.get("error") or payload.get("message") or response.reason_phrase)
+    else:
+        message = str(payload or response.reason_phrase)
+
+    return message, payload
+
+
+class AiiDAWorkerClient:
+    def __init__(
+        self,
+        bridge_url: str,
+        *,
+        environment: str = aiida_engine_settings.bridge_environment,
+        cache_ttl_seconds: float = 10.0,
+        infra_cache_ttl_seconds: float = 8.0,
+        request_timeout_seconds: float = 2.0,
+        request_retries: int = 2,
+        retry_backoff_seconds: float = 0.2,
+    ) -> None:
+        normalized_url = (bridge_url or aiida_engine_settings.default_bridge_url).strip()
+        self._bridge_url = normalized_url.rstrip("/")
+        self._environment = environment
+        self._cache_ttl_seconds = max(1.0, float(cache_ttl_seconds))
+        self._infra_cache_ttl_seconds = max(1.0, float(infra_cache_ttl_seconds))
+        self._request_timeout_seconds = max(0.2, float(request_timeout_seconds))
+        self._request_retries = max(0, int(request_retries))
+        self._retry_backoff_seconds = max(0.05, float(retry_backoff_seconds))
+
+        self._snapshot = BridgeSnapshot(url=self._bridge_url, environment=self._environment)
+        self._status_endpoint_supported: bool | None = None
+        self._status_lock = asyncio.Lock()
+        self._infrastructure_lock = asyncio.Lock()
+        self._infrastructure_cache: dict[str, Any] | None = None
+        self._infrastructure_cached_at: float = 0.0
+        self._logged_first_handshake = False
+
+    @property
+    def bridge_url(self) -> str:
+        return self._bridge_url
+
+    @property
+    def is_connected(self) -> bool:
+        return self._snapshot.status == "online"
+
+    def bridge_endpoint(self, path: str) -> str:
+        normalized = path if path.startswith("/") else f"/{path}"
+        return f"{self._bridge_url}{normalized}"
+
+    async def request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
+        timeout: float = 10.0,
+        retries: int | None = None,
+    ) -> Any:
+        method_upper = method.upper()
+        endpoint = self.bridge_endpoint(path)
+        _emit_bridge_call_event(method_upper, path)
+        retry_budget = self._resolve_retry_budget(method_upper, retries)
+
+        for attempt in range(retry_budget + 1):
+            try:
+                async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                    response = await client.request(method_upper, endpoint, params=params, json=json)
+            except httpx.ConnectError as exc:
+                self._mark_offline()
+                if attempt < retry_budget:
+                    await self._sleep_for_retry(attempt)
+                    continue
+                raise BridgeOfflineError() from exc
+            except httpx.TimeoutException as exc:
+                self._mark_offline()
+                if attempt < retry_budget:
+                    await self._sleep_for_retry(attempt)
+                    continue
+                raise BridgeAPIError(status_code=0, message=str(exc), payload={"error": str(exc)}) from exc
+            except httpx.RequestError as exc:
+                self._mark_offline()
+                if attempt < retry_budget:
+                    await self._sleep_for_retry(attempt)
+                    continue
+                raise BridgeAPIError(status_code=0, message=str(exc), payload={"error": str(exc)}) from exc
+
+            if self._should_retry_status(response.status_code) and attempt < retry_budget:
+                await self._sleep_for_retry(attempt)
+                continue
+
+            if response.status_code >= 400:
+                message, payload = _extract_error_payload(response)
+                raise BridgeAPIError(status_code=response.status_code, message=message, payload=payload)
+
+            self._mark_online()
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise BridgeAPIError(
+                    status_code=response.status_code,
+                    message="Invalid JSON response",
+                    payload=response.text,
+                ) from exc
+
+        raise BridgeAPIError(status_code=0, message="Unknown worker request failure", payload={"path": path})
+
+    def request_json_sync(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Mapping[str, Any] | None = None,
+        json: Mapping[str, Any] | None = None,
+        timeout: float = 10.0,
+        retries: int | None = None,
+    ) -> Any:
+        method_upper = method.upper()
+        endpoint = self.bridge_endpoint(path)
+        _emit_bridge_call_event(method_upper, path)
+        retry_budget = self._resolve_retry_budget(method_upper, retries)
+
+        for attempt in range(retry_budget + 1):
+            try:
+                with httpx.Client(timeout=timeout, trust_env=False) as client:
+                    response = client.request(method_upper, endpoint, params=params, json=json)
+            except httpx.ConnectError as exc:
+                self._mark_offline()
+                if attempt < retry_budget:
+                    self._sleep_for_retry_sync(attempt)
+                    continue
+                raise BridgeOfflineError() from exc
+            except httpx.TimeoutException as exc:
+                self._mark_offline()
+                if attempt < retry_budget:
+                    self._sleep_for_retry_sync(attempt)
+                    continue
+                raise BridgeAPIError(status_code=0, message=str(exc), payload={"error": str(exc)}) from exc
+            except httpx.RequestError as exc:
+                self._mark_offline()
+                if attempt < retry_budget:
+                    self._sleep_for_retry_sync(attempt)
+                    continue
+                raise BridgeAPIError(status_code=0, message=str(exc), payload={"error": str(exc)}) from exc
+
+            if self._should_retry_status(response.status_code) and attempt < retry_budget:
+                self._sleep_for_retry_sync(attempt)
+                continue
+
+            if response.status_code >= 400:
+                message, payload = _extract_error_payload(response)
+                raise BridgeAPIError(status_code=response.status_code, message=message, payload=payload)
+
+            self._mark_online()
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise BridgeAPIError(
+                    status_code=response.status_code,
+                    message="Invalid JSON response",
+                    payload=response.text,
+                ) from exc
+
+        raise BridgeAPIError(status_code=0, message="Unknown worker request failure", payload={"path": path})
+
+    async def get_status(self, *, force_refresh: bool = False) -> BridgeSnapshot:
+        await self._refresh_if_needed(force_refresh=force_refresh)
+        return BridgeSnapshot(
+            status=self._snapshot.status,
+            url=self._snapshot.url,
+            environment=self._snapshot.environment,
+            profile=self._snapshot.profile,
+            daemon_status=self._snapshot.daemon_status,
+            resources=BridgeResourceCounts(
+                computers=self._snapshot.resources.computers,
+                codes=self._snapshot.resources.codes,
+                workchains=self._snapshot.resources.workchains,
+            ),
+            plugins=list(self._snapshot.plugins),
+            checked_at=self._snapshot.checked_at,
+        )
+
+    async def get_plugins(self, *, force_refresh: bool = False) -> list[str]:
+        snapshot = await self.get_status(force_refresh=force_refresh)
+        return snapshot.plugins
+
+    async def get_system_info(self) -> dict[str, Any]:
+        payload = await self._fetch_json("/system/info", timeout_seconds=max(8.0, self._request_timeout_seconds))
+        return payload if isinstance(payload, dict) else {}
+
+    async def get_resources(self) -> dict[str, Any]:
+        payload = await self._fetch_json("/resources", timeout_seconds=max(8.0, self._request_timeout_seconds))
+        return payload if isinstance(payload, dict) else {}
+
+    async def get_profiles(self) -> dict[str, Any]:
+        payload = await self._fetch_json("/management/profiles", timeout_seconds=max(8.0, self._request_timeout_seconds))
+        if not isinstance(payload, dict):
+            return {"current_profile": None, "default_profile": None, "profiles": []}
+        return payload
+
+    async def switch_profile(self, profile: str) -> dict[str, Any]:
+        payload = await self._post_json(
+            "/management/profiles/switch",
+            payload={"profile": profile},
+            timeout_seconds=max(8.0, self._request_timeout_seconds),
+            retries=0,
+        )
+        await self.get_status(force_refresh=True)
+        if not isinstance(payload, dict):
+            return {"status": "switched", "current_profile": profile}
+        return payload
+
+    async def inspect_infrastructure(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        if not force_refresh and self._is_infrastructure_cache_fresh():
+            return copy.deepcopy(self._infrastructure_cache or {})
+
+        async with self._infrastructure_lock:
+            if not force_refresh and self._is_infrastructure_cache_fresh():
+                return copy.deepcopy(self._infrastructure_cache or {})
+
+            system_payload = await self.get_system_info()
+            resources_payload = await self.get_resources()
+            if not isinstance(system_payload, dict) or not isinstance(resources_payload, dict):
+                raise BridgeAPIError(
+                    status_code=0,
+                    message="Bridge returned invalid infrastructure payload",
+                    payload={"system": system_payload, "resources": resources_payload},
+                )
+
+            computers = resources_payload.get("computers") if isinstance(resources_payload.get("computers"), list) else []
+            codes = resources_payload.get("codes") if isinstance(resources_payload.get("codes"), list) else []
+            payload = {
+                "profile": str(system_payload.get("profile") or "unknown"),
+                "daemon_status": bool(system_payload.get("daemon_status", False)),
+                "counts": system_payload.get("counts") if isinstance(system_payload.get("counts"), dict) else {},
+                "computers": computers,
+                "codes": codes,
+                "code_targets": [
+                    f"{code.get('label')}@{code.get('computer_label')}"
+                    if isinstance(code, dict) and code.get("computer_label")
+                    else str(code.get("label") if isinstance(code, dict) else code)
+                    for code in codes
+                ],
+            }
+            self._infrastructure_cache = payload
+            self._infrastructure_cached_at = time.monotonic()
+            return copy.deepcopy(payload)
+
+    async def _refresh_if_needed(self, *, force_refresh: bool) -> None:
+        if not force_refresh and self._is_cache_fresh():
+            return
+
+        async with self._status_lock:
+            if not force_refresh and self._is_cache_fresh():
+                return
+            await self._refresh_locked()
+
+    def _is_cache_fresh(self) -> bool:
+        checked_at = self._snapshot.checked_at
+        if checked_at <= 0:
+            return False
+        return (time.monotonic() - checked_at) < self._cache_ttl_seconds
+
+    def _is_infrastructure_cache_fresh(self) -> bool:
+        if self._infrastructure_cache is None or self._infrastructure_cached_at <= 0:
+            return False
+        return (time.monotonic() - self._infrastructure_cached_at) < self._infra_cache_ttl_seconds
+
+    async def _refresh_locked(self) -> None:
+        checked_at = time.monotonic()
+
+        status_error: Exception | None = None
+        payload: Any | None = None
+
+        if self._status_endpoint_supported is not False:
+            try:
+                payload = await self._fetch_json("/status")
+                self._status_endpoint_supported = True
+            except Exception as exc:  # noqa: BLE001
+                status_error = exc
+                if self._is_http_not_found(exc):
+                    self._status_endpoint_supported = False
+
+        if payload is None:
+            payload = await self._fetch_legacy_status_payload()
+            if payload is None:
+                self._snapshot.status = "offline"
+                self._snapshot.checked_at = checked_at
+                error_message = (
+                    f"{type(status_error).__name__}: {status_error}"
+                    if status_error is not None
+                    else "Legacy status endpoints unavailable"
+                )
+                logger.error(log_event("aiida.bridge.unreachable", url=self._bridge_url, error=error_message))
+                return
+
+        normalized = self._normalize_status_payload(payload)
+        self._snapshot.status = normalized["status"]
+        self._snapshot.environment = normalized["environment"]
+        self._snapshot.profile = normalized["profile"]
+        self._snapshot.daemon_status = normalized["daemon_status"]
+        self._snapshot.resources = normalized["resources"]
+        self._snapshot.plugins = normalized["plugins"]
+        self._snapshot.checked_at = checked_at
+
+        if status_error is not None:
+            logger.warning(
+                log_event(
+                    "aiida.bridge.status.fallback",
+                    url=self._bridge_url,
+                    error=f"{type(status_error).__name__}: {status_error}",
+                )
+            )
+
+        if not self._logged_first_handshake:
+            logger.info(f"[AiiDA Bridge] Connected to worker at {self._worker_target}")
+            self._logged_first_handshake = True
+
+    async def _fetch_json(
+        self,
+        path: str,
+        *,
+        timeout_seconds: float | None = None,
+        retries: int | None = None,
+    ) -> Any:
+        return await self.request_json(
+            "GET",
+            path,
+            timeout=timeout_seconds or self._request_timeout_seconds,
+            retries=retries,
+        )
+
+    async def _post_json(
+        self,
+        path: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        timeout_seconds: float | None = None,
+        retries: int | None = 0,
+    ) -> Any:
+        return await self.request_json(
+            "POST",
+            path,
+            json=payload or {},
+            timeout=timeout_seconds or self._request_timeout_seconds,
+            retries=retries,
+        )
+
+    async def _fetch_legacy_status_payload(self) -> dict[str, Any] | None:
+        plugins_result, system_result, resources_result = await asyncio.gather(
+            self._fetch_json("/plugins"),
+            self._fetch_json("/system/info"),
+            self._fetch_json("/resources"),
+            return_exceptions=True,
+        )
+
+        any_success = not all(
+            isinstance(item, Exception)
+            for item in (plugins_result, system_result, resources_result)
+        )
+        if not any_success:
+            return None
+
+        payload: dict[str, Any] = {"status": "online"}
+
+        if not isinstance(plugins_result, Exception):
+            payload["plugins"] = plugins_result
+
+        if isinstance(system_result, dict):
+            payload["profile"] = system_result.get("profile")
+            payload["daemon_status"] = system_result.get("daemon_status")
+            counts = system_result.get("counts")
+            if isinstance(counts, dict):
+                payload["counts"] = counts
+            environment = system_result.get("environment")
+            if isinstance(environment, str) and environment.strip():
+                payload["environment"] = environment.strip()
+
+        if isinstance(resources_result, dict):
+            payload["resources"] = resources_result
+
+        return payload
+
+    @staticmethod
+    def _is_http_not_found(error: Exception) -> bool:
+        return isinstance(error, httpx.HTTPStatusError) and error.response.status_code == 404
+
+    @staticmethod
+    def _is_idempotent_method(method: str) -> bool:
+        return method.upper() in {"GET", "HEAD", "OPTIONS"}
+
+    @staticmethod
+    def _should_retry_status(status_code: int) -> bool:
+        return status_code in {408, 425, 429, 500, 502, 503, 504}
+
+    def _resolve_retry_budget(self, method: str, retries: int | None) -> int:
+        if retries is not None:
+            return max(0, int(retries))
+        if self._is_idempotent_method(method):
+            return self._request_retries
+        return 0
+
+    async def _sleep_for_retry(self, attempt: int) -> None:
+        await asyncio.sleep(self._retry_backoff_seconds * float(attempt + 1))
+
+    def _sleep_for_retry_sync(self, attempt: int) -> None:
+        time.sleep(self._retry_backoff_seconds * float(attempt + 1))
+
+    def _mark_online(self) -> None:
+        self._snapshot.status = "online"
+        self._snapshot.checked_at = time.monotonic()
+
+    def _mark_offline(self) -> None:
+        self._snapshot.status = "offline"
+        self._snapshot.checked_at = time.monotonic()
+
+    @property
+    def _worker_target(self) -> str:
+        parsed = urlparse(self._bridge_url)
+        if parsed.port:
+            return f":{parsed.port}"
+        if parsed.netloc:
+            return parsed.netloc
+        return self._bridge_url
+
+    def _normalize_status_payload(self, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {
+                "status": "online",
+                "environment": self._environment,
+                "profile": "unknown",
+                "daemon_status": False,
+                "resources": BridgeResourceCounts(),
+                "plugins": [],
+            }
+
+        raw_status = str(payload.get("status") or "online").strip().lower()
+        status: BridgeConnectionState = "offline" if raw_status in {
+            "offline",
+            "error",
+            "failed",
+            "unavailable",
+        } else "online"
+
+        environment = self._extract_first_non_empty(payload, ("environment", "worker_environment"))
+        profile = self._extract_profile(payload)
+        daemon_status = self._extract_daemon_status(payload)
+        resources = self._extract_resource_counts(payload)
+        plugins = self._extract_plugins(payload)
+
+        return {
+            "status": status,
+            "environment": environment or self._environment,
+            "profile": profile or "unknown",
+            "daemon_status": daemon_status,
+            "resources": resources,
+            "plugins": plugins,
+        }
+
+    def _extract_profile(self, payload: dict[str, Any]) -> str | None:
+        profile = self._extract_first_non_empty(payload, ("profile", "current_profile", "active_profile"))
+        if profile:
+            return profile
+
+        system = payload.get("system")
+        if isinstance(system, dict):
+            nested = self._extract_first_non_empty(system, ("profile", "current_profile", "active_profile"))
+            if nested:
+                return nested
+        return None
+
+    def _extract_daemon_status(self, payload: dict[str, Any]) -> bool:
+        for key in ("daemon_status", "daemon_running", "is_daemon_running"):
+            value = payload.get(key)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"true", "yes", "on", "running"}:
+                    return True
+                if lowered in {"false", "no", "off", "stopped"}:
+                    return False
+        return False
+
+    def _extract_resource_counts(self, payload: dict[str, Any]) -> BridgeResourceCounts:
+        counts = BridgeResourceCounts()
+
+        counts_payload = payload.get("counts")
+        if isinstance(counts_payload, dict):
+            counts.computers = self._coerce_non_negative_int(counts_payload.get("computers"))
+            counts.codes = self._coerce_non_negative_int(counts_payload.get("codes"))
+            counts.workchains = self._coerce_non_negative_int(counts_payload.get("workchains"))
+
+        resources_payload = payload.get("resources")
+        if isinstance(resources_payload, dict):
+            computers = resources_payload.get("computers")
+            codes = resources_payload.get("codes")
+            if counts.computers == 0:
+                counts.computers = self._count_resource_items(computers)
+            if counts.codes == 0:
+                counts.codes = self._count_resource_items(codes)
+
+        if counts.workchains == 0:
+            workchains = payload.get("workchains")
+            counts.workchains = self._count_resource_items(workchains)
+        if counts.workchains == 0:
+            counts.workchains = self._coerce_non_negative_int(payload.get("plugin_count"))
+
+        return counts
+
+    def _extract_plugins(self, payload: dict[str, Any]) -> list[str]:
+        for key in ("plugins", "plugin_names", "workchains"):
+            raw = payload.get(key)
+            normalized = self._normalize_plugins(raw)
+            if normalized:
+                return normalized
+
+        resources_payload = payload.get("resources")
+        if isinstance(resources_payload, dict):
+            normalized = self._normalize_plugins(resources_payload.get("plugins"))
+            if normalized:
+                return normalized
+        return []
+
+    @staticmethod
+    def _count_resource_items(value: Any) -> int:
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, dict):
+            return len(value)
+        return 0
+
+    @staticmethod
+    def _coerce_non_negative_int(value: Any) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, parsed)
+
+    @staticmethod
+    def _extract_first_non_empty(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+        for key in keys:
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _normalize_plugins(self, payload: Any) -> list[str]:
+        raw_plugins: list[Any]
+        if isinstance(payload, list):
+            raw_plugins = payload
+        elif isinstance(payload, dict):
+            plugins = payload.get("plugins")
+            if isinstance(plugins, list):
+                raw_plugins = plugins
+            else:
+                items = payload.get("items")
+                raw_plugins = items if isinstance(items, list) else []
+        else:
+            raw_plugins = []
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in raw_plugins:
+            plugin_name = self._normalize_plugin_item(item)
+            if not plugin_name or plugin_name in seen:
+                continue
+            seen.add(plugin_name)
+            normalized.append(plugin_name)
+
+        normalized.sort()
+        return normalized
+
+    @staticmethod
+    def _normalize_plugin_item(item: Any) -> str:
+        if isinstance(item, str):
+            return item.strip()
+
+        if isinstance(item, dict):
+            for key in ("name", "entry_point", "plugin", "id"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            return str(item).strip()
+
+        return str(item).strip()
+
+
+# Backward-compatible alias used by tests/importers.
+AiiDABridgeService = AiiDAWorkerClient
+
+
+_aiida_worker_client: AiiDAWorkerClient | None = None
+
+
+def get_aiida_worker_client() -> AiiDAWorkerClient:
+    global _aiida_worker_client
+    if _aiida_worker_client is None:
+        _aiida_worker_client = AiiDAWorkerClient(
+            bridge_url=aiida_engine_settings.resolved_bridge_url,
+            environment=aiida_engine_settings.bridge_environment,
+        )
+    return _aiida_worker_client
+
+
+aiida_worker_client = get_aiida_worker_client()
+# Backward-compatible singleton name consumed by router and other call-sites.
+bridge_service = aiida_worker_client
+
+
+def bridge_url() -> str:
+    return aiida_worker_client.bridge_url
+
+
+def bridge_endpoint(path: str) -> str:
+    return aiida_worker_client.bridge_endpoint(path)
+
+
+def set_bridge_call_listener(
+    listener: BridgeCallListener | None,
+) -> contextvars.Token[BridgeCallListener | None]:
+    return _bridge_call_listener.set(listener)
+
+
+def reset_bridge_call_listener(token: contextvars.Token[BridgeCallListener | None]) -> None:
+    _bridge_call_listener.reset(token)
+
+
+async def request_json(
+    method: str,
+    path: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    json: Mapping[str, Any] | None = None,
+    timeout: float = 10.0,
+    retries: int | None = None,
+) -> Any:
+    return await aiida_worker_client.request_json(
+        method,
+        path,
+        params=params,
+        json=json,
+        timeout=timeout,
+        retries=retries,
+    )
+
+
+def request_json_sync(
+    method: str,
+    path: str,
+    *,
+    params: Mapping[str, Any] | None = None,
+    json: Mapping[str, Any] | None = None,
+    timeout: float = 10.0,
+    retries: int | None = None,
+) -> Any:
+    return aiida_worker_client.request_json_sync(
+        method,
+        path,
+        params=params,
+        json=json,
+        timeout=timeout,
+        retries=retries,
+    )
+
+
+def format_bridge_error(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, BridgeOfflineError):
+        return {"error": OFFLINE_WORKER_MESSAGE}
+    if isinstance(exc, BridgeAPIError):
+        return {
+            "error": exc.message,
+            "status_code": exc.status_code,
+            "details": exc.payload,
+        }
+    return {"error": str(exc)}
+
 
 __all__ = [
     "DEFAULT_BRIDGE_URL",
     "OFFLINE_WORKER_MESSAGE",
     "BridgeAPIError",
+    "BridgeCallListener",
     "BridgeOfflineError",
-    "bridge_endpoint",
-    "bridge_url",
-    "format_bridge_error",
-    "request_json",
-    "request_json_sync",
-    "AiiDABridgeService",
     "BridgeConnectionState",
     "BridgeResourceCounts",
     "BridgeSnapshot",
+    "AiiDAWorkerClient",
+    "AiiDABridgeService",
+    "get_aiida_worker_client",
+    "aiida_worker_client",
     "bridge_service",
+    "bridge_url",
+    "bridge_endpoint",
+    "set_bridge_call_listener",
+    "reset_bridge_call_listener",
+    "request_json",
+    "request_json_sync",
+    "format_bridge_error",
 ]

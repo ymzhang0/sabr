@@ -1,11 +1,14 @@
 """Tests for AiiDA frontend process serialization and process-detail enrichment."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from src.sab_engines.aiida import router as aiida_router
 from src.sab_engines.aiida.router import (
     _coerce_chat_metadata,
     _extract_folder_preview,
+    _serialize_group_labels,
     _serialize_processes,
 )
 
@@ -95,6 +98,14 @@ def test_coerce_chat_metadata_drops_empty_keys() -> None:
     assert coerced == {"current_focus_pk": 123}
 
 
+def test_serialize_group_labels_deduplicates_and_drops_empty_values() -> None:
+    labels = ["alpha", "beta", "alpha", "  ", "", None, "gamma"]  # type: ignore[list-item]
+
+    serialized = _serialize_group_labels(labels)
+
+    assert serialized == ["alpha", "beta", "gamma"]
+
+
 def test_extract_folder_preview_ignores_generic_node_metadata() -> None:
     payload = {
         "pk": 55,
@@ -157,3 +168,86 @@ async def test_enrich_process_detail_payload_always_exposes_link_arrays() -> Non
 
     assert enriched["inputs"] == []
     assert enriched["outputs"] == []
+
+
+def test_clear_pending_submission_memory_sets_none() -> None:
+    captured: dict[str, object] = {}
+
+    class _DummyMemory:
+        def set_kv(self, key: str, value: object) -> None:
+            captured[key] = value
+
+    state = type("State", (), {"memory": _DummyMemory()})()
+
+    aiida_router._clear_pending_submission_memory(state)
+
+    assert captured[aiida_router.PENDING_SUBMISSION_KEY] is None
+
+
+@pytest.mark.anyio
+async def test_submit_bridge_workchain_single_adds_submitted_pk(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_request_json(method: str, path: str, json: dict[str, object]):  # noqa: ARG001
+        assert method == "POST"
+        assert path == "/submission/submit"
+        assert "draft" in json
+        return {"status": "SUBMITTED", "pk": 321}
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    captured: dict[str, object] = {}
+
+    class _DummyMemory:
+        def set_kv(self, key: str, value: object) -> None:
+            captured[key] = value
+
+    state = SimpleNamespace(memory=_DummyMemory())
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    payload = aiida_router.SubmissionDraftRequest(draft={"builder": {"structure_pk": 11}})
+
+    response = await aiida_router.submit_bridge_workchain(request, payload)
+
+    assert response["submitted_pks"] == [321]
+    assert response["process_pks"] == [321]
+    assert captured[aiida_router.PENDING_SUBMISSION_KEY] is None
+
+
+@pytest.mark.anyio
+async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch: pytest.MonkeyPatch) -> None:
+    submitted = [901, 902, 903]
+    call_count = 0
+
+    async def _fake_request_json(method: str, path: str, json: dict[str, object]):  # noqa: ARG001
+        nonlocal call_count
+        assert method == "POST"
+        assert path == "/submission/submit"
+        assert "draft" in json
+        pk = submitted[call_count]
+        call_count += 1
+        return {"status": "SUBMITTED", "pk": pk}
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    captured: dict[str, object] = {}
+
+    class _DummyMemory:
+        def set_kv(self, key: str, value: object) -> None:
+            captured[key] = value
+
+    state = SimpleNamespace(memory=_DummyMemory())
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    payload = aiida_router.SubmissionDraftRequest(
+        draft=[
+            {"builder": {"structure_pk": 11}},
+            {"builder": {"structure_pk": 22}},
+            {"builder": {"structure_pk": 33}},
+        ]
+    )
+
+    response = await aiida_router.submit_bridge_workchain(request, payload)
+
+    assert response["status"] == "SUBMITTED_BATCH"
+    assert response["submitted_pks"] == submitted
+    assert response["process_pks"] == submitted
+    assert response["failures"] == []
+    assert len(response["responses"]) == 3
+    assert captured[aiida_router.PENDING_SUBMISSION_KEY] is None

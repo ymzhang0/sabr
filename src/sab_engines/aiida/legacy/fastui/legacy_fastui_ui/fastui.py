@@ -5,6 +5,8 @@ from fastui.components import forms as f
 from fastui import events as e
 from fastui import FastUI
 
+from src.sab_core.config import settings
+
 SIDEBAR_SHELL = "col-md-3 vh-100 p-3 p-lg-4 d-flex flex-column overflow-auto border-end border-dark border-opacity-10 bg-white"
 MAIN_SHELL = "col-md-9 vh-100 p-0 bg-white"
 PANEL_BORDER = "border border-dark border-opacity-10 rounded-4 bg-white"
@@ -419,7 +421,7 @@ def get_chat_interface(
     quick_shortcuts: list[dict[str, str]] | None = None,
 ):
     chat_history = chat_history or []
-    available_models = available_models or ["gemini-2.0-flash"]
+    available_models = available_models or [settings.DEFAULT_MODEL]
     quick_shortcuts = quick_shortcuts or []
     model_name = model_name if model_name in available_models else available_models[0]
     model_options = [{"value": m, "label": m} for m in available_models]

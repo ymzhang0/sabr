@@ -3,6 +3,7 @@ from nicegui import ui, app
 # Import SABR v2 logic and UI components
 from src.sab_engines.aiida.ui.legacy_nicegui.layout import create_aiida_layout
 from src.sab_engines.aiida.ui.legacy_nicegui.controller import RemoteAiiDAController
+from src.sab_core.config import settings
 from src.sab_core.memory.json_memory import JSONMemory
 
 # --- 1. Global Configuration ---
@@ -28,7 +29,7 @@ async def main():
     
     # 🚩 1. Initialize Layout
     # Pass available models defined in settings or defaults
-    available_models = ["gemini-2.0-flash", "gemini-1.5-pro"]
+    available_models = [settings.DEFAULT_MODEL]
     components = create_aiida_layout(
         theme_name='gemini_dark', 
         available_models=available_models

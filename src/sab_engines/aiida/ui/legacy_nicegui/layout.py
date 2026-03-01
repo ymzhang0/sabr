@@ -1,13 +1,16 @@
 import os
 from nicegui import ui
 
+from src.sab_core.config import settings
+
 from .themes import THEMES
 
-def create_aiida_layout(theme_name='gemini_dark', available_models=["gemini-2.0-flash", "gemini-1.5-pro"]):
+def create_aiida_layout(theme_name='gemini_dark', available_models=None):
     """
     Standardized AiiDA Layout for SABR v2.
     Fully restores original UI elements including themes, terminal styles, and animations.
     """
+    available_models = available_models or [settings.DEFAULT_MODEL]
     theme = THEMES.get(theme_name, THEMES['gemini_dark'])
     theme_css = ":root {\n" + "\n".join([f"    {k}: {v};" for k, v in theme.items()]) + "\n}"
 

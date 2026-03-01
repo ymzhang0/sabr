@@ -13,6 +13,7 @@ import type {
   ProcessLogsResponse,
   ProcessesResponse,
   SendChatRequest,
+  SubmissionResponse,
   UploadArchiveResponse,
 } from "@/types/aiida";
 
@@ -54,6 +55,7 @@ export function getTerminalWsUrl(path = "/api/terminal"): string {
 }
 
 export const LOGS_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/logs/stream`);
+export const CHAT_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/chat/stream`);
 export const TERMINAL_WS_URL = getTerminalWsUrl("/api/terminal");
 
 export const frontendApi = axios.create({
@@ -65,6 +67,10 @@ const aiidaApi = axios.create({
   baseURL: aiidaBaseURL,
   timeout: 5000,
 });
+
+export type SubmissionSubmitDraftPayload =
+  | Record<string, unknown>
+  | Array<Record<string, unknown>>;
 
 export async function getBootstrap(): Promise<BootstrapResponse> {
   const { data } = await frontendApi.get<BootstrapResponse>("/bootstrap");
@@ -133,6 +139,18 @@ export async function getProcessDetail(identifier: number | string): Promise<Pro
 
 export async function getProcessLogs(identifier: number | string): Promise<ProcessLogsResponse> {
   const { data } = await aiidaApi.get<ProcessLogsResponse>(`/process/${identifier}/logs`);
+  return data;
+}
+
+export async function submitPreviewDraft(
+  draft: SubmissionSubmitDraftPayload,
+): Promise<SubmissionResponse> {
+  const { data } = await aiidaApi.post<SubmissionResponse>("/submission/submit", { draft });
+  return data;
+}
+
+export async function cancelPendingSubmission(): Promise<{ status: string }> {
+  const { data } = await frontendApi.post<{ status: string }>("/submission/pending/cancel");
   return data;
 }
 

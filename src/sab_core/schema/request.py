@@ -1,6 +1,7 @@
 # src/sab_core/schema/request.py
 from pydantic import BaseModel, Field
 from typing import Optional
+from src.sab_core.config import settings
 
 class AgentRequest(BaseModel):
     """
@@ -17,6 +18,6 @@ class AgentRequest(BaseModel):
 
     # Optional: The specific model to use (if the user switches it in the UI)
     model_name: Optional[str] = Field(
-        default="gemini-2.0-flash", 
+        default=settings.DEFAULT_MODEL,
         description="The AI model ID to handle this request."
     )

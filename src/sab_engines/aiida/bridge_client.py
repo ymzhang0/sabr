@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import contextvars
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import httpx
 
@@ -9,6 +10,11 @@ from src.sab_engines.aiida.config import aiida_engine_settings
 
 DEFAULT_BRIDGE_URL = aiida_engine_settings.default_bridge_url
 OFFLINE_WORKER_MESSAGE = aiida_engine_settings.offline_worker_message
+BridgeCallListener = Callable[[str], None]
+_bridge_call_listener: contextvars.ContextVar[BridgeCallListener | None] = contextvars.ContextVar(
+    "aiida_bridge_call_listener",
+    default=None,
+)
 
 
 @dataclass
@@ -34,6 +40,45 @@ def bridge_url() -> str:
 def bridge_endpoint(path: str) -> str:
     normalized = path if path.startswith("/") else f"/{path}"
     return f"{bridge_url()}{normalized}"
+
+
+def _is_identifier_segment(segment: str) -> bool:
+    cleaned = segment.strip().lower()
+    if not cleaned:
+        return False
+    if cleaned.isdigit():
+        return True
+    if len(cleaned) >= 8 and all(char in "0123456789abcdef-" for char in cleaned):
+        return True
+    return False
+
+
+def _infer_bridge_call_name(method: str, path: str) -> str:
+    parts = [part for part in path.strip("/").split("/") if part]
+    normalized_parts = ["{id}" if _is_identifier_segment(part) else part for part in parts]
+    compact = ".".join(normalized_parts[-3:]) if normalized_parts else "root"
+    return f"{method.upper()} {compact}"
+
+
+def _emit_bridge_call_event(method: str, path: str) -> None:
+    listener = _bridge_call_listener.get()
+    if listener is None:
+        return
+    try:
+        listener(_infer_bridge_call_name(method, path))
+    except Exception:  # noqa: BLE001
+        # Listener errors should never block bridge calls.
+        pass
+
+
+def set_bridge_call_listener(
+    listener: BridgeCallListener | None,
+) -> contextvars.Token[BridgeCallListener | None]:
+    return _bridge_call_listener.set(listener)
+
+
+def reset_bridge_call_listener(token: contextvars.Token[BridgeCallListener | None]) -> None:
+    _bridge_call_listener.reset(token)
 
 
 def _extract_error_payload(response: httpx.Response) -> tuple[str, Any]:
@@ -63,6 +108,7 @@ async def request_json(
     timeout: float = 10.0,
 ) -> Any:
     endpoint = bridge_endpoint(path)
+    _emit_bridge_call_event(method, path)
 
     try:
         async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
@@ -91,6 +137,7 @@ def request_json_sync(
     timeout: float = 10.0,
 ) -> Any:
     endpoint = bridge_endpoint(path)
+    _emit_bridge_call_event(method, path)
 
     try:
         with httpx.Client(timeout=timeout, trust_env=False) as client:
