@@ -128,7 +128,7 @@ def _build_startup_skill_overlay(skills: list[dict[str, Any]]) -> list[str]:
         if isinstance(description, str) and description.strip():
             lines.append(f"{item['name']}: {description.strip()}")
         else:
-            lines.append(str(item["name"]))
+            lines.append(str(item['name']))
     return lines
 
 

@@ -1326,16 +1326,38 @@ const METADATA_OPTION_PATHS: Array<{ path: string; parallelKey?: string; fallbac
 function buildMetadataFallbackEntries(
   entries: SubmissionAllInputEntry[],
   submissionDraft: SubmissionDraftPayload | null,
+  portSpec: NormalizedPortSpec | null,
 ): SubmissionAllInputEntry[] {
   if (!submissionDraft) {
     return entries;
   }
 
-  const hasMetadata = entries.some((entry) => entry.path.toLowerCase().startsWith("metadata."));
+  const hasMetadata = entries.some((entry) => entry.path.toLowerCase().includes("metadata."));
   const processLabel = submissionDraft.process_label.toLowerCase();
   const shouldSeedMetadata = hasMetadata || processLabel.includes("quantumespresso.pw") || processLabel.includes("pw");
   if (!shouldSeedMetadata) {
     return entries;
+  }
+
+  // Find where to attach the metadata options.
+  // We prefer the prefix associated with the primary "code" port if known, 
+  // or default to root "" if it's a direct CalcJob.
+  let targetPrefix = "";
+  if (portSpec && portSpec.codePaths && portSpec.codePaths.size > 0) {
+    const codePath = Array.from(portSpec.codePaths).sort(sortPathsByDepth)[0] ?? "";
+    if (codePath) {
+      const parts = codePath.split(".");
+      parts.pop(); // remove "code"
+      targetPrefix = parts.join(".");
+    }
+  } else {
+    // Heuristic: if we see "base.pw.code" or "pw.code"
+    const codeEntry = entries.find((e) => e.path.toLowerCase().endsWith(".code"));
+    if (codeEntry) {
+      const parts = codeEntry.path.split(".");
+      parts.pop();
+      targetPrefix = parts.join(".");
+    }
   }
 
   const existing = new Set(entries.map((entry) => entry.path.toLowerCase()));
@@ -1343,7 +1365,8 @@ function buildMetadataFallbackEntries(
   const additions: SubmissionAllInputEntry[] = [];
 
   METADATA_OPTION_PATHS.forEach((candidate) => {
-    const normalized = candidate.path.toLowerCase();
+    const fullPath = targetPrefix ? `${targetPrefix}.${candidate.path}` : candidate.path;
+    const normalized = fullPath.toLowerCase();
     if (existing.has(normalized)) {
       return;
     }
@@ -2053,8 +2076,8 @@ export function SubmissionModal({
     [submissionDraft],
   );
   const allInputEntriesWithMetadata = useMemo(
-    () => buildMetadataFallbackEntries(allInputEntries, submissionDraft ?? null),
-    [allInputEntries, submissionDraft],
+    () => buildMetadataFallbackEntries(allInputEntries, submissionDraft ?? null, portSpec),
+    [allInputEntries, submissionDraft, portSpec],
   );
   const fallbackCodeValue = useMemo(() => {
     const fromInputs = stringifyCompact(
@@ -2091,6 +2114,10 @@ export function SubmissionModal({
     () => collectCodePaths(inspectorInputEntries, portSpec),
     [inspectorInputEntries, portSpec],
   );
+  const codeFieldPathsArray = useMemo(
+    () => Array.from(codeFieldPaths).sort(),
+    [codeFieldPaths]
+  );
   const existingCodePaths = useMemo(() => {
     const existing = new Set<string>();
     inspectorInputEntries.forEach((entry) => {
@@ -2100,7 +2127,7 @@ export function SubmissionModal({
       }
     });
     return existing;
-  }, [codeFieldPaths, inspectorInputEntries]);
+  }, [codeFieldPathsArray, inspectorInputEntries]); // eslint-disable-line react-hooks/exhaustive-deps
   const primaryCodePath = useMemo(() => {
     const orderedSpecPaths = [...portSpec.codePaths].sort(sortPathsByDepth);
     const requiredSpecPaths = orderedSpecPaths.filter((path) => portSpec.requiredCodePaths.has(path));
@@ -2122,7 +2149,7 @@ export function SubmissionModal({
     }
     fallbackCandidates.sort(sortPathsByDepth);
     return fallbackCandidates[0] ?? null;
-  }, [codeFieldPaths, existingCodePaths, portSpec.codePaths, portSpec.requiredCodePaths]);
+  }, [codeFieldPathsArray, existingCodePaths, portSpec.codePaths, portSpec.requiredCodePaths]); // eslint-disable-line react-hooks/exhaustive-deps
   const primaryCodeValue = useMemo(() => {
     if (!primaryCodePath) {
       return "";
@@ -2148,7 +2175,8 @@ export function SubmissionModal({
       return availableCodeOptions;
     }
     return buildFallbackCodeOptions(codeFieldPaths, entryValueByPath, primaryCodeValue);
-  }, [availableCodeOptions, codeFieldPaths, entryValueByPath, primaryCodeValue]);
+  }, [availableCodeOptions, codeFieldPathsArray, entryValueByPath, primaryCodeValue]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const inheritedCodePaths = useMemo(() => {
     const inherited = new Set<string>();
     if (!primaryCodePath) {
@@ -2264,6 +2292,28 @@ export function SubmissionModal({
     validationErrors.length > 0 ||
     (validationSummary?.blocking_error_count ?? 0) > 0 ||
     validationSummary?.is_valid === false;
+  const metaDraftAny = submissionDraft?.meta.draft as any;
+  const isProtocolBuilder = Boolean(metaDraftAny?.protocol && metaDraftAny?.intent_data);
+  const protocolHint = useMemo(() => {
+    if (!isProtocolBuilder || !metaDraftAny) return null;
+    const protocol = metaDraftAny.protocol;
+    const intentData = asRecord(metaDraftAny.intent_data) || {};
+    const args = Object.entries(intentData)
+      .map(([key, value]) => {
+        let displayValue = stringifyCompact(value);
+        if (typeof value === "object" && value !== null && "pk" in value) {
+          displayValue = `Node<${value.pk}>`;
+        } else if (typeof value === "object" && value !== null && "uuid" in value) {
+          displayValue = `Node<${String(value.uuid).split("-")[0]}>`;
+        } else if (typeof displayValue === "string" && displayValue.length > 20) {
+          displayValue = `"${displayValue.slice(0, 17)}..."`;
+        }
+        return `${key}=${displayValue}`;
+      })
+      .join(", ");
+    return `get_builder_from_protocol(${args}${args ? ", " : ""}protocol="${protocol}")`;
+  }, [isProtocolBuilder, submissionDraft]);
+
   const batchJobs = useMemo(
     () => (submissionDraft ? extractBatchJobRows(submissionDraft) : []),
     [submissionDraft],
@@ -2334,7 +2384,7 @@ export function SubmissionModal({
       setGlobalOverrideValue("");
     }
     setShowValidationDetails(false);
-  }, [codeFieldPaths, inspectorInputEntries, open, submissionDraft]);
+  }, [codeFieldPathsArray, inspectorInputEntries, open, submissionDraft]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!open) {
@@ -2475,16 +2525,16 @@ export function SubmissionModal({
     const selectedDraft: SubmissionSubmitDraft = isBatchDraft
       ? selectedBatchJobs.map((job) => job.draft)
       : (() => {
-          const metaDraftRecord = asRecord(submissionDraft.meta.draft);
-          if (metaDraftRecord) {
-            return metaDraftRecord;
-          }
-          const metaDraftArray = toRecordArray(submissionDraft.meta.draft);
-          if (metaDraftArray.length > 0) {
-            return metaDraftArray[0];
-          }
-          return submissionDraft.inputs;
-        })();
+        const metaDraftRecord = asRecord(submissionDraft.meta.draft);
+        if (metaDraftRecord) {
+          return metaDraftRecord;
+        }
+        const metaDraftArray = toRecordArray(submissionDraft.meta.draft);
+        if (metaDraftArray.length > 0) {
+          return metaDraftArray[0];
+        }
+        return submissionDraft.inputs;
+      })();
     const mergedDraft = applyEditorValuesToSubmitDraft(
       selectedDraft,
       valuesByPath,
@@ -2997,479 +3047,489 @@ export function SubmissionModal({
         ) : null}
         {isExpanded ? (
           <>
-            <div className="mt-4 grid gap-2 md:grid-cols-3">
-          {keyParameterEntries.map((entry) => (
-            <div
-              key={`${turnId}-key-parameter-${entry.label}`}
-              className="rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/35"
-            >
-              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                {entry.label}
-              </p>
-              {entry.path ? (
-                <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${entry.path}`}>
-                  inputs.{entry.path}
-                </p>
-              ) : null}
-              <p className="mt-1 break-all text-sm text-slate-800 dark:text-slate-100" title={stringifyCompact(entry.value)}>
-                {renderValueNode(entry.value, `${turnId}-key-parameter-${entry.label}`, onOpenDetail)}
-              </p>
-            </div>
-          ))}
-            </div>
-
-        {isBatchDraft ? (
-          <div className="mt-4">
-            <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-900/35">
-              <div className="flex items-center justify-between border-b border-slate-200/80 px-3 py-2 dark:border-slate-800">
-                <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
-                  High-Throughput Task List
-                </p>
-                <span className="text-xs text-slate-500 dark:text-slate-400">
-                  {selectedBatchJobs.length}/{batchJobs.length} selected
-                </span>
+            {!isProtocolBuilder ? (
+              <div className="mt-4 grid gap-2 md:grid-cols-3">
+                {keyParameterEntries.map((entry) => (
+                  <div
+                    key={`${turnId}-key-parameter-${entry.label}`}
+                    className="rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/35"
+                  >
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                      {entry.label}
+                    </p>
+                    {entry.path ? (
+                      <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${entry.path}`}>
+                        inputs.{entry.path}
+                      </p>
+                    ) : null}
+                    <p className="mt-1 break-all text-sm text-slate-800 dark:text-slate-100" title={stringifyCompact(entry.value)}>
+                      {renderValueNode(entry.value, `${turnId}-key-parameter-${entry.label}`, onOpenDetail)}
+                    </p>
+                  </div>
+                ))}
               </div>
-              {globalOverrideOptions.length > 0 ? (
-                <div className="flex flex-wrap items-center gap-2 border-b border-slate-200/70 px-3 py-2 text-xs dark:border-slate-800">
-                  <span className="font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                    Apply To All
-                  </span>
-                  <select
-                    value={globalOverridePath}
-                    onChange={(event) => {
-                      const nextPath = event.currentTarget.value;
-                      setGlobalOverridePath(nextPath);
-                      const field = draftState[nextPath];
-                      if (field) {
-                        setGlobalOverrideValue(String(field.value));
-                      }
-                    }}
-                    className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                  >
-                    {globalOverrideOptions.map((field) => (
-                      <option key={`${turnId}-override-${field.path}`} value={field.path}>
-                        {field.label}
-                      </option>
-                    ))}
-                  </select>
-                  {draftState[globalOverridePath]?.kind === "boolean" ? (
-                    <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={/^true$/i.test(globalOverrideValue)}
+            ) : null}
+
+            {isBatchDraft ? (
+              <div className="mt-4">
+                <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-900/35">
+                  <div className="flex items-center justify-between border-b border-slate-200/80 px-3 py-2 dark:border-slate-800">
+                    <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
+                      High-Throughput Task List
+                    </p>
+                    <span className="text-xs text-slate-500 dark:text-slate-400">
+                      {selectedBatchJobs.length}/{batchJobs.length} selected
+                    </span>
+                  </div>
+                  {globalOverrideOptions.length > 0 ? (
+                    <div className="flex flex-wrap items-center gap-2 border-b border-slate-200/70 px-3 py-2 text-xs dark:border-slate-800">
+                      <span className="font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                        Apply To All
+                      </span>
+                      <select
+                        value={globalOverridePath}
                         onChange={(event) => {
-                          setGlobalOverrideValue(event.currentTarget.checked ? "true" : "false");
+                          const nextPath = event.currentTarget.value;
+                          setGlobalOverridePath(nextPath);
+                          const field = draftState[nextPath];
+                          if (field) {
+                            setGlobalOverrideValue(String(field.value));
+                          }
                         }}
-                        className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
-                      />
-                      Enabled
-                    </label>
-                  ) : (
-                    <input
-                      value={globalOverrideValue}
-                      onChange={(event) => setGlobalOverrideValue(event.currentTarget.value)}
-                      className="min-w-[160px] rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                      placeholder="Override value"
-                    />
-                  )}
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-7 bg-blue-600 px-2.5 text-[11px] text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
-                    onClick={() => {
-                      const targetPath = globalOverridePath.trim();
-                      if (!targetPath) {
-                        return;
-                      }
-                      setDraftState((current) => {
-                        const field = current[targetPath];
-                        if (!field) {
-                          return current;
-                        }
-                        const nextValue =
-                          field.kind === "boolean"
-                            ? /^(true|1|yes|on)$/i.test(globalOverrideValue.trim())
-                            : globalOverrideValue;
-                        return {
-                          ...current,
-                          [targetPath]: {
-                            ...field,
-                            value: nextValue,
-                          },
-                        };
-                      });
-                      setDraftStateErrors((current) => {
-                        if (!current[targetPath]) {
-                          return current;
-                        }
-                        const next = { ...current };
-                        delete next[targetPath];
-                        return next;
-                      });
-                    }}
-                  >
-                    Apply
-                  </Button>
-                </div>
-              ) : null}
-              <div className="minimal-scrollbar max-h-[280px] overflow-auto">
-                <table className="w-full min-w-[680px] text-left text-sm">
-                  <thead className="sticky top-0 bg-slate-100/95 text-[11px] uppercase tracking-[0.12em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
-                    <tr>
-                      <th className="px-3 py-2">
+                        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                      >
+                        {globalOverrideOptions.map((field) => (
+                          <option key={`${turnId}-override-${field.path}`} value={field.path}>
+                            {field.label}
+                          </option>
+                        ))}
+                      </select>
+                      {draftState[globalOverridePath]?.kind === "boolean" ? (
+                        <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
+                          <input
+                            type="checkbox"
+                            checked={/^true$/i.test(globalOverrideValue)}
+                            onChange={(event) => {
+                              setGlobalOverrideValue(event.currentTarget.checked ? "true" : "false");
+                            }}
+                            className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
+                          />
+                          Enabled
+                        </label>
+                      ) : (
                         <input
-                          type="checkbox"
-                          checked={isAllBatchSelected}
-                          onChange={() => {
-                            if (isAllBatchSelected) {
-                              setSelectedBatchIds([]);
-                              return;
-                            }
-                            setSelectedBatchIds(batchJobs.map((job) => job.id));
-                          }}
-                          aria-label="Select all jobs"
-                          className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
+                          value={globalOverrideValue}
+                          onChange={(event) => setGlobalOverrideValue(event.currentTarget.value)}
+                          className="min-w-[160px] rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                          placeholder="Override value"
                         />
-                      </th>
-                      <th className="px-3 py-2">PK</th>
-                      <th className="px-3 py-2">Formula</th>
-                      <th className="px-3 py-2">Symmetry</th>
-                      <th className="px-3 py-2">Estimated Time</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {batchJobs.map((job) => {
-                      const selected = selectedBatchIds.includes(job.id);
-                      return (
-                        <tr
-                          key={`${turnId}-batch-${job.id}`}
-                          className={cn(
-                            "border-t border-slate-200/70 text-slate-700 dark:border-slate-800 dark:text-slate-200",
-                            selected ? "bg-white/60 dark:bg-slate-950/20" : "opacity-75",
-                          )}
-                        >
-                          <td className="px-3 py-2">
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-7 bg-blue-600 px-2.5 text-[11px] text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
+                        onClick={() => {
+                          const targetPath = globalOverridePath.trim();
+                          if (!targetPath) {
+                            return;
+                          }
+                          setDraftState((current) => {
+                            const field = current[targetPath];
+                            if (!field) {
+                              return current;
+                            }
+                            const nextValue =
+                              field.kind === "boolean"
+                                ? /^(true|1|yes|on)$/i.test(globalOverrideValue.trim())
+                                : globalOverrideValue;
+                            return {
+                              ...current,
+                              [targetPath]: {
+                                ...field,
+                                value: nextValue,
+                              },
+                            };
+                          });
+                          setDraftStateErrors((current) => {
+                            if (!current[targetPath]) {
+                              return current;
+                            }
+                            const next = { ...current };
+                            delete next[targetPath];
+                            return next;
+                          });
+                        }}
+                      >
+                        Apply
+                      </Button>
+                    </div>
+                  ) : null}
+                  <div className="minimal-scrollbar max-h-[280px] overflow-auto">
+                    <table className="w-full min-w-[680px] text-left text-sm">
+                      <thead className="sticky top-0 bg-slate-100/95 text-[11px] uppercase tracking-[0.12em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
+                        <tr>
+                          <th className="px-3 py-2">
                             <input
                               type="checkbox"
-                              checked={selected}
+                              checked={isAllBatchSelected}
                               onChange={() => {
-                                setSelectedBatchIds((current) =>
-                                  current.includes(job.id)
-                                    ? current.filter((id) => id !== job.id)
-                                    : [...current, job.id],
-                                );
+                                if (isAllBatchSelected) {
+                                  setSelectedBatchIds([]);
+                                  return;
+                                }
+                                setSelectedBatchIds(batchJobs.map((job) => job.id));
                               }}
-                              aria-label={`Select ${job.formula}`}
+                              aria-label="Select all jobs"
                               className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
                             />
-                          </td>
-                          <td className="px-3 py-2">
-                            {job.pk ? (
-                              <button
-                                type="button"
-                                className="font-mono text-sky-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-200"
-                                onClick={() => onOpenDetail(job.pk!)}
-                              >
-                                #{job.pk}
-                              </button>
-                            ) : (
-                              <span className="text-slate-400 dark:text-slate-500">-</span>
-                            )}
-                          </td>
-                          <td className="max-w-[220px] px-3 py-2" title={job.formula}>
-                            <span className="block truncate">{job.formula}</span>
-                          </td>
-                          <td className="max-w-[180px] px-3 py-2" title={job.symmetry}>
-                            <span className="block truncate">{job.symmetry}</span>
-                          </td>
-                          <td className="px-3 py-2">{job.runtimeEstimate}</td>
+                          </th>
+                          <th className="px-3 py-2">PK</th>
+                          <th className="px-3 py-2">Formula</th>
+                          <th className="px-3 py-2">Symmetry</th>
+                          <th className="px-3 py-2">Estimated Time</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-4 grid gap-3 sm:grid-cols-3">
-            {renderPrimaryCell(
-              "code",
-              primaryCodePath ? `Code (${primaryCodePath.split(".").pop()})` : "Code",
-              primaryFields.code,
-              "System Selected",
-              primaryCodePath,
-            )}
-            {renderPrimaryCell("structure", "Structure", primaryFields.structure, "Default", structureSummaryPath)}
-            {renderPrimaryCell(
-              "pseudos",
-              "Pseudopotentials",
-              primaryFields.pseudos,
-              "System Selected",
-              pseudosSummaryPath,
-            )}
-          </div>
-        )}
-
-        <div className="mt-3 rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2.5 dark:border-slate-800 dark:bg-slate-900/35">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Target Computer</p>
-          <div className="mt-1.5 grid gap-3 sm:grid-cols-2">
-            <div className="min-w-0">
-              <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">Computer</p>
-              <div className="mt-1 text-sm text-slate-800 dark:text-slate-100">
-                {targetComputer ? (
-                  renderValueNode(targetComputer, `${turnId}-target`, onOpenDetail)
-                ) : (
-                  <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                    System Selected
-                  </span>
-                )}
-              </div>
-            </div>
-            <div className="min-w-0">
-              <p className="text-[10px] font-medium uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">Workdir</p>
-              {targetWorkdirPath ? (
-                <p className="mt-0.5 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${targetWorkdirPath}`}>
-                  inputs.{targetWorkdirPath}
-                </p>
-              ) : null}
-              <div className="mt-1">
-                {targetWorkdirPath ? (
-                  renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, false)
-                ) : (
-                  <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                    Not available
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-3 rounded-xl border border-slate-200/85 bg-slate-50/75 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/35">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
-              Builder Port Hierarchy
-            </p>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                {recommendedDraftFields.length} recommended
-              </span>
-              <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                {allDraftFields.length} editable ports
-              </span>
-              <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                {groupedInputSections.length} spec groups
-              </span>
-            </div>
-          </div>
-          <div className="mt-2 grid gap-2 lg:grid-cols-[240px_minmax(0,1fr)]">
-            <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-lg border border-slate-200/85 bg-white/90 p-2 dark:border-slate-800 dark:bg-slate-950/45">
-              <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                Atomic Inputs
-              </p>
-              {namespaceTree.atomicEntries.length > 0 ? (
-                <div className="mt-1.5 space-y-1">
-                  {namespaceTree.atomicEntries.map((entry) => {
-                    const leaf = entry.path.split(".").pop() ?? entry.path;
-                    return (
-                      <div
-                        key={`${turnId}-atomic-${entry.path}`}
-                        className="rounded-md border border-slate-200/80 bg-slate-50/80 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900/50"
-                      >
-                        <p className="font-semibold text-slate-700 dark:text-slate-200">{formatSettingKey(leaf)}</p>
-                        <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
-                          {entry.path}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
-                  No direct scalar inputs at root.
-                </p>
-              )}
-
-              <div className="mt-3 border-t border-slate-200/80 pt-2 dark:border-slate-800">
-                <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                  Namespaces
-                </p>
-                {namespaceSidebarItems.length > 0 ? (
-                  <div className="mt-1 space-y-1">
-                    {namespaceSidebarItems.map((namespaceItem) => {
-                      const label = namespaceItem.path.split(".").pop() ?? namespaceItem.path;
-                      const isSelected = namespaceItem.path === selectedNamespace;
-                      return (
-                        <button
-                          key={`${turnId}-namespace-${namespaceItem.path}`}
-                          type="button"
-                          className={cn(
-                            "flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs transition-colors",
-                            isSelected
-                              ? "border-blue-300/90 bg-blue-50 text-blue-700 dark:border-blue-700/70 dark:bg-blue-950/35 dark:text-blue-200"
-                              : "border-transparent text-slate-700 hover:border-slate-200 hover:bg-slate-50 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-900/60",
-                          )}
-                          onClick={() => setSelectedNamespace(namespaceItem.path)}
-                          style={{ paddingLeft: `${0.5 + namespaceItem.depth * 0.65}rem` }}
-                        >
-                          <Folder className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{formatSettingKey(label)}</span>
-                        </button>
-                      );
-                    })}
+                      </thead>
+                      <tbody>
+                        {batchJobs.map((job) => {
+                          const selected = selectedBatchIds.includes(job.id);
+                          return (
+                            <tr
+                              key={`${turnId}-batch-${job.id}`}
+                              className={cn(
+                                "border-t border-slate-200/70 text-slate-700 dark:border-slate-800 dark:text-slate-200",
+                                selected ? "bg-white/60 dark:bg-slate-950/20" : "opacity-75",
+                              )}
+                            >
+                              <td className="px-3 py-2">
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  onChange={() => {
+                                    setSelectedBatchIds((current) =>
+                                      current.includes(job.id)
+                                        ? current.filter((id) => id !== job.id)
+                                        : [...current, job.id],
+                                    );
+                                  }}
+                                  aria-label={`Select ${job.formula}`}
+                                  className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
+                                />
+                              </td>
+                              <td className="px-3 py-2">
+                                {job.pk ? (
+                                  <button
+                                    type="button"
+                                    className="font-mono text-sky-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-200"
+                                    onClick={() => onOpenDetail(job.pk!)}
+                                  >
+                                    #{job.pk}
+                                  </button>
+                                ) : (
+                                  <span className="text-slate-400 dark:text-slate-500">-</span>
+                                )}
+                              </td>
+                              <td className="max-w-[220px] px-3 py-2" title={job.formula}>
+                                <span className="block truncate">{job.formula}</span>
+                              </td>
+                              <td className="max-w-[180px] px-3 py-2" title={job.symmetry}>
+                                <span className="block truncate">{job.symmetry}</span>
+                              </td>
+                              <td className="px-3 py-2">{job.runtimeEstimate}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-                ) : (
-                  <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
-                    No nested namespaces detected.
-                  </p>
-                )}
+                </div>
               </div>
-            </aside>
+            ) : (
+              <>
+                {!isProtocolBuilder ? (
+                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                    {renderPrimaryCell(
+                      "code",
+                      primaryCodePath ? `Code (${primaryCodePath.split(".").pop()})` : "Code",
+                      primaryFields.code,
+                      "System Selected",
+                      primaryCodePath,
+                    )}
+                    {renderPrimaryCell("structure", "Structure", primaryFields.structure, "Default", structureSummaryPath)}
+                    {renderPrimaryCell(
+                      "pseudos",
+                      "Pseudopotentials",
+                      primaryFields.pseudos,
+                      "System Selected",
+                      pseudosSummaryPath,
+                    )}
+                  </div>
+                ) : null}
 
-            <div className="rounded-lg border border-slate-200/85 bg-white/90 p-2.5 dark:border-slate-800 dark:bg-slate-950/45">
-              <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
-                <button
-                  type="button"
-                  className={cn(
-                    "rounded-md px-1.5 py-0.5 font-semibold",
-                    selectedNamespace === ""
-                      ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-                      : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
+                {!isProtocolBuilder ? (
+                  <div className={cn("mt-3 rounded-xl border border-slate-200/85 bg-slate-50/70 py-2.5 px-3 dark:border-slate-800 dark:bg-slate-900/35")}>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Computer</p>
+                        <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                          {targetComputer ? (
+                            <span className="inline-flex rounded-full bg-slate-200/50 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800/80 dark:text-slate-200">{renderValueNode(targetComputer, `${turnId}-target`, onOpenDetail)}</span>
+                          ) : (
+                            <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                              System Selected
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex w-full sm:w-auto flex-1 items-center justify-end gap-2 max-w-sm">
+                        <p className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">Workdir</p>
+                        <div className="w-full shrink">
+                          {targetWorkdirPath ? (
+                            renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true)
+                          ) : (
+                            <span className="inline-flex h-8 items-center rounded-full bg-slate-200/80 px-2.5 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                              Not available
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            )}
+
+            <div className={cn("rounded-xl border border-slate-200/85 bg-slate-50/75 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/35", isProtocolBuilder ? "mt-4" : "mt-3")}>
+              <div className="flex flex-col gap-2">
+                {protocolHint ? (
+                  <div className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 font-mono text-[10px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300">
+                    <span className="font-semibold">Protocol Call: </span>
+                    {protocolHint}
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
+                    Builder Port Hierarchy
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
+                      {recommendedDraftFields.length} recommended
+                    </span>
+                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
+                      {allDraftFields.length} editable ports
+                    </span>
+                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
+                      {groupedInputSections.length} spec groups
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2 grid gap-2 lg:grid-cols-[240px_minmax(0,1fr)]">
+                <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-lg border border-slate-200/85 bg-white/90 p-2 dark:border-slate-800 dark:bg-slate-950/45">
+                  <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                    Atomic Inputs
+                  </p>
+                  {namespaceTree.atomicEntries.length > 0 ? (
+                    <div className="mt-1.5 space-y-1">
+                      {namespaceTree.atomicEntries.map((entry) => {
+                        const leaf = entry.path.split(".").pop() ?? entry.path;
+                        return (
+                          <div
+                            key={`${turnId}-atomic-${entry.path}`}
+                            className="rounded-md border border-slate-200/80 bg-slate-50/80 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900/50"
+                          >
+                            <p className="font-semibold text-slate-700 dark:text-slate-200">{formatSettingKey(leaf)}</p>
+                            <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
+                              {entry.path}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
+                      No direct scalar inputs at root.
+                    </p>
                   )}
-                  onClick={() => setSelectedNamespace("")}
-                >
-                  inputs
-                </button>
-                {namespaceBreadcrumb.map((breadcrumb) => (
-                  <span key={`${turnId}-breadcrumb-${breadcrumb.path}`} className="inline-flex items-center gap-1">
-                    <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+
+                  <div className="mt-3 border-t border-slate-200/80 pt-2 dark:border-slate-800">
+                    <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                      Namespaces
+                    </p>
+                    {namespaceSidebarItems.length > 0 ? (
+                      <div className="mt-1 space-y-1">
+                        {namespaceSidebarItems.map((namespaceItem) => {
+                          const label = namespaceItem.path.split(".").pop() ?? namespaceItem.path;
+                          const isSelected = namespaceItem.path === selectedNamespace;
+                          return (
+                            <button
+                              key={`${turnId}-namespace-${namespaceItem.path}`}
+                              type="button"
+                              className={cn(
+                                "flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs transition-colors",
+                                isSelected
+                                  ? "border-blue-300/90 bg-blue-50 text-blue-700 dark:border-blue-700/70 dark:bg-blue-950/35 dark:text-blue-200"
+                                  : "border-transparent text-slate-700 hover:border-slate-200 hover:bg-slate-50 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-900/60",
+                              )}
+                              onClick={() => setSelectedNamespace(namespaceItem.path)}
+                              style={{ paddingLeft: `${0.5 + namespaceItem.depth * 0.65}rem` }}
+                            >
+                              <Folder className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">{formatSettingKey(label)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
+                        No nested namespaces detected.
+                      </p>
+                    )}
+                  </div>
+                </aside>
+
+                <div className="rounded-lg border border-slate-200/85 bg-white/90 p-2.5 dark:border-slate-800 dark:bg-slate-950/45">
+                  <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
                     <button
                       type="button"
                       className={cn(
-                        "rounded-md px-1.5 py-0.5",
-                        breadcrumb.path === selectedNamespace
-                          ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
+                        "rounded-md px-1.5 py-0.5 font-semibold",
+                        selectedNamespace === ""
+                          ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
                           : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
                       )}
-                      onClick={() => setSelectedNamespace(breadcrumb.path)}
+                      onClick={() => setSelectedNamespace("")}
                     >
-                      {breadcrumb.label}
+                      inputs
                     </button>
-                  </span>
-                ))}
-              </div>
+                    {namespaceBreadcrumb.map((breadcrumb) => (
+                      <span key={`${turnId}-breadcrumb-${breadcrumb.path}`} className="inline-flex items-center gap-1">
+                        <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+                        <button
+                          type="button"
+                          className={cn(
+                            "rounded-md px-1.5 py-0.5",
+                            breadcrumb.path === selectedNamespace
+                              ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
+                              : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
+                          )}
+                          onClick={() => setSelectedNamespace(breadcrumb.path)}
+                        >
+                          {breadcrumb.label}
+                        </button>
+                      </span>
+                    ))}
+                  </div>
 
-              {selectedNamespaceChildren.length > 0 ? (
-                <div className="mt-2 flex flex-wrap gap-1.5">
-                  {selectedNamespaceChildren.map((childPath) => {
-                    const childLabel = childPath.split(".").pop() ?? childPath;
-                    return (
-                      <button
-                        key={`${turnId}-namespace-folder-${childPath}`}
-                        type="button"
-                        className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:bg-slate-800"
-                        onClick={() => setSelectedNamespace(childPath)}
-                      >
-                        <Folder className="h-3.5 w-3.5" />
-                        <span>{formatSettingKey(childLabel)}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-
-              {selectedNamespaceLeafEntries.length > 0 ? (
-                <div className="minimal-scrollbar mt-2 max-h-[330px] overflow-auto">
-                  <table className="w-full min-w-[500px] text-left text-xs">
-                    <thead className="sticky top-0 bg-slate-100/95 text-[10px] uppercase tracking-[0.1em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
-                      <tr>
-                        <th className="w-[44%] px-2 py-1.5 font-semibold">Parameter</th>
-                        <th className="px-2 py-1.5 font-semibold">Value</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedNamespaceLeafEntries.map((entry) => {
-                        const leafKey = entry.path.split(".").pop() ?? entry.path;
-                        const uiType = inferUiTypeFromPathAndValue(entry.path, entry.value);
-                        const field = draftState[entry.path];
-                        const isModified = field ? isFieldModified(field) : false;
-                        const isCodeField = codeFieldPaths.has(entry.path) || leafKey.toLowerCase() === "code";
-                        const isInheritedCode = isCodeField && inheritedCodePaths.has(entry.path);
+                  {selectedNamespaceChildren.length > 0 ? (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {selectedNamespaceChildren.map((childPath) => {
+                        const childLabel = childPath.split(".").pop() ?? childPath;
                         return (
-                          <tr
-                            key={`${turnId}-namespace-entry-${entry.path}`}
-                            className="border-t border-slate-200/70 align-top dark:border-slate-800"
+                          <button
+                            key={`${turnId}-namespace-folder-${childPath}`}
+                            type="button"
+                            className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:bg-slate-800"
+                            onClick={() => setSelectedNamespace(childPath)}
                           >
-                            <td className="px-2 py-1.5">
-                              <p className="truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">
-                                {formatSettingKey(leafKey)}
-                              </p>
-                              <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
-                                {entry.path}
-                              </p>
-                              <div className="mt-1 flex flex-wrap items-center gap-1">
-                                {entry.isRecommended ? (
-                                  <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
-                                    AI
-                                  </span>
-                                ) : null}
-                                {isModified ? (
-                                  <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
-                                    Modified
-                                  </span>
-                                ) : null}
-                                {isCodeField ? (
-                                  <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
-                                    Code
-                                  </span>
-                                ) : null}
-                                {isInheritedCode ? (
-                                  <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                                    Inherited
-                                  </span>
-                                ) : null}
-                              </div>
-                            </td>
-                            <td className="px-2 py-1.5">
-                              {renderEditableFieldControl(entry.path, uiType, true, {
-                                isCodeField,
-                                isInheritedCode,
-                              })}
-                            </td>
-                          </tr>
+                            <Folder className="h-3.5 w-3.5" />
+                            <span>{formatSettingKey(childLabel)}</span>
+                          </button>
                         );
                       })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                  No direct parameters in this namespace. Select a sub-namespace folder to continue.
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
+                    </div>
+                  ) : null}
 
-        {!isBatchDraft && pkEntries.length > 0 ? (
-          <div className="mt-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/30">
-            <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Input PKs</p>
-            <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {pkEntries.map((entry, index) => (
-                <button
-                  key={`${turnId}-pk-${entry.pk}-${index}`}
-                  type="button"
-                  className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/50"
-                  onClick={() => onOpenDetail(entry.pk)}
-                  title={entry.path ?? `PK ${entry.pk}`}
-                >
-                  #{entry.pk}
-                </button>
-              ))}
+                  {selectedNamespaceLeafEntries.length > 0 ? (
+                    <div className="minimal-scrollbar mt-2 max-h-[330px] overflow-auto">
+                      <table className="w-full min-w-[500px] text-left text-xs">
+                        <thead className="sticky top-0 bg-slate-100/95 text-[10px] uppercase tracking-[0.1em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
+                          <tr>
+                            <th className="w-[44%] px-2 py-1.5 font-semibold">Parameter</th>
+                            <th className="px-2 py-1.5 font-semibold">Value</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {selectedNamespaceLeafEntries.map((entry) => {
+                            const leafKey = entry.path.split(".").pop() ?? entry.path;
+                            const uiType = inferUiTypeFromPathAndValue(entry.path, entry.value);
+                            const field = draftState[entry.path];
+                            const isModified = field ? isFieldModified(field) : false;
+                            const isCodeField = codeFieldPaths.has(entry.path) || leafKey.toLowerCase() === "code";
+                            const isInheritedCode = isCodeField && inheritedCodePaths.has(entry.path);
+                            return (
+                              <tr
+                                key={`${turnId}-namespace-entry-${entry.path}`}
+                                className="border-t border-slate-200/70 align-top dark:border-slate-800"
+                              >
+                                <td className="px-2 py-1.5">
+                                  <p className="truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                                    {formatSettingKey(leafKey)}
+                                  </p>
+                                  <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
+                                    {entry.path}
+                                  </p>
+                                  <div className="mt-1 flex flex-wrap items-center gap-1">
+                                    {entry.isRecommended ? (
+                                      <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                                        AI
+                                      </span>
+                                    ) : null}
+                                    {isModified ? (
+                                      <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                                        Modified
+                                      </span>
+                                    ) : null}
+                                    {isCodeField ? (
+                                      <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                                        Code
+                                      </span>
+                                    ) : null}
+                                    {isInheritedCode ? (
+                                      <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                                        Inherited
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </td>
+                                <td className="px-2 py-1.5">
+                                  {renderEditableFieldControl(entry.path, uiType, true, {
+                                    isCodeField,
+                                    isInheritedCode,
+                                  })}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                      No direct parameters in this namespace. Select a sub-namespace folder to continue.
+                    </p>
+                  )}
+                </div>
+              </div>
             </div>
-          </div>
-        ) : null}
+
+            {!isBatchDraft && pkEntries.length > 0 ? (
+              <div className="mt-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/30">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Input PKs</p>
+                <div className="mt-1.5 flex flex-wrap gap-1.5">
+                  {pkEntries.map((entry, index) => (
+                    <button
+                      key={`${turnId}-pk-${entry.pk}-${index}`}
+                      type="button"
+                      className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/50"
+                      onClick={() => onOpenDetail(entry.pk)}
+                      title={entry.path ?? `PK ${entry.pk}`}
+                    >
+                      #{entry.pk}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <div className="mt-5 border-t border-slate-200/80 pt-4 dark:border-slate-800">
               {isInlineMode && state.status !== "submitted" ? (
@@ -3506,61 +3566,61 @@ export function SubmissionModal({
                   </Button>
                 </div>
               ) : null}
-          {state.status === "submitted" ? (
-            <div className="rounded-xl bg-emerald-50/90 px-3 py-3 dark:bg-emerald-950/35">
-              <div className="flex items-center gap-3">
-                <span className="relative inline-flex h-9 w-9 items-center justify-center">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-300/70 dark:bg-emerald-500/40" />
-                  <span className="relative inline-flex h-9 w-9 items-center justify-center rounded-full bg-emerald-600 text-white dark:bg-emerald-500">
-                    <CheckCircle2 className="h-5 w-5" />
-                  </span>
-                </span>
-                <div>
-                  <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">Submission successful</p>
-                  {Array.isArray(state.processPks) && state.processPks.length > 0 ? (
-                    <div className="mt-1 flex flex-wrap gap-1.5 text-xs text-emerald-700 dark:text-emerald-300">
-                      {state.processPks.slice(0, 8).map((pk) => (
-                        <button
-                          key={`${turnId}-submitted-${pk}`}
-                          type="button"
-                          className="rounded-full bg-emerald-100 px-2 py-0.5 font-mono font-semibold underline underline-offset-2 dark:bg-emerald-900/45"
-                          onClick={() => onOpenDetail(pk)}
-                        >
-                          #{pk}
-                        </button>
-                      ))}
-                      {state.processPks.length > 8 ? (
-                        <span>+{state.processPks.length - 8} more</span>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-emerald-700 dark:text-emerald-300">
-                      {state.processPk ? (
-                        <button
-                          type="button"
-                          className="font-semibold underline underline-offset-2"
-                          onClick={() => onOpenDetail(state.processPk!)}
-                        >
-                          PK #{state.processPk}
-                        </button>
+              {state.status === "submitted" ? (
+                <div className="rounded-xl bg-emerald-50/90 px-3 py-3 dark:bg-emerald-950/35">
+                  <div className="flex items-center gap-3">
+                    <span className="relative inline-flex h-9 w-9 items-center justify-center">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-300/70 dark:bg-emerald-500/40" />
+                      <span className="relative inline-flex h-9 w-9 items-center justify-center rounded-full bg-emerald-600 text-white dark:bg-emerald-500">
+                        <CheckCircle2 className="h-5 w-5" />
+                      </span>
+                    </span>
+                    <div>
+                      <p className="text-sm font-semibold text-emerald-800 dark:text-emerald-200">Submission successful</p>
+                      {Array.isArray(state.processPks) && state.processPks.length > 0 ? (
+                        <div className="mt-1 flex flex-wrap gap-1.5 text-xs text-emerald-700 dark:text-emerald-300">
+                          {state.processPks.slice(0, 8).map((pk) => (
+                            <button
+                              key={`${turnId}-submitted-${pk}`}
+                              type="button"
+                              className="rounded-full bg-emerald-100 px-2 py-0.5 font-mono font-semibold underline underline-offset-2 dark:bg-emerald-900/45"
+                              onClick={() => onOpenDetail(pk)}
+                            >
+                              #{pk}
+                            </button>
+                          ))}
+                          {state.processPks.length > 8 ? (
+                            <span>+{state.processPks.length - 8} more</span>
+                          ) : null}
+                        </div>
                       ) : (
-                        "Process created"
+                        <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                          {state.processPk ? (
+                            <button
+                              type="button"
+                              className="font-semibold underline underline-offset-2"
+                              onClick={() => onOpenDetail(state.processPk!)}
+                            >
+                              PK #{state.processPk}
+                            </button>
+                          ) : (
+                            "Process created"
+                          )}
+                        </p>
                       )}
-                    </p>
-                  )}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          ) : state.status === "cancelled" ? (
-            <p className="text-sm text-slate-600 dark:text-slate-300">Submission cancelled.</p>
-          ) : (
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Review grouped inputs above and launch when ready.
-            </p>
-          )}
-          {state.status === "error" && state.errorText ? (
-            <p className="mt-2 text-xs text-rose-600 dark:text-rose-300">{state.errorText}</p>
-          ) : null}
+              ) : state.status === "cancelled" ? (
+                <p className="text-sm text-slate-600 dark:text-slate-300">Submission cancelled.</p>
+              ) : (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Review grouped inputs above and launch when ready.
+                </p>
+              )}
+              {state.status === "error" && state.errorText ? (
+                <p className="mt-2 text-xs text-rose-600 dark:text-rose-300">{state.errorText}</p>
+              ) : null}
             </div>
           </>
         ) : null}
