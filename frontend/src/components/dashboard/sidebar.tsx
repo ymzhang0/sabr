@@ -403,6 +403,8 @@ type SidebarProps = {
   isDarkMode: boolean;
   onToggleTheme: () => void;
   onGroupChange: (groupLabel: string) => void;
+  nodeTypeFilter: "all" | "structures" | "tasks" | "failed";
+  onNodeTypeFilterChange: (type: "all" | "structures" | "tasks" | "failed") => void;
   onProcessLimitChange: (limit: number) => void;
   onAddContextNode: (process: ProcessItem) => void;
   onAddContextNodes: (processes: ProcessItem[]) => void;
@@ -426,6 +428,8 @@ export function Sidebar({
   isDarkMode,
   onToggleTheme,
   onGroupChange,
+  nodeTypeFilter,
+  onNodeTypeFilterChange,
   onProcessLimitChange,
   onAddContextNode,
   onAddContextNodes,
@@ -440,7 +444,6 @@ export function Sidebar({
 }: SidebarProps) {
   const [limitInput, setLimitInput] = useState(String(processLimit));
   const [searchQuery, setSearchQuery] = useState("");
-  const [nodeTypeFilter, setNodeTypeFilter] = useState<"all" | "structures" | "tasks" | "failed">("all");
   const [selectedNodePks, setSelectedNodePks] = useState<Set<number>>(new Set());
   const [contextMenuNode, setContextMenuNode] = useState<{ pk: number; x: number; y: number } | null>(null);
   const [contextMenuGroup, setContextMenuGroup] = useState<{ pk: number; x: number; y: number } | null>(null);
@@ -590,7 +593,7 @@ export function Sidebar({
                 {(["all", "structures", "tasks", "failed"] as const).map((type) => (
                   <button
                     key={type}
-                    onClick={() => setNodeTypeFilter(type)}
+                    onClick={() => onNodeTypeFilterChange(type)}
                     className={cn(
                       "rounded-md px-2 py-1 text-[11px] font-medium capitalize",
                       nodeTypeFilter === type

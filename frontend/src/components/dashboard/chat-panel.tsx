@@ -1852,11 +1852,11 @@ export function ChatPanel({
               userContextNodesRaw.length > 0
                 ? userContextNodesRaw
                 : userContextPks.map((pk) => ({
-                    pk,
-                    label: `#${pk}`,
-                    formula: null,
-                    node_type: "Unknown",
-                  }));
+                  pk,
+                  label: `#${pk}`,
+                  formula: null,
+                  node_type: "Unknown",
+                }));
             const previewState = previewStateByTurn[turn.turnId] ?? { status: "idle" as const };
             const submittedPreview = submittedPreviewByTurn[turn.turnId];
             const isSubmissionExpanded = expandedSubmissionByTurn[turn.turnId] ?? true;
@@ -1988,7 +1988,7 @@ export function ChatPanel({
                               submissionDraft={submissionDraft.submissionDraft}
                               state={previewState}
                               isBusy={isLoading}
-                              onClose={() => {}}
+                              onClose={() => { }}
                               onConfirm={(draftPayload) => {
                                 void handleConfirmPreview(turn.turnId, submissionDraft, draftPayload);
                               }}
@@ -2107,7 +2107,7 @@ export function ChatPanel({
               className={cn(
                 "max-h-[220px] min-h-[56px] w-full resize-none rounded-lg border border-transparent bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition-colors dark:text-zinc-100",
                 dragOverZone === "textarea" &&
-                  "border-dashed border-sky-400/80 bg-sky-50/45 dark:border-sky-700/80 dark:bg-sky-950/30",
+                "border-dashed border-sky-400/80 bg-sky-50/45 dark:border-sky-700/80 dark:bg-sky-950/30",
               )}
               disabled={isLoading}
               onChange={(event) => {
@@ -2169,90 +2169,6 @@ export function ChatPanel({
               }}
             />
 
-            <div
-              className={cn(
-                "minimal-scrollbar mt-2 flex h-7 items-center gap-1 overflow-x-auto rounded-md border border-dashed px-1.5",
-                dragOverZone === "attachment"
-                  ? "border-sky-400/80 bg-sky-50/70 dark:border-sky-700/80 dark:bg-sky-950/35"
-                  : "border-zinc-200/75 bg-zinc-50/60 dark:border-zinc-800/85 dark:bg-zinc-900/45",
-              )}
-              onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "copy";
-                if (dragOverZone !== "attachment") {
-                  setDragOverZone("attachment");
-                }
-              }}
-              onDragLeave={() => {
-                if (dragOverZone === "attachment") {
-                  setDragOverZone(null);
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (isLoading) {
-                  setDragOverZone(null);
-                  return;
-                }
-                const droppedResource = parseDroppedResourceAttachment(event);
-                if (droppedResource) {
-                  handleAttachResource(droppedResource);
-                  setDragOverZone(null);
-                  return;
-                }
-                const droppedNode = parseDroppedContextNode(event);
-                if (!droppedNode) {
-                  setDragOverZone(null);
-                  return;
-                }
-                onAddContextNode(droppedNode);
-                setDragOverZone(null);
-              }}
-            >
-              {hasAnyAttachments ? (
-                <>
-                  {resourceAttachments.map((attachment) => (
-                    <span
-                      key={`resource-chip-${resourceAttachmentKey(attachment)}`}
-                      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-sky-300/80 bg-sky-50/95 px-1.5 text-[10px] text-sky-700 dark:border-sky-800/70 dark:bg-sky-950/40 dark:text-sky-200"
-                      title={attachment.label}
-                    >
-                      <span aria-hidden>{resourceAttachmentIcon(attachment.kind)}</span>
-                      <span className="max-w-[180px] truncate">{attachment.value}</span>
-                      <button
-                        type="button"
-                        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-sky-600 transition-colors hover:bg-sky-200/90 hover:text-sky-900 dark:text-sky-300 dark:hover:bg-sky-800 dark:hover:text-sky-100"
-                        onClick={() => handleRemoveResourceAttachment(attachment)}
-                        aria-label={`Remove ${attachment.kind} attachment ${attachment.value}`}
-                      >
-                        <X className="h-2.5 w-2.5" />
-                      </button>
-                    </span>
-                  ))}
-                  {contextNodes.map((node) => (
-                    <span
-                      key={`context-chip-${node.pk}`}
-                      className="inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-zinc-300/80 bg-white/95 px-1.5 text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/85 dark:text-zinc-200"
-                    >
-                      <span aria-hidden>⚛️</span>
-                      <span className="font-mono">#{node.pk}</span>
-                      <button
-                        type="button"
-                        className="inline-flex h-3.5 w-3.5 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200/90 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
-                        onClick={() => onRemoveContextNode(node.pk)}
-                        aria-label={`Remove node ${node.pk} from context`}
-                      >
-                        <X className="h-2.5 w-2.5" />
-                      </button>
-                    </span>
-                  ))}
-                </>
-              ) : (
-                <p className="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
-                  Drop node/resource here to attach context
-                </p>
-              )}
-            </div>
 
             <div className="mt-3 flex flex-row items-center justify-between gap-2">
               <div className="flex flex-row items-center gap-2">
@@ -2321,6 +2237,91 @@ export function ChatPanel({
                 </div>
               </div>
 
+              <div
+                className={cn(
+                  "minimal-scrollbar flex h-9 flex-1 items-center gap-1 overflow-x-auto rounded-lg border px-2.5 mx-2 transition-colors duration-200",
+                  dragOverZone === "attachment"
+                    ? "border-sky-400/80 bg-sky-50/70 border-dashed dark:border-sky-700/80 dark:bg-sky-950/35"
+                    : "border-transparent bg-zinc-50/50 hover:bg-zinc-100/50 dark:border-transparent dark:bg-zinc-900/30 dark:hover:bg-zinc-900/50 border-dashed hover:border-zinc-300/60 dark:hover:border-zinc-700/60",
+                )}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "copy";
+                  if (dragOverZone !== "attachment") {
+                    setDragOverZone("attachment");
+                  }
+                }}
+                onDragLeave={() => {
+                  if (dragOverZone === "attachment") {
+                    setDragOverZone(null);
+                  }
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (isLoading) {
+                    setDragOverZone(null);
+                    return;
+                  }
+                  const droppedResource = parseDroppedResourceAttachment(event);
+                  if (droppedResource) {
+                    handleAttachResource(droppedResource);
+                    setDragOverZone(null);
+                    return;
+                  }
+                  const droppedNode = parseDroppedContextNode(event);
+                  if (!droppedNode) {
+                    setDragOverZone(null);
+                    return;
+                  }
+                  onAddContextNode(droppedNode);
+                  setDragOverZone(null);
+                }}
+              >
+                {hasAnyAttachments ? (
+                  <>
+                    {resourceAttachments.map((attachment) => (
+                      <span
+                        key={`resource-chip-${resourceAttachmentKey(attachment)}`}
+                        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-sky-300/80 bg-sky-50/95 px-2 text-[11px] text-sky-700 dark:border-sky-800/70 dark:bg-sky-950/40 dark:text-sky-200"
+                        title={attachment.label}
+                      >
+                        <span aria-hidden>{resourceAttachmentIcon(attachment.kind)}</span>
+                        <span className="max-w-[180px] truncate">{attachment.value}</span>
+                        <button
+                          type="button"
+                          className="inline-flex h-4 w-4 items-center justify-center rounded-full text-sky-600 transition-colors hover:bg-sky-200/90 hover:text-sky-900 dark:text-sky-300 dark:hover:bg-sky-800 dark:hover:text-sky-100"
+                          onClick={() => handleRemoveResourceAttachment(attachment)}
+                          aria-label={`Remove ${attachment.kind} attachment ${attachment.value}`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                    {contextNodes.map((node) => (
+                      <span
+                        key={`context-chip-${node.pk}`}
+                        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-zinc-300/80 bg-white/95 px-2 text-[11px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/85 dark:text-zinc-200"
+                      >
+                        <span aria-hidden>⚛️</span>
+                        <span className="font-mono">#{node.pk}</span>
+                        <button
+                          type="button"
+                          className="inline-flex h-4 w-4 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200/90 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                          onClick={() => onRemoveContextNode(node.pk)}
+                          aria-label={`Remove node ${node.pk} from context`}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </>
+                ) : (
+                  <p className="truncate text-[11px] font-medium text-zinc-400/80 dark:text-zinc-500/80 mx-1">
+                    Drop node/resource here to attach context
+                  </p>
+                )}
+              </div>
+
               <Button
                 size="icon"
                 onClick={() => {
@@ -2334,7 +2335,7 @@ export function ChatPanel({
                 className={cn(
                   "transition-all duration-200",
                   isLoading &&
-                    "bg-rose-600 text-white hover:bg-rose-500 dark:bg-rose-500 dark:text-white dark:hover:bg-rose-400",
+                  "bg-rose-600 text-white hover:bg-rose-500 dark:bg-rose-500 dark:text-white dark:hover:bg-rose-400",
                 )}
                 aria-label={isLoading ? "Stop response" : "Send message"}
               >

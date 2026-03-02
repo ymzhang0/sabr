@@ -303,6 +303,7 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("");
+  const [nodeTypeFilter, setNodeTypeFilter] = useState<"all" | "structures" | "tasks" | "failed">("all");
   const [processLimit, setProcessLimit] = useState(15);
   const [pendingProcessLimit, setPendingProcessLimit] = useState<number | null>(null);
   const [contextNodes, setContextNodes] = useState<FocusNode[]>([]);
@@ -328,8 +329,13 @@ export default function App() {
   });
 
   const processesQuery = useQuery({
-    queryKey: ["processes", selectedGroup, processLimit],
-    queryFn: () => getProcesses(processLimit, selectedGroup || undefined),
+    queryKey: ["processes", selectedGroup, processLimit, nodeTypeFilter],
+    queryFn: () => {
+      let nodeType: string | undefined;
+      if (nodeTypeFilter === "tasks" || nodeTypeFilter === "failed") nodeType = "ProcessNode";
+      if (nodeTypeFilter === "structures") nodeType = "StructureData";
+      return getProcesses(processLimit, selectedGroup || undefined, nodeType);
+    },
     enabled: bootstrapQuery.isSuccess,
     refetchInterval: 3_000,
   });
@@ -800,6 +806,8 @@ export default function App() {
           isDarkMode={theme === "dark"}
           onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
           onGroupChange={setSelectedGroup}
+          nodeTypeFilter={nodeTypeFilter}
+          onNodeTypeFilterChange={setNodeTypeFilter}
           onProcessLimitChange={(nextLimit) => {
             if (nextLimit === processLimit) {
               return;
