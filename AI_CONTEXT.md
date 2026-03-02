@@ -27,3 +27,8 @@ SABR operates as the **Brain**. It communicates with the AiiDA-Worker (**Body**)
 
 ## Data Flow
 User -> Next.js Frontend -> FastAPI SABR Routers -> SABR Auto-Agent -> Tool Call -> `AiiDAWorkerClient` -> AiiDA-Worker REST API -> SABR Presenter -> SSE/JSON Frontend Render.
+
+## 3. Frontend Architecture Insights
+### Submission Review & Draft Builders
+**Location:** `sabr/frontend/src/components/dashboard/submission-modal.tsx`
+**Implementation:** The submission UI dynamically reads AiiDA Builder outputs. To support WorkChains (like `pwrelaxworkchain`), specific port parameters like `metadata.options` (e.g., `workdir`, `account`, `resources`) must be mapped deeply into nested calculation namespaces (e.g., `base.pw.metadata.options`) instead of the root directory. Furthermore, form state hooks relying on `metadata` or `inputs` (like global code inheritance) require stable references, avoiding immediate resets upon edits.
