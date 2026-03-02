@@ -99,9 +99,11 @@ export async function getProcesses(
   limit = 15,
   groupLabel?: string,
   nodeType?: string,
+  label?: string,
+  processState?: string,
 ): Promise<ProcessesResponse> {
   const { data } = await frontendApi.get<ProcessesResponse>("/processes", {
-    params: { limit, group_label: groupLabel, node_type: nodeType },
+    params: { limit, group_label: groupLabel, node_type: nodeType, label, process_state: processState },
   });
   return data;
 }
@@ -135,6 +137,11 @@ export async function addNodesToGroup(pk: number, nodePks: number[]): Promise<Gr
   const { data } = await frontendApi.post<GroupAssignNodesResponse>(`/groups/${pk}/nodes`, {
     node_pks: nodePks,
   });
+  return data;
+}
+
+export async function removeNodeFromGroup(pk: number, nodePk: number): Promise<GroupMutationResponse> {
+  const { data } = await frontendApi.delete<GroupMutationResponse>(`/groups/${pk}/nodes/${nodePk}`);
   return data;
 }
 

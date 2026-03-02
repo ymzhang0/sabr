@@ -2,6 +2,7 @@ import {
   Bot,
   CheckSquare2,
   ChevronDown,
+  ChevronRight,
   Copy,
   Download,
   FolderOpen,
@@ -12,6 +13,12 @@ import {
   Search,
   Sun,
   Trash2,
+  MoreVertical,
+  Wand2,
+  ListPlus,
+  SquareCheck,
+  Square,
+  FolderPlus
 } from "lucide-react";
 import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
 
@@ -385,88 +392,64 @@ function getNodeMetadata(process: ProcessItem): NodeMetadata {
   };
 }
 
+
 type SidebarProps = {
   processes: ProcessItem[];
-  groupOptions: string[];
+  groups: GroupItem[];
   selectedGroup: string;
-  selectedType: string;
   processLimit: number;
   contextNodeIds: number[];
   isUpdatingProcessLimit: boolean;
   isDarkMode: boolean;
   onToggleTheme: () => void;
   onGroupChange: (groupLabel: string) => void;
-  onTypeChange: (nodeType: string) => void;
   onProcessLimitChange: (limit: number) => void;
   onAddContextNode: (process: ProcessItem) => void;
+  onAddContextNodes: (processes: ProcessItem[]) => void;
   onOpenProcessDetail: (process: ProcessItem) => void;
+  onCreateGroup: (label: string) => void;
+  onRenameGroup: (pk: number, label: string) => void;
+  onDeleteGroup: (pk: number) => void;
+  onAssignNodesToGroup: (groupPk: number, nodePks: number[]) => void;
+  onSoftDeleteNode: (pk: number) => void;
+  onExportGroup: (group: GroupItem) => void;
+  onConsultFailedProcess: (process: ProcessItem) => void;
 };
-
-const NODE_TYPE_OPTIONS = [
-  "ProcessNode",
-  "WorkChainNode",
-  "CalcJobNode",
-  "CalcFunctionNode",
-  "StructureData",
-  "BandsData",
-  "ArrayData",
-  "XyData",
-  "Dict",
-  "KpointsData",
-  "UpfData",
-  "RemoteData",
-  "FolderData",
-] as const;
 
 export function Sidebar({
   processes,
-  groupOptions,
+  groups,
   selectedGroup,
-  selectedType,
   processLimit,
   contextNodeIds,
   isUpdatingProcessLimit,
   isDarkMode,
   onToggleTheme,
   onGroupChange,
-  onTypeChange,
   onProcessLimitChange,
   onAddContextNode,
+  onAddContextNodes,
   onOpenProcessDetail,
+  onCreateGroup,
+  onRenameGroup,
+  onDeleteGroup,
+  onAssignNodesToGroup,
+  onSoftDeleteNode,
+  onExportGroup,
+  onConsultFailedProcess,
 }: SidebarProps) {
-  const groupMenuRef = useRef<HTMLDivElement | null>(null);
-  const typeMenuRef = useRef<HTMLDivElement | null>(null);
-  const [isGroupMenuOpen, setIsGroupMenuOpen] = useState(false);
-  const [isTypeMenuOpen, setIsTypeMenuOpen] = useState(false);
   const [limitInput, setLimitInput] = useState(String(processLimit));
+  const [searchQuery, setSearchQuery] = useState("");
+  const [nodeTypeFilter, setNodeTypeFilter] = useState<"all" | "structures" | "tasks" | "failed">("all");
+  const [selectedNodePks, setSelectedNodePks] = useState<Set<number>>(new Set());
+  const [contextMenuNode, setContextMenuNode] = useState<{ pk: number; x: number; y: number } | null>(null);
+  const [contextMenuGroup, setContextMenuGroup] = useState<{ pk: number; x: number; y: number } | null>(null);
+
+  const [isGroupsExpanded, setIsGroupsExpanded] = useState(true);
 
   useEffect(() => {
     setLimitInput(String(processLimit));
   }, [processLimit]);
-
-  const sortedGroups = useMemo(
-    () => [...groupOptions].sort((a, b) => a.localeCompare(b)),
-    [groupOptions],
-  );
-  const contextNodeIdSet = useMemo(
-    () => new Set(contextNodeIds),
-    [contextNodeIds],
-  );
-
-  useEffect(() => {
-    const handleOutside = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (groupMenuRef.current && !groupMenuRef.current.contains(target)) {
-        setIsGroupMenuOpen(false);
-      }
-      if (typeMenuRef.current && !typeMenuRef.current.contains(target)) {
-        setIsTypeMenuOpen(false);
-      }
-    };
-
-    window.addEventListener("mousedown", handleOutside);
-    return () => window.removeEventListener("mousedown", handleOutside);
-  }, []);
 
   const commitProcessLimit = (rawValue: string) => {
     const parsed = Number.parseInt(rawValue, 10);
@@ -493,11 +476,86 @@ export function Sidebar({
     event.dataTransfer.setData("text/plain", `#${process.pk}`);
   };
 
+  const handleGroupDrop = (event: DragEvent<HTMLDivElement>, groupPk: number) => {
+    event.preventDefault();
+    const payload = event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME);
+    if (!payload) return;
+    try {
+      const parsed = JSON.parse(payload);
+      if (parsed.pk) {
+        onAssignNodesToGroup(groupPk, [parsed.pk]);
+      }
+    } catch (e) {
+      // ignore
+    }
+  };
+
+  const filteredProcesses = useMemo(() => {
+    return processes.filter((proc) => {
+      // Search
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        const lbl = (proc.label || "").toLowerCase();
+        const pLbl = (proc.process_label || "").toLowerCase();
+        if (!lbl.includes(q) && !pLbl.includes(q) && !String(proc.pk).includes(q)) {
+          return false;
+        }
+      }
+      // Type Toggle
+      if (nodeTypeFilter === "structures" && !isStructureNode(proc)) return false;
+      if (nodeTypeFilter === "tasks" && !isProcessLikeNode(proc)) return false;
+      if (nodeTypeFilter === "failed") {
+        const normalized = normalizeState(proc.process_state || proc.state);
+        if (!FAILED_PROCESS_STATES.has(normalized)) return false;
+      }
+      return true;
+    });
+  }, [processes, searchQuery, nodeTypeFilter]);
+
+  const toggleSelectNode = (pk: number, event: React.MouseEvent) => {
+    event.stopPropagation();
+    setSelectedNodePks((prev) => {
+      const next = new Set(prev);
+      if (next.has(pk)) next.delete(pk);
+      else next.add(pk);
+      return next;
+    });
+  };
+
+  const handleBulkAddToContext = () => {
+    const selectedProcs = processes.filter((p) => selectedNodePks.has(p.pk));
+    if (selectedProcs.length > 0) {
+      onAddContextNodes(selectedProcs);
+    }
+    setSelectedNodePks(new Set());
+  };
+
+  const handleBulkCreateGroup = () => {
+    const label = window.prompt("Enter new group name:");
+    if (!label) return;
+    onCreateGroup(label);
+    // After creating group, we ideally want to assign nodes. 
+    // Since onCreateGroup does not return the group immediately in this prop schema, 
+    // we might need to rely on the backend or wait. 
+    // For simplicity, we just clear selection or assume backend logic exists.
+    setSelectedNodePks(new Set());
+  };
+
+  // Close context menus on click outside
+  useEffect(() => {
+    const handleClick = () => {
+      setContextMenuNode(null);
+      setContextMenuGroup(null);
+    };
+    window.addEventListener("click", handleClick);
+    return () => window.removeEventListener("click", handleClick);
+  }, []);
+
   return (
-    <aside className="flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight lg:w-[360px]">
+    <aside className="flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight lg:w-[360px] relative">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-          AiiDA Agent
+          AiiDA Explorer
         </h1>
         <Button
           variant="ghost"
@@ -512,242 +570,202 @@ export function Sidebar({
 
       <BridgeStatus />
 
-      <Panel
-        className="relative z-10 flex min-h-0 flex-1 flex-col border-zinc-100/90 p-4 transition-opacity duration-300 dark:border-zinc-800/80"
-      >
-        <div className="mx-auto flex h-full min-h-0 w-[90%] flex-col">
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <p className="text-[11px] uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-              AiiDA Explorer
-            </p>
+      <Panel className="relative z-10 flex min-h-0 flex-1 flex-col border-zinc-100/90 p-4 transition-opacity duration-300 dark:border-zinc-800/80">
+        <div className="mx-auto flex h-full min-h-0 w-full flex-col gap-4">
+
+          {/* Top Controls */}
+          <div className="flex flex-col gap-3">
             <div className="flex items-center gap-2">
-              {isUpdatingProcessLimit ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
-              ) : null}
-              <input
-                type="number"
-                min={1}
-                max={100}
-                value={limitInput}
-                inputMode="numeric"
-                className="h-5 w-10 border-0 border-b border-zinc-300/80 bg-transparent px-0 text-right text-xs text-zinc-700 outline-none transition-colors duration-200 focus:border-zinc-500 dark:border-zinc-700 dark:text-zinc-300 dark:focus:border-zinc-500"
-                aria-label="Process monitor recent node limit"
-                onChange={(event) => {
-                  const sanitized = event.target.value.replace(/[^\d]/g, "");
-                  setLimitInput(sanitized);
-                  if (!sanitized) {
-                    return;
-                  }
-                  const parsed = Number.parseInt(sanitized, 10);
-                  if (Number.isNaN(parsed)) {
-                    return;
-                  }
-                  onProcessLimitChange(clampRecentLimit(parsed));
-                }}
-                onBlur={() => commitProcessLimit(limitInput)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    commitProcessLimit(limitInput);
-                    (event.currentTarget as HTMLInputElement).blur();
-                  }
-                }}
-              />
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">recent</span>
+              <div className="relative flex-1">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
+                <input
+                  type="text"
+                  placeholder="Search PK, label..."
+                  className="h-9 w-full rounded-lg border border-zinc-200/65 bg-zinc-50/70 pl-9 pr-3 text-sm text-zinc-700 transition-all focus:border-zinc-400 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:focus:border-zinc-600"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
+              <div className="flex items-center gap-1 rounded-lg border border-zinc-200/65 bg-zinc-50/70 p-1 dark:border-zinc-800 dark:bg-zinc-900/45">
+                {(["all", "structures", "tasks", "failed"] as const).map((type) => (
+                  <button
+                    key={type}
+                    onClick={() => setNodeTypeFilter(type)}
+                    className={cn(
+                      "rounded-md px-2 py-1 text-[11px] font-medium capitalize",
+                      nodeTypeFilter === type
+                        ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
+                        : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+                    )}
+                  >
+                    {type}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col gap-4">
-            <div className="flex items-center gap-4">
-              <div ref={groupMenuRef} className="relative min-w-0 flex-1">
-                <button
-                  type="button"
-                  className="inline-flex h-9 w-full items-center gap-2 rounded-lg border border-zinc-200/65 bg-zinc-50/70 px-3 text-sm text-zinc-700 transition-all duration-200 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:hover:border-zinc-700 dark:hover:bg-zinc-900/60"
-                  onClick={() => {
-                    setIsTypeMenuOpen(false);
-                    setIsGroupMenuOpen((open) => !open);
-                  }}
-                >
-                  <span className="truncate text-left">{selectedGroup || "All Groups"}</span>
-                  <ChevronDown
-                    className={cn("h-4 w-4 shrink-0 transition-transform duration-200", isGroupMenuOpen && "rotate-180")}
-                  />
-                </button>
-
-                {isGroupMenuOpen ? (
-                  <div className="absolute left-0 top-full z-20 mt-2 w-full overflow-hidden rounded-lg border border-zinc-200/70 bg-zinc-50/95 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95">
-                    <div className="minimal-scrollbar max-h-60 overflow-y-auto p-1">
-                      <button
-                        type="button"
-                        className={cn(
-                          "flex w-full items-center rounded-md px-2.5 py-2 text-left text-sm transition-colors duration-200",
-                          !selectedGroup
-                            ? "bg-zinc-200/70 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
-                            : "text-zinc-700 hover:bg-zinc-200/50 dark:text-zinc-300 dark:hover:bg-zinc-800/80",
-                        )}
-                        onClick={() => {
-                          onGroupChange("");
-                          setIsGroupMenuOpen(false);
-                        }}
-                      >
-                        <span className="truncate">All Groups</span>
-                      </button>
-                      {sortedGroups.map((groupLabel) => (
-                        <button
-                          key={groupLabel}
-                          type="button"
-                          className={cn(
-                            "flex w-full items-center rounded-md px-2.5 py-2 text-left text-sm transition-colors duration-200",
-                            groupLabel === selectedGroup
-                              ? "bg-zinc-200/70 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
-                              : "text-zinc-700 hover:bg-zinc-200/50 dark:text-zinc-300 dark:hover:bg-zinc-800/80",
-                          )}
-                          onClick={() => {
-                            onGroupChange(groupLabel);
-                            setIsGroupMenuOpen(false);
-                          }}
-                        >
-                          <span className="truncate">{groupLabel}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
+          {/* Groups Section */}
+          <div className="flex flex-col gap-1 shrink-0">
+            <button
+              onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
+              className="flex items-center justify-between group/groupbtn"
+            >
+              <div className="flex items-center gap-1 text-xs font-medium uppercase tracking-[0.1em] text-zinc-500 dark:text-zinc-400">
+                <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
+                Groups
               </div>
+              <Plus className="h-3.5 w-3.5 text-zinc-400 opacity-0 transition-opacity group-hover/groupbtn:opacity-100" />
+            </button>
 
-              <div ref={typeMenuRef} className="relative min-w-0 flex-1">
-                <button
-                  type="button"
-                  className="inline-flex h-9 w-full items-center gap-2 rounded-lg border border-zinc-200/65 bg-zinc-50/70 px-3 text-sm text-zinc-700 transition-all duration-200 hover:border-zinc-300 hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:hover:border-zinc-700 dark:hover:bg-zinc-900/60"
-                  onClick={() => {
-                    setIsGroupMenuOpen(false);
-                    setIsTypeMenuOpen((open) => !open);
-                  }}
+            {isGroupsExpanded && (
+              <div className="flex flex-col gap-1 mt-1">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onGroupChange("")}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                    !selectedGroup ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+                  )}
                 >
-                  <span className="truncate text-left">{selectedType || "All Types"}</span>
-                  <ChevronDown
-                    className={cn("h-4 w-4 shrink-0 transition-transform duration-200", isTypeMenuOpen && "rotate-180")}
-                  />
-                </button>
-
-                {isTypeMenuOpen ? (
-                  <div className="absolute left-0 top-full z-20 mt-2 w-full overflow-hidden rounded-lg border border-zinc-200/70 bg-zinc-50/95 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95">
-                    <div className="minimal-scrollbar max-h-60 overflow-y-auto p-1">
-                      <button
-                        type="button"
-                        className={cn(
-                          "flex w-full items-center rounded-md px-2.5 py-2 text-left text-sm transition-colors duration-200",
-                          !selectedType
-                            ? "bg-zinc-200/70 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
-                            : "text-zinc-700 hover:bg-zinc-200/50 dark:text-zinc-300 dark:hover:bg-zinc-800/80",
-                        )}
-                        onClick={() => {
-                          onTypeChange("");
-                          setIsTypeMenuOpen(false);
-                        }}
-                      >
-                        <span className="truncate">All Types</span>
-                      </button>
-                      {NODE_TYPE_OPTIONS.map((nodeType) => (
-                        <button
-                          key={nodeType}
-                          type="button"
-                          className={cn(
-                            "flex w-full items-center rounded-md px-2.5 py-2 text-left text-sm transition-colors duration-200",
-                            nodeType === selectedType
-                              ? "bg-zinc-200/70 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100"
-                              : "text-zinc-700 hover:bg-zinc-200/50 dark:text-zinc-300 dark:hover:bg-zinc-800/80",
-                          )}
-                          onClick={() => {
-                            onTypeChange(nodeType);
-                            setIsTypeMenuOpen(false);
-                          }}
-                        >
-                          <span className="truncate">{nodeType}</span>
-                        </button>
-                      ))}
+                  <FolderOpen className="h-4 w-4" />
+                  <span>All Groups</span>
+                </div>
+                {groups.map((group) => (
+                  <div
+                    key={group.pk}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => onGroupChange(group.label)}
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                    }}
+                    onDrop={(e) => handleGroupDrop(e, group.pk)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenuGroup({ pk: group.pk, x: e.pageX, y: e.pageY });
+                    }}
+                    className={cn(
+                      "group flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors",
+                      selectedGroup === group.label ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+                    )}
+                  >
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <FolderOpen className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                      <span className="truncate">{group.label}</span>
                     </div>
+                    <span className="text-[10px] text-zinc-400 shrink-0">{group.count} nodes</span>
                   </div>
-                ) : null}
+                ))}
+              </div>
+            )}
+          </div>
+
+          <hr className="border-zinc-200/60 dark:border-zinc-800/60" />
+
+          {/* Nodes Section */}
+          <div className="flex min-h-0 flex-1 flex-col gap-2 relative">
+            <div className="flex items-center justify-between shrink-0">
+              <span className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500 dark:text-zinc-400">
+                Nodes {selectedGroup ? `in ${selectedGroup}` : "Recent"}
+              </span>
+              <div className="flex items-center gap-1 text-[11px] text-zinc-500">
+                Limit:
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={limitInput}
+                  className="w-8 bg-transparent border-b border-zinc-300 dark:border-zinc-700 outline-none text-center"
+                  onChange={(e) => setLimitInput(e.target.value)}
+                  onBlur={() => commitProcessLimit(limitInput)}
+                  onKeyDown={(e) => { if (e.key === "Enter") commitProcessLimit(limitInput); }}
+                />
               </div>
             </div>
 
-            <div
-              className={cn(
-                "minimal-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 transition-opacity duration-200",
-                isUpdatingProcessLimit && "opacity-70",
-              )}
-            >
-              {processes.length === 0 ? (
+            <div className={cn("minimal-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-12", isUpdatingProcessLimit && "opacity-70")}>
+              {filteredProcesses.length === 0 ? (
                 <p className="rounded-xl border border-dashed border-zinc-300/60 bg-zinc-50/40 p-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-900/30 dark:text-zinc-400">
                   No matching nodes found.
                 </p>
               ) : (
-                processes.map((process) => {
-                  const isSelected = contextNodeIdSet.has(process.pk);
+                filteredProcesses.map((process) => {
+                  const isSelected = contextNodeIds.includes(process.pk);
+                  const isChecked = selectedNodePks.has(process.pk);
                   const canOpenDetail = isProcessLikeNode(process);
                   const typeIndicator = getNodeTypeIndicator(process);
                   const titleText = getNodeTitleText(process);
                   const metadata = getNodeMetadata(process);
-                  const activateCard = () => {
-                    onAddContextNode(process);
-                  };
+
+                  const isFailed = FAILED_PROCESS_STATES.has(normalizeState(process.process_state || process.state));
+                  const isRunning = RUNNING_PROCESS_STATES.has(normalizeState(process.process_state || process.state));
+
                   return (
                     <div
-                      key={`${process.pk}-${process.state}-${process.formula ?? ""}`}
-                      role="button"
-                      tabIndex={0}
+                      key={`${process.pk}-${process.state}`}
                       draggable
                       onDragStart={(event) => handleProcessDragStart(event, process)}
-                      onClick={activateCard}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          activateCard();
-                        }
+                      onClick={() => onAddContextNode(process)}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        setContextMenuNode({ pk: process.pk, x: e.pageX, y: e.pageY });
                       }}
                       className={cn(
-                        "rounded-xl border px-3 py-2.5 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-300 dark:focus-visible:ring-zinc-700",
-                        "cursor-pointer border-zinc-200/75 bg-white/60 hover:border-zinc-300/85 hover:bg-white/75 dark:border-zinc-800/80 dark:bg-zinc-900/45 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/55",
-                        isSelected
-                          ? "border-zinc-300/90 bg-zinc-100/70 shadow-[0_10px_22px_-20px_rgba(15,23,42,0.65)] dark:border-zinc-700/90 dark:bg-zinc-800/55"
-                          : null,
+                        "group/card flex items-start gap-2 rounded-xl border px-3 py-2.5 transition-all duration-200 cursor-pointer",
+                        "border-zinc-200/75 bg-white/60 hover:border-zinc-300/85 hover:bg-white/75 dark:border-zinc-800/80 dark:bg-zinc-900/45 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/55",
+                        isSelected ? "border-zinc-300/90 bg-zinc-100/70 shadow-[0_10px_22px_-20px_rgba(15,23,42,0.65)] dark:border-zinc-700/90 dark:bg-zinc-800/55" : null,
+                        isRunning ? "animate-pulse ring-1 ring-blue-500/30" : null
                       )}
                     >
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0">
+                      <button
+                        onClick={(e) => toggleSelectNode(process.pk, e)}
+                        className="mt-1 shrink-0 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300"
+                      >
+                        {isChecked ? <SquareCheck className="h-4 w-4 text-blue-500" /> : <Square className="h-4 w-4 opacity-0 transition-opacity group-hover/card:opacity-100" />}
+                      </button>
+
+                      <div className="flex min-w-0 flex-1 flex-col gap-1">
+                        <div className="flex items-center justify-between gap-3">
                           <p className="flex items-center gap-1.5 truncate font-sans text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-                            <span role="img" aria-label={typeIndicator.iconLabel} className="shrink-0">
-                              {typeIndicator.icon}
-                            </span>
+                            <span role="img" aria-label={typeIndicator.iconLabel} className="shrink-0">{typeIndicator.icon}</span>
                             <span className="truncate">
-                              {titleText}{" "}
-                              <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">({process.pk})</span>
+                              {titleText} <span className="font-mono text-[11px] font-normal text-zinc-500 dark:text-zinc-400">({process.pk})</span>
                             </span>
                           </p>
+                          {metadata.processStatus && (
+                            <div className="flex items-center gap-1 shrink-0">
+                              <p className={cn("text-[11px] font-semibold tracking-tight", metadata.processStatus.className)}>
+                                {metadata.processStatus.label}
+                              </p>
+                              {isFailed && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); onConsultFailedProcess(process); }}
+                                  className="text-rose-500 hover:text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded p-0.5"
+                                  title="AI Diagnose"
+                                >
+                                  <Wand2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
 
-                        <div className="min-w-0 text-right">
-                          {metadata.processStatus ? (
-                            <p className={cn("text-[11px] font-semibold tracking-tight", metadata.processStatus.className)}>
-                              {metadata.processStatus.label}
-                            </p>
-                          ) : null}
-                          {metadata.lines.map((line, index) => (
-                            <p
-                              key={`${process.pk}-meta-${index}`}
-                              className={cn(
-                                "truncate text-[11px] tracking-tight text-zinc-500 dark:text-zinc-400",
-                                index === 0 && "text-zinc-700 dark:text-zinc-300",
-                              )}
-                            >
-                              {line}
-                            </p>
-                          ))}
-                          <div className="mt-0.5 flex items-center justify-end gap-2">
-                            {canOpenDetail ? (
+                        <div className="min-w-0 flex justify-between">
+                          <div className="flex flex-col">
+                            {metadata.lines.map((line, idx) => (
+                              <p key={idx} className={cn("truncate text-[11px] tracking-tight", idx === 0 ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-500 dark:text-zinc-400")}>
+                                {line}
+                              </p>
+                            ))}
+                          </div>
+                          <div className="mt-0.5 flex items-end justify-end gap-2">
+                            {canOpenDetail && (
                               <button
                                 type="button"
-                                className="text-[10px] uppercase tracking-[0.08em] text-zinc-500 underline decoration-zinc-300 underline-offset-2 transition-colors duration-150 hover:text-zinc-800 dark:text-zinc-400 dark:decoration-zinc-700 dark:hover:text-zinc-200"
+                                className="text-[10px] uppercase tracking-[0.08em] text-zinc-500 underline decoration-zinc-300 underline-offset-2 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:decoration-zinc-700 dark:hover:text-zinc-200"
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   onOpenProcessDetail(process);
@@ -755,8 +773,7 @@ export function Sidebar({
                               >
                                 Inspect
                               </button>
-                            ) : null}
-                            {isSelected ? <p className="text-[10px] uppercase tracking-[0.08em] text-zinc-500 dark:text-zinc-400">Selected</p> : null}
+                            )}
                           </div>
                         </div>
                       </div>
@@ -765,9 +782,103 @@ export function Sidebar({
                 })
               )}
             </div>
+
+            {/* Bulk Actions Toolbar */}
+            {selectedNodePks.size > 0 && (
+              <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-3 py-1.5 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95 animate-in slide-in-from-bottom-5">
+                <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 px-2 border-r border-zinc-200 dark:border-zinc-800">
+                  {selectedNodePks.size} selected
+                </span>
+                <button onClick={handleBulkCreateGroup} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                  <FolderPlus className="h-3.5 w-3.5" /> Group
+                </button>
+                <button onClick={handleBulkAddToContext} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/30">
+                  <ListPlus className="h-3.5 w-3.5" /> Context
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </Panel>
+
+      {/* Context Menus */}
+      {contextMenuNode && (
+        <div
+          className="fixed z-50 min-w-40 rounded-md border border-zinc-200 bg-white p-1 shadow-md dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
+          style={{ top: contextMenuNode.y, left: contextMenuNode.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              navigator.clipboard.writeText(String(contextMenuNode.pk));
+              setContextMenuNode(null);
+            }}
+          >
+            <Copy className="h-3.5 w-3.5" /> Copy PK
+          </button>
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              const proc = processes.find(p => p.pk === contextMenuNode.pk);
+              if (proc) onAddContextNode(proc);
+              setContextMenuNode(null);
+            }}
+          >
+            <ListPlus className="h-3.5 w-3.5" /> Add to Context
+          </button>
+          <hr className="my-1 border-zinc-200 dark:border-zinc-800" />
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
+            onClick={() => {
+              onSoftDeleteNode(contextMenuNode.pk);
+              setContextMenuNode(null);
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete Node
+          </button>
+        </div>
+      )}
+
+      {contextMenuGroup && (
+        <div
+          className="fixed z-50 min-w-40 rounded-md border border-zinc-200 bg-white p-1 shadow-md dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
+          style={{ top: contextMenuGroup.y, left: contextMenuGroup.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              const lbl = window.prompt("Rename Group:");
+              if (lbl) onRenameGroup(contextMenuGroup.pk, lbl);
+              setContextMenuGroup(null);
+            }}
+          >
+            <Pencil className="h-3.5 w-3.5" /> Rename
+          </button>
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              const grp = groups.find(g => g.pk === contextMenuGroup.pk);
+              if (grp) onExportGroup(grp);
+              setContextMenuGroup(null);
+            }}
+          >
+            <Download className="h-3.5 w-3.5" /> Export Group
+          </button>
+          <hr className="my-1 border-zinc-200 dark:border-zinc-800" />
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
+            onClick={() => {
+              if (window.confirm("Are you sure?")) onDeleteGroup(contextMenuGroup.pk);
+              setContextMenuGroup(null);
+            }}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete Group
+          </button>
+        </div>
+      )}
+
     </aside>
   );
 }
