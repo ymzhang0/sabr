@@ -155,7 +155,7 @@ function isWorkChainType(nodeType: string | null | undefined): boolean {
 }
 
 function linkToContextNode(link: ProcessNodeLink): FocusNode {
-  const baseLabel = String(link.link_label || "").trim();
+  const baseLabel = String(link.label || link.link_label || "").trim();
   return {
     pk: link.pk,
     label: baseLabel || `${link.node_type} #${link.pk}`,
@@ -184,21 +184,33 @@ function iconForNodeType(nodeType: string): { icon: string; ariaLabel: string } 
 }
 
 function formatLinkPreview(link: ProcessNodeLink): string | null {
-  const preview = link.preview;
+  const preview = link.preview_info ?? link.preview;
   if (!preview) {
     return null;
   }
-  if (preview.remote_path || preview.computer_name) {
-    const pieces = [preview.remote_path, preview.computer_name].filter(Boolean);
+  if (preview.value !== undefined) {
+    return String(preview.value);
+  }
+  if (preview.summary) {
+    return String(preview.summary);
+  }
+  if (preview.remote_path || preview.computer_name || preview.computer || preview.path) {
+    const pieces = [preview.path || preview.remote_path, preview.computer || preview.computer_name].filter(Boolean);
     return pieces.join(" · ");
   }
   if (preview.filenames && preview.filenames.length > 0) {
     return preview.filenames.slice(0, 5).join(", ");
   }
+  if (preview.keys && preview.keys.length > 0) {
+    return `Keys: ${preview.keys.slice(0, 3).join(", ")}${(preview.count ?? 0) > 3 ? "..." : ""}`;
+  }
+  if (preview.count !== undefined && preview.count !== null) {
+    return `Items: ${preview.count}`;
+  }
   if (preview.x_label || (preview.y_arrays && preview.y_arrays.length > 0)) {
     const yText = (preview.y_arrays || [])
       .slice(0, 3)
-      .map((entry) => `${entry.label}${entry.length !== null ? `(${entry.length})` : ""}`)
+      .map((entry: { label: string; length: number | null }) => `${entry.label}${entry.length !== null ? `(${entry.length})` : ""}`)
       .join(", ");
     const xText = preview.x_label ? `${preview.x_label}${preview.x_length !== null ? `(${preview.x_length})` : ""}` : null;
     return [xText ? `x:${xText}` : null, yText ? `y:${yText}` : null].filter(Boolean).join(" · ") || null;
@@ -224,7 +236,7 @@ function NodeLinkRow({ link, onAddContextNode, compact = false }: { link: Proces
         </span>
         <p className={cn("min-w-0 truncate text-xs text-zinc-700 dark:text-zinc-300", compact && "text-[11px]")}>
           <span className="font-medium">{linkLabel}</span>
-          <span>: {nodeType}</span>
+          <span>: {link.label || nodeType}</span>
           <span className="text-zinc-500 dark:text-zinc-400"> (</span>
           <button
             type="button"
@@ -543,12 +555,6 @@ export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: Proc
           <div className="minimal-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-5 py-4">
             {showProcessTree ? (
               <section>
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Process Tree</h3>
-                  {detailQuery.isFetching ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
-                  ) : null}
-                </div>
                 {detailQuery.isError ? (
                   <p className="text-sm text-rose-500">Failed to load process tree.</p>
                 ) : detailQuery.isPending ? (

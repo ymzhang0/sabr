@@ -354,6 +354,26 @@ class AiiDAWorkerClient:
             self._infrastructure_cached_at = time.monotonic()
             return copy.deepcopy(payload)
 
+    async def inspect_infrastructure_v2(self) -> list[dict[str, Any]]:
+        """Fetch nested infrastructure (Computers -> Codes)."""
+        payload = await self._fetch_json("/management/infrastructure", timeout_seconds=max(8.0, self._request_timeout_seconds))
+        return payload if isinstance(payload, list) else []
+
+    async def setup_infrastructure(self, config: dict[str, Any]) -> dict[str, Any]:
+        return await self._post_json(
+            "/management/infrastructure/setup",
+            payload=config,
+            timeout_seconds=max(10.0, self._request_timeout_seconds),
+        )
+
+    async def get_ssh_config(self) -> list[dict[str, Any]]:
+        """Fetch parsed SSH hosts from ~/.ssh/config via aiida-worker."""
+        payload = await self._fetch_json(
+            "/management/infrastructure/ssh-config",
+            timeout_seconds=max(5.0, self._request_timeout_seconds),
+        )
+        return payload if isinstance(payload, list) else []
+
     async def _refresh_if_needed(self, *, force_refresh: bool) -> None:
         if not force_refresh and self._is_cache_fresh():
             return

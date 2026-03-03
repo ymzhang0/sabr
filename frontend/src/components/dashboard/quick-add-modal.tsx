@@ -1,0 +1,391 @@
+
+import React, { useState, useCallback } from "react";
+import {
+    X,
+    Upload,
+    Terminal,
+    Cpu,
+    Code2,
+    Loader2,
+    CheckCircle2,
+    AlertCircle,
+    Wand2,
+    Settings2,
+    Sparkles,
+    ChevronDown,
+    ChevronUp
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { parseInfrastructure, setupInfrastructure, getSshHosts, type SSHHostDetails } from "@/lib/api";
+import { useQuery } from "@tanstack/react-query";
+
+type QuickAddModalProps = {
+    isOpen: boolean;
+    onClose: () => void;
+    onSuccess: () => void;
+};
+
+export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps) {
+    const [pasteText, setPasteText] = useState("");
+    const [isParsing, setIsParsing] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [parseResult, setParseResult] = useState<any>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [activeTab, setActiveTab] = useState<"paste" | "form">("paste");
+
+    const [showAdvanced, setShowAdvanced] = useState(false);
+    const [selectedSshHost, setSelectedSshHost] = useState<string>("");
+
+    const sshHostsQuery = useQuery({
+        queryKey: ["ssh-hosts"],
+        queryFn: getSshHosts,
+    });
+    const sshHosts = sshHostsQuery.data || [];
+
+    const handleParse = async () => {
+        if (!pasteText.trim() && !selectedSshHost) return;
+        setIsParsing(true);
+        setError(null);
+        try {
+            const hostDetails = sshHosts.find(h => h.alias === selectedSshHost) || null;
+            // If we have an SSH host selected but no paste text, use a dummy text to trigger parse
+            const textToParse = pasteText.trim() || `Configure computer for SSH host ${selectedSshHost}`;
+
+            const response = await parseInfrastructure(textToParse, hostDetails);
+            if (response.status === "success" && response.data) {
+                setParseResult(response.data);
+                setActiveTab("form");
+            } else {
+                setError("Failed to parse input. Please try again or fill manually.");
+            }
+        } catch (err: any) {
+            setError(err.response?.data?.detail || "AI Parsing failed.");
+        } finally {
+            setIsParsing(false);
+        }
+    };
+
+    const handleSubmit = async () => {
+        if (!parseResult || !parseResult.computer) {
+            setError("Computer configuration is missing.");
+            return;
+        }
+        setIsSubmitting(true);
+        setError(null);
+
+        try {
+            const payload: Record<string, any> = {
+                computer_label: parseResult.computer.label || "unknown_computer",
+                hostname: parseResult.computer.hostname || "unknown_host",
+                username: parseResult.computer.username || "",
+                computer_description: parseResult.computer.description || "",
+                transport_type: parseResult.computer.transport_type || "core.ssh",
+                scheduler_type: parseResult.computer.scheduler_type || "core.direct",
+                work_dir: parseResult.computer.work_dir || "/tmp/aiida",
+                mpiprocs_per_machine: parseResult.computer.mpiprocs_per_machine || 1,
+                mpirun_command: parseResult.computer.mpirun_command || "mpirun -np {tot_num_mpiprocs}",
+                prepend_text: parseResult.computer.prepend_text || "",
+                append_text: parseResult.computer.append_text || "",
+                use_login_shell: parseResult.computer.use_login_shell !== false,
+                safe_interval: parseResult.computer.safe_interval || 0.0,
+                connection_timeout: parseResult.computer.connection_timeout || 60,
+                key_filename: parseResult.computer.key_filename || "",
+                proxy_command: parseResult.computer.proxy_command || "",
+                proxy_jump: parseResult.computer.proxy_jump || ""
+            };
+
+            const code = parseResult.code;
+            if (code && code.label && code.default_calc_job_plugin && code.remote_abspath) {
+                payload.code_label = code.label;
+                payload.code_description = code.description || "";
+                payload.default_calc_job_plugin = code.default_calc_job_plugin;
+                payload.remote_abspath = code.remote_abspath;
+                payload.code_prepend_text = code.prepend_text || "";
+                payload.code_append_text = code.append_text || "";
+            }
+
+            const response = await setupInfrastructure(payload);
+            if (response.connection_status === "failed") {
+                setError(`Setup partial via DB, but connection test failed: ${response.connection_error}`);
+            } else {
+                onSuccess();
+                onClose();
+            }
+        } catch (err: any) {
+            setError(err.response?.data?.detail || "Submission failed.");
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]">
+                <header className="px-6 py-4 border-b border-zinc-100 dark:border-zinc-900 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <div className="p-2 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
+                            <Plus className="h-5 w-5 text-zinc-600 dark:text-zinc-400" />
+                        </div>
+                        <h2 className="text-xl font-semibold tracking-tight">Quick Add Infrastructure</h2>
+                    </div>
+                    <Button variant="ghost" size="icon" onClick={onClose}>
+                        <X className="h-5 w-5" />
+                    </Button>
+                </header>
+
+                <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                    <div className="flex gap-2 p-1 bg-zinc-100 dark:bg-zinc-900 rounded-xl">
+                        <button
+                            onClick={() => setActiveTab("paste")}
+                            className={cn(
+                                "flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-lg transition-all",
+                                activeTab === "paste" ? "bg-white dark:bg-zinc-800 shadow-sm" : "text-zinc-500"
+                            )}
+                        >
+                            <Terminal className="h-4 w-4" />
+                            Drop & Paste
+                        </button>
+                        <button
+                            onClick={() => setActiveTab("form")}
+                            className={cn(
+                                "flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-lg transition-all",
+                                activeTab === "form" ? "bg-white dark:bg-zinc-800 shadow-sm" : "text-zinc-500"
+                            )}
+                        >
+                            <Settings2 className="h-4 w-4" />
+                            Review Setup
+                        </button>
+                    </div>
+
+                    {activeTab === "paste" ? (
+                        <div className="space-y-4">
+                            <div className="relative group">
+                                <textarea
+                                    value={pasteText}
+                                    onChange={(e) => setPasteText(e.target.value)}
+                                    placeholder="Paste an SSH command, YAML snippet, or describe your computer..."
+                                    className="w-full h-48 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 text-sm font-mono focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all resize-none"
+                                />
+                                <div className="absolute top-4 right-4 text-zinc-400 group-hover:text-blue-500 transition-colors">
+                                    <Upload className="h-5 w-5" />
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col gap-2">
+                                <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">
+                                    Or Select Existing SSH Host
+                                </label>
+                                <select
+                                    className="w-full h-10 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 text-sm text-zinc-700 dark:text-zinc-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
+                                    value={selectedSshHost}
+                                    onChange={(e) => setSelectedSshHost(e.target.value)}
+                                >
+                                    <option value="">-- No SSH Host Selected --</option>
+                                    {sshHosts.map((host) => (
+                                        <option key={host.alias} value={host.alias}>
+                                            {host.alias} {host.hostname ? `(${host.hostname})` : ""}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className="bg-blue-50/50 dark:bg-blue-900/20 border border-blue-100/50 dark:border-blue-900/30 rounded-xl p-4 flex gap-3">
+                                <Wand2 className="h-5 w-5 text-blue-500 shrink-0" />
+                                <p className="text-sm text-blue-700 dark:text-blue-300">
+                                    Tip: Direct SSH aliases or job scheduler configs work best. Gemini will auto-extract labels, hostnames, and paths.
+                                </p>
+                            </div>
+
+                            <Button
+                                onClick={handleParse}
+                                className="w-full h-12 bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-800 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-xl font-semibold gap-2"
+                                disabled={isParsing || (!pasteText.trim() && !selectedSshHost)}
+                            >
+                                {isParsing ? <Loader2 className="h-5 w-5 animate-spin" /> : <Wand2 className="h-5 w-5" />}
+                                Analyze and Auto-fill
+                            </Button>
+                        </div>
+                    ) : (
+                        <div className="space-y-6 animate-in slide-in-from-right-2 duration-300">
+                            {parseResult ? (
+                                <div className="space-y-6">
+                                    {parseResult.preset_matched && (
+                                        <div className="bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl p-4 flex gap-3 animate-in fade-in zoom-in-95">
+                                            <Sparkles className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                            <div>
+                                                <h4 className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Preset Applied Automatically</h4>
+                                                <p className="text-sm text-emerald-700 dark:text-emerald-400 mt-1">
+                                                    Identified domain <code className="font-mono text-xs bg-emerald-100 dark:bg-emerald-900/50 px-1 py-0.5 rounded">{parseResult.preset_domain}</code>. Known parameters have been pre-filled. You can review them in Advanced Settings.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    )}
+                                    {parseResult.computer && (
+                                        <div className="p-4 bg-zinc-50 dark:bg-zinc-900/30 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-4">
+                                            <div className="flex items-center gap-2 text-zinc-500">
+                                                <Cpu className="h-4 w-4" />
+                                                <span className="text-xs font-bold uppercase tracking-wider">Basic Configuration</span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Label</label>
+                                                    <input
+                                                        value={parseResult.computer.label || ""}
+                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, label: e.target.value } })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Hostname</label>
+                                                    <input
+                                                        value={parseResult.computer.hostname || ""}
+                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, hostname: e.target.value } })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Username</label>
+                                                    <input
+                                                        value={parseResult.computer.username || ""}
+                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, username: e.target.value } })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">CPUs per node</label>
+                                                    <input
+                                                        type="number"
+                                                        value={parseResult.computer.mpiprocs_per_machine || ""}
+                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, mpiprocs_per_machine: parseInt(e.target.value) || 1 } })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <button
+                                                onClick={() => setShowAdvanced(!showAdvanced)}
+                                                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 pt-2 transition-colors"
+                                            >
+                                                {showAdvanced ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                                                {showAdvanced ? "Hide Advanced Settings" : "Show Advanced Settings (10+ parameters)"}
+                                            </button>
+
+                                            {showAdvanced && (
+                                                <div className="grid grid-cols-2 gap-4 pt-4 border-t border-zinc-200 dark:border-zinc-800 animate-in slide-in-from-top-2 duration-200">
+                                                    <div className="space-y-1 col-span-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Work Directory</label>
+                                                        <input value={parseResult.computer.work_dir || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, work_dir: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Transport Type</label>
+                                                        <input value={parseResult.computer.transport_type || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, transport_type: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Scheduler Type</label>
+                                                        <input value={parseResult.computer.scheduler_type || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, scheduler_type: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                    <div className="space-y-1 col-span-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Run Command</label>
+                                                        <input value={parseResult.computer.mpirun_command || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, mpirun_command: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                    <div className="space-y-1 col-span-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Prepend Text</label>
+                                                        <textarea value={parseResult.computer.prepend_text || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, prepend_text: e.target.value } })} className="w-full h-24 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono whitespace-pre text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {parseResult.code && Object.keys(parseResult.code).length > 0 && (
+                                        <div className="p-4 bg-zinc-50 dark:bg-zinc-900/30 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-4">
+                                            <div className="flex items-center gap-2 text-zinc-500">
+                                                <Code2 className="h-4 w-4" />
+                                                <span className="text-xs font-bold uppercase tracking-wider">Default Code Configuration</span>
+                                            </div>
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Target Plugin</label>
+                                                    <input
+                                                        value={parseResult.code.default_calc_job_plugin || ""}
+                                                        onChange={(e) => setParseResult({ ...parseResult, code: { ...parseResult.code, default_calc_job_plugin: e.target.value } })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Code Label</label>
+                                                    <input
+                                                        value={parseResult.code.label || ""}
+                                                        onChange={(e) => setParseResult({ ...parseResult, code: { ...parseResult.code, label: e.target.value } })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none"
+                                                        placeholder="e.g., pw"
+                                                    />
+                                                </div>
+                                                <div className="col-span-2 space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Remote Executable Path</label>
+                                                    <input
+                                                        value={parseResult.code.remote_abspath || ""}
+                                                        onChange={(e) => setParseResult({ ...parseResult, code: { ...parseResult.code, remote_abspath: e.target.value } })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                <div className="flex flex-col items-center justify-center py-12 text-zinc-500">
+                                    <Settings2 className="h-12 w-12 opacity-20 mb-4" />
+                                    <p>No data parsed yet. Go to the "Drop & Paste" tab.</p>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {error && (
+                        <div className="p-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-900/30 rounded-xl flex gap-x-2 text-rose-600 dark:text-rose-400 text-sm">
+                            <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                            {error}
+                        </div>
+                    )}
+                </div>
+
+                <footer className="px-6 py-4 border-t border-zinc-100 dark:border-zinc-900 bg-zinc-50/50 dark:bg-zinc-900/50 flex items-center justify-end gap-3">
+                    <Button variant="ghost" onClick={onClose} disabled={isSubmitting}>Cancel</Button>
+                    <Button
+                        disabled={!parseResult || isSubmitting}
+                        onClick={handleSubmit}
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-6 gap-2"
+                    >
+                        {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                        Test Connection & Save
+                    </Button>
+                </footer>
+            </div>
+        </div>
+    );
+}
+
+function Plus(props: any) {
+    return (
+        <svg
+            {...props}
+            xmlns="http://www.w3.org/2000/svg"
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+        >
+            <path d="M5 12h14" />
+            <path d="M12 5v14" />
+        </svg>
+    );
+}

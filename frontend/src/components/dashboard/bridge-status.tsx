@@ -1,6 +1,6 @@
 import { type DragEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Code2, Cpu, Loader2, PlugZap } from "lucide-react";
+import { AlertTriangle, Code2, Cpu, Loader2, PlugZap, Plus } from "lucide-react";
 
 import {
   getBridgeProfiles,
@@ -10,6 +10,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { BridgeCodeResource, BridgeComputerResource, ResourceAttachment } from "@/types/aiida";
+import { NewProfileModal } from "./new-profile-modal";
 
 const STATUS_POLL_INTERVAL_MS = 10_000;
 const DETAILS_POLL_INTERVAL_MS = 30_000;
@@ -95,9 +96,16 @@ function toPluginAttachment(pluginName: string): ResourceAttachment {
   };
 }
 
-export function BridgeStatus() {
+interface BridgeStatusProps {
+  onInfrastructureClick?: () => void;
+  onSwitchProfileStart?: () => void;
+  onSwitchProfileEnd?: () => void;
+}
+
+export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSwitchProfileEnd }: BridgeStatusProps) {
   const queryClient = useQueryClient();
   const [hoveredDetail, setHoveredDetail] = useState<HoveredDetail>(null);
+  const [isNewProfileModalOpen, setIsNewProfileModalOpen] = useState(false);
 
   const statusQuery = useQuery({
     queryKey: ["aiida-bridge-status"],
@@ -127,11 +135,19 @@ export function BridgeStatus() {
 
   const switchProfileMutation = useMutation({
     mutationFn: switchBridgeProfile,
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["aiida-bridge-status"] });
-      void queryClient.invalidateQueries({ queryKey: ["aiida-bridge-profiles"] });
-      void queryClient.invalidateQueries({ queryKey: ["aiida-bridge-resources"] });
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["aiida-bridge-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["aiida-bridge-profiles"] }),
+        queryClient.invalidateQueries({ queryKey: ["aiida-bridge-resources"] }),
+        // Invalidate process and groups to get the new snapshot
+        queryClient.invalidateQueries({ queryKey: ["processes"] }),
+        queryClient.invalidateQueries({ queryKey: ["groups"] })
+      ]);
     },
+    onSettled: () => {
+      onSwitchProfileEnd?.();
+    }
   });
 
   const status = statusQuery.data?.status ?? "offline";
@@ -195,7 +211,7 @@ export function BridgeStatus() {
   };
 
   return (
-    <section className="relative z-40 min-h-[220px] overflow-visible rounded-2xl border border-zinc-200/80 bg-white/65 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/45">
+    <section className="relative z-40 min-h-0 overflow-visible rounded-2xl border border-zinc-200/80 bg-white/65 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/45">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="relative flex h-2.5 w-2.5 items-center justify-center">
@@ -219,9 +235,19 @@ export function BridgeStatus() {
             <p className="text-[10px] font-semibold uppercase tracking-[0.17em] text-zinc-500 dark:text-zinc-400">
               AiiDA Worker
             </p>
-            <p className="truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">
+            <div className="flex items-center gap-2 truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">
               {portLabel} · {status === "online" ? "Online" : "Offline"}
-            </p>
+              {isOnline && (
+                <button
+                  onClick={onInfrastructureClick}
+                  className="inline-flex items-center gap-1 rounded bg-zinc-100/80 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 transition-colors hover:bg-zinc-200 dark:bg-zinc-800/80 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  title="View Infrastructure"
+                >
+                  <span className={cn("h-1.5 w-1.5 rounded-full", computerCount > 0 ? "bg-emerald-500" : "bg-rose-500")} />
+                  {computerCount} Hosts
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -246,6 +272,7 @@ export function BridgeStatus() {
                 if (!next || next === profileName || switchProfileMutation.isPending) {
                   return;
                 }
+                onSwitchProfileStart?.();
                 switchProfileMutation.mutate(next);
               }}
               aria-label="Select remote AiiDA profile"
@@ -259,80 +286,24 @@ export function BridgeStatus() {
                 </option>
               ))}
             </select>
+            <button
+              onClick={() => setIsNewProfileModalOpen(true)}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+              title="Create New Profile"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+            <NewProfileModal
+              isOpen={isNewProfileModalOpen}
+              onClose={() => setIsNewProfileModalOpen(false)}
+              onSuccess={() => { }}
+            />
             {switchProfileMutation.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500 dark:text-zinc-300" />
             ) : null}
           </div>
         </div>
 
-        <div
-          className="relative rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-2 dark:border-zinc-700/80 dark:bg-zinc-800/65"
-          onMouseLeave={() => setHoveredDetail(null)}
-        >
-          <p className="mb-1 text-zinc-500 dark:text-zinc-400">Resources</p>
-          <div className="flex flex-wrap items-center gap-1 text-[11px] font-medium text-zinc-800 dark:text-zinc-100">
-            <button
-              type="button"
-              className="rounded px-1 hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
-              onMouseEnter={() => setHoveredDetail("computers")}
-            >
-              <span className="inline-flex items-center gap-1">
-                <Cpu className="h-3.5 w-3.5" />
-                {computerCount} Computers
-              </span>
-            </button>
-            <span className="text-zinc-400 dark:text-zinc-500">|</span>
-            <button
-              type="button"
-              className="rounded px-1 hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
-              onMouseEnter={() => setHoveredDetail("codes")}
-            >
-              <span className="inline-flex items-center gap-1">
-                <Code2 className="h-3.5 w-3.5" />
-                {codeCount} Codes
-              </span>
-            </button>
-            <span className="text-zinc-400 dark:text-zinc-500">|</span>
-            <button
-              type="button"
-              className="rounded px-1 hover:bg-zinc-100 dark:hover:bg-zinc-700/60"
-              onMouseEnter={() => setHoveredDetail("plugins")}
-            >
-              <span className="inline-flex items-center gap-1">
-                <PlugZap className="h-3.5 w-3.5" />
-                {pluginCount} Plugins
-              </span>
-            </button>
-          </div>
-
-          {hoveredDetail ? (
-            <div className="absolute left-0 right-0 top-[calc(100%+0.4rem)] z-30 max-h-56 overflow-y-auto rounded-xl border border-zinc-200/80 bg-zinc-50/95 p-2 shadow-lg backdrop-blur-xl dark:border-zinc-700/85 dark:bg-zinc-900/95">
-              <p className="mb-1 text-[10px] uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
-                {hoveredDetail === "computers" ? "Computers" : hoveredDetail === "codes" ? "Codes" : "Plugins"}
-              </p>
-              <p className="mb-1.5 text-[10px] text-zinc-500 dark:text-zinc-400">
-                Drag items to the chat composer to attach.
-              </p>
-              {hoveredItems.length === 0 ? (
-                <p className="text-[11px] text-zinc-500 dark:text-zinc-400">No details reported.</p>
-              ) : (
-                <div className="space-y-1">
-                  {hoveredItems.map((item) => (
-                    <div
-                      key={item.id}
-                      draggable
-                      onDragStart={(event) => handleResourceDragStart(event, item.attachment)}
-                      className="cursor-grab truncate rounded-md border border-transparent px-2 py-1 text-[11px] text-zinc-700 transition-colors active:cursor-grabbing hover:border-zinc-200 hover:bg-zinc-100/80 dark:text-zinc-200 dark:hover:border-zinc-700 dark:hover:bg-zinc-800/70"
-                      title={item.label}
-                    >
-                      {item.label}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : null}
-        </div>
       </div>
 
       <p className="mt-3 truncate text-[10px] text-zinc-500 dark:text-zinc-400">{environment}</p>

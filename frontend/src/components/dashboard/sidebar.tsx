@@ -18,15 +18,20 @@ import {
   ListPlus,
   SquareCheck,
   Square,
-  FolderPlus
+  FolderPlus,
+  Cpu,
+  Code2
 } from "lucide-react";
-import { type DragEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
+import { QuickAddModal } from "@/components/dashboard/quick-add-modal";
 import { cn } from "@/lib/utils";
-import type { GroupItem, ProcessItem } from "@/types/aiida";
+import { getInfrastructure } from "@/lib/api";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { GroupItem, ProcessItem, InfrastructureComputer } from "@/types/aiida";
 
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 
@@ -447,8 +452,40 @@ export function Sidebar({
   const [selectedNodePks, setSelectedNodePks] = useState<Set<number>>(new Set());
   const [contextMenuNode, setContextMenuNode] = useState<{ pk: number; x: number; y: number } | null>(null);
   const [contextMenuGroup, setContextMenuGroup] = useState<{ pk: number; x: number; y: number } | null>(null);
+  const [contextMenuComputer, setContextMenuComputer] = useState<{ pk: number; label: string; x: number; y: number } | null>(null);
+
+  const [isSwitchingProfile, setIsSwitchingProfile] = useState(false);
+  const switchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleProfileSwitchStart = useCallback(() => {
+    setIsSwitchingProfile(true);
+    if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
+    // Timeout protection: 10 seconds
+    switchTimeoutRef.current = setTimeout(() => {
+      setIsSwitchingProfile(false);
+      alert("Profile switch timed out or took too long.");
+    }, 10000);
+  }, []);
+
+  const handleProfileSwitchEnd = useCallback(() => {
+    if (switchTimeoutRef.current) clearTimeout(switchTimeoutRef.current);
+    setIsSwitchingProfile(false);
+  }, []);
 
   const [isGroupsExpanded, setIsGroupsExpanded] = useState(true);
+  const [isInfraExpanded, setIsInfraExpanded] = useState(false);
+  const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [expandedComputers, setExpandedComputers] = useState<Set<number>>(new Set());
+
+  const queryClient = useQueryClient();
+  const infraQuery = useQuery({
+    queryKey: ["aiida-infrastructure"],
+    queryFn: getInfrastructure,
+    refetchInterval: 30000,
+  });
+
+  const infrastructure = infraQuery.data || [];
 
   useEffect(() => {
     setLimitInput(String(processLimit));
@@ -549,10 +586,155 @@ export function Sidebar({
     const handleClick = () => {
       setContextMenuNode(null);
       setContextMenuGroup(null);
+      setContextMenuComputer(null);
     };
     window.addEventListener("click", handleClick);
     return () => window.removeEventListener("click", handleClick);
   }, []);
+
+  const groupTree = useMemo(() => {
+    const root: Record<string, any> = { children: {}, items: [] };
+    for (const group of groups) {
+      const parts = group.label.split("/");
+      let current = root;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i];
+        if (!current.children[part]) {
+          current.children[part] = { children: {}, items: [], path: parts.slice(0, i + 1).join("/") };
+        }
+        current = current.children[part];
+      }
+      current.items.push(group);
+    }
+    return root;
+  }, [groups]);
+
+  const toggleFolder = (path: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    setExpandedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const renderGroupTree = (node: any, level = 0) => {
+    return (
+      <div className="flex flex-col gap-1">
+        {/* Render Subfolders */}
+        {Object.entries(node.children).sort(([a], [b]) => a.localeCompare(b)).map(([name, child]: [string, any]) => {
+          const isExpanded = expandedFolders.has(child.path);
+          return (
+            <div key={child.path} className="flex flex-col">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={(e) => toggleFolder(child.path, e)}
+                style={{ paddingLeft: `${level * 12 + 8}px` }}
+                className="flex items-center gap-2 rounded-md py-1.5 text-sm transition-colors hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+              >
+                <ChevronRight className={cn("h-3.5 w-3.5 transition-transform shrink-0", isExpanded && "rotate-90")} />
+                <span className="truncate font-medium">{name}</span>
+              </div>
+              {isExpanded && renderGroupTree(child, level + 1)}
+            </div>
+          );
+        })}
+        {/* Render Groups in this folder */}
+        {node.items.sort((a: GroupItem, b: GroupItem) => a.label.localeCompare(b.label)).map((group: GroupItem) => {
+          const displayLabel = group.label.split("/").pop();
+          return (
+            <div
+              key={group.pk}
+              role="button"
+              tabIndex={0}
+              onClick={() => onGroupChange(group.label)}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "copy";
+              }}
+              onDrop={(e) => handleGroupDrop(e, group.pk)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setContextMenuGroup({ pk: group.pk, x: e.pageX, y: e.pageY });
+              }}
+              style={{ paddingLeft: `${level * 12 + 24}px` }}
+              className={cn(
+                "group flex items-center justify-between rounded-md py-1.5 pr-2 text-sm transition-colors",
+                selectedGroup === group.label ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+              )}
+            >
+              <div className="flex items-center gap-2 overflow-hidden">
+                <FolderOpen className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
+                <span className="truncate">{displayLabel}</span>
+              </div>
+              <span className="text-[10px] text-zinc-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                {group.count}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const toggleComputer = (pk: number, event: React.MouseEvent) => {
+    event.stopPropagation();
+    setExpandedComputers((prev) => {
+      const next = new Set(prev);
+      if (next.has(pk)) next.delete(pk);
+      else next.add(pk);
+      return next;
+    });
+  };
+
+  const renderInfrastructureTree = () => {
+    return (
+      <div className="flex flex-col gap-1">
+        {infrastructure.map((computer: InfrastructureComputer) => {
+          const isExpanded = expandedComputers.has(computer.pk);
+          return (
+            <div key={computer.pk} className="flex flex-col">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={(e) => toggleComputer(computer.pk, e)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setContextMenuComputer({ pk: computer.pk, label: computer.label, x: e.pageX, y: e.pageY });
+                }}
+                className="flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+              >
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <ChevronRight className={cn("h-3.5 w-3.5 transition-transform shrink-0", isExpanded && "rotate-90")} />
+                  <div className={cn("h-2 w-2 rounded-full shrink-0", computer.is_enabled ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : "bg-rose-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]")} title={computer.is_enabled ? "Online" : "Offline"} />
+                  <Cpu className="h-4 w-4 shrink-0 text-zinc-400" />
+                  <span className="truncate font-medium">{computer.label}</span>
+                </div>
+              </div>
+              {isExpanded && (
+                <div className="flex flex-col gap-1 ml-4 mt-1">
+                  {computer.codes.map((code) => (
+                    <div
+                      key={code.pk}
+                      className="flex items-center gap-2 rounded-md px-3 py-1 text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100/30 dark:hover:bg-zinc-800/20"
+                    >
+                      <Code2 className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{code.label}</span>
+                    </div>
+                  ))}
+                  {computer.codes.length === 0 && (
+                    <span className="text-[10px] text-zinc-400 ml-6 italic">No codes configured</span>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
 
   return (
     <aside className="flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight lg:w-[360px] relative">
@@ -571,236 +753,258 @@ export function Sidebar({
         </Button>
       </header>
 
-      <BridgeStatus />
+      <BridgeStatus
+        onInfrastructureClick={() => setIsInfraExpanded(true)}
+        onSwitchProfileStart={handleProfileSwitchStart}
+        onSwitchProfileEnd={handleProfileSwitchEnd}
+      />
 
-      <Panel className="relative z-10 flex min-h-0 flex-1 flex-col border-zinc-100/90 p-4 transition-opacity duration-300 dark:border-zinc-800/80">
-        <div className="mx-auto flex h-full min-h-0 w-full flex-col gap-4">
+      <Panel className="relative z-10 flex min-h-0 flex-1 flex-col gap-4 border-zinc-100/90 p-4 transition-opacity duration-300 dark:border-zinc-800/80">
 
-          {/* Top Controls */}
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
-                <input
-                  type="text"
-                  placeholder="Search PK, label..."
-                  className="h-9 w-full rounded-lg border border-zinc-200/65 bg-zinc-50/70 pl-9 pr-3 text-sm text-zinc-700 transition-all focus:border-zinc-400 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:focus:border-zinc-600"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                />
-              </div>
-              <div className="flex items-center gap-1 rounded-lg border border-zinc-200/65 bg-zinc-50/70 p-1 dark:border-zinc-800 dark:bg-zinc-900/45">
-                {(["all", "structures", "tasks", "failed"] as const).map((type) => (
-                  <button
-                    key={type}
-                    onClick={() => onNodeTypeFilterChange(type)}
-                    className={cn(
-                      "rounded-md px-2 py-1 text-[11px] font-medium capitalize",
-                      nodeTypeFilter === type
-                        ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
-                        : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
-                    )}
-                  >
-                    {type}
-                  </button>
-                ))}
-              </div>
-            </div>
+        {isSwitchingProfile && (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center rounded-2xl bg-black/10 backdrop-blur-[2px] dark:bg-black/30">
+            <Loader2 className="h-6 w-6 animate-spin text-zinc-700 dark:text-zinc-300 drop-shadow-sm" />
+            <p className="mt-2 text-[10px] font-medium tracking-wider text-zinc-700 dark:text-zinc-300 drop-shadow-sm">
+              Switching AiiDA Environment...
+            </p>
           </div>
+        )}
 
-          {/* Groups Section */}
-          <div className="flex flex-col gap-1 shrink-0">
-            <button
-              onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
-              className="flex items-center justify-between group/groupbtn"
-            >
-              <div className="flex items-center gap-1 text-xs font-medium uppercase tracking-[0.1em] text-zinc-500 dark:text-zinc-400">
-                <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
-                Groups
-              </div>
-              <Plus className="h-3.5 w-3.5 text-zinc-400 opacity-0 transition-opacity group-hover/groupbtn:opacity-100" />
-            </button>
-
-            {isGroupsExpanded && (
-              <div className="flex flex-col gap-1 mt-1">
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => onGroupChange("")}
+        {/* Top Controls */}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
+              <input
+                type="text"
+                placeholder="Search PK, label..."
+                className="h-9 w-full rounded-lg border border-zinc-200/65 bg-zinc-50/70 pl-9 pr-3 text-sm text-zinc-700 transition-all focus:border-zinc-400 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:focus:border-zinc-600"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center gap-1 rounded-lg border border-zinc-200/65 bg-zinc-50/70 p-1 dark:border-zinc-800 dark:bg-zinc-900/45">
+              {(["all", "structures", "tasks", "failed"] as const).map((type) => (
+                <button
+                  key={type}
+                  onClick={() => onNodeTypeFilterChange(type)}
                   className={cn(
-                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                    !selectedGroup ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+                    "rounded-md px-2 py-1 text-[11px] font-medium capitalize",
+                    nodeTypeFilter === type
+                      ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
+                      : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
                   )}
                 >
-                  <FolderOpen className="h-4 w-4" />
-                  <span>All Groups</span>
-                </div>
-                {groups.map((group) => (
-                  <div
-                    key={group.pk}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => onGroupChange(group.label)}
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.dataTransfer.dropEffect = "copy";
-                    }}
-                    onDrop={(e) => handleGroupDrop(e, group.pk)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setContextMenuGroup({ pk: group.pk, x: e.pageX, y: e.pageY });
-                    }}
-                    className={cn(
-                      "group flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors",
-                      selectedGroup === group.label ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
-                    )}
-                  >
-                    <div className="flex items-center gap-2 overflow-hidden">
-                      <FolderOpen className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
-                      <span className="truncate">{group.label}</span>
-                    </div>
-                    <span className="text-[10px] text-zinc-400 shrink-0">{group.count} nodes</span>
-                  </div>
-                ))}
+                  {type}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Groups Section */}
+        <div className="flex flex-col gap-1 shrink-0">
+          <button
+            onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
+            className="flex items-center justify-between group/groupbtn"
+          >
+            <div className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+              <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
+              Groups
+            </div>
+            <Plus className="h-3.5 w-3.5 text-zinc-400 opacity-0 transition-opacity group-hover/groupbtn:opacity-100" />
+          </button>
+
+          {isGroupsExpanded && (
+            <div className="flex flex-col gap-1 mt-1 max-h-[300px] overflow-y-auto minimal-scrollbar">
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => onGroupChange("")}
+                className={cn(
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                  !selectedGroup ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+                )}
+              >
+                <FolderOpen className="h-4 w-4" />
+                <span>All Groups</span>
               </div>
-            )}
+              {renderGroupTree(groupTree)}
+            </div>
+          )}
+        </div>
+
+        <hr className="border-zinc-200/60 dark:border-zinc-800/60 shrink-0" />
+
+        {/* Nodes Section */}
+        <div className="flex min-h-0 flex-1 flex-col gap-2 relative">
+          <div className="flex items-center justify-between shrink-0">
+            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 pl-[18px]">
+              Nodes {selectedGroup ? (
+                <>
+                  in <span title={selectedGroup}>
+                    {selectedGroup.split('/').pop()!.length > 20
+                      ? `${selectedGroup.split('/').pop()?.slice(0, 17)}...`
+                      : selectedGroup.split('/').pop()}
+                  </span>
+                </>
+              ) : "Recent"}
+            </span>
+            <div className="flex items-center gap-1 text-[11px] text-zinc-500">
+              Limit:
+              <input
+                type="number"
+                min={1}
+                max={200}
+                value={limitInput}
+                className="w-8 bg-transparent border-b border-zinc-300 dark:border-zinc-700 outline-none text-center"
+                onChange={(e) => setLimitInput(e.target.value)}
+                onBlur={() => commitProcessLimit(limitInput)}
+                onKeyDown={(e) => { if (e.key === "Enter") commitProcessLimit(limitInput); }}
+              />
+            </div>
           </div>
 
-          <hr className="border-zinc-200/60 dark:border-zinc-800/60" />
+          <div className={cn("minimal-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-12", isUpdatingProcessLimit && "opacity-70")}>
+            {filteredProcesses.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-zinc-300/60 bg-zinc-50/40 p-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-900/30 dark:text-zinc-400">
+                No matching nodes found.
+              </p>
+            ) : (
+              filteredProcesses.map((process) => {
+                const isSelected = contextNodeIds.includes(process.pk);
+                const isChecked = selectedNodePks.has(process.pk);
+                const canOpenDetail = isProcessLikeNode(process);
+                const typeIndicator = getNodeTypeIndicator(process);
+                const titleText = getNodeTitleText(process);
+                const metadata = getNodeMetadata(process);
 
-          {/* Nodes Section */}
-          <div className="flex min-h-0 flex-1 flex-col gap-2 relative">
-            <div className="flex items-center justify-between shrink-0">
-              <span className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500 dark:text-zinc-400">
-                Nodes {selectedGroup ? `in ${selectedGroup}` : "Recent"}
-              </span>
-              <div className="flex items-center gap-1 text-[11px] text-zinc-500">
-                Limit:
-                <input
-                  type="number"
-                  min={1}
-                  max={200}
-                  value={limitInput}
-                  className="w-8 bg-transparent border-b border-zinc-300 dark:border-zinc-700 outline-none text-center"
-                  onChange={(e) => setLimitInput(e.target.value)}
-                  onBlur={() => commitProcessLimit(limitInput)}
-                  onKeyDown={(e) => { if (e.key === "Enter") commitProcessLimit(limitInput); }}
-                />
-              </div>
-            </div>
+                const isFailed = FAILED_PROCESS_STATES.has(normalizeState(process.process_state || process.state));
+                const isRunning = RUNNING_PROCESS_STATES.has(normalizeState(process.process_state || process.state));
 
-            <div className={cn("minimal-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-12", isUpdatingProcessLimit && "opacity-70")}>
-              {filteredProcesses.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-zinc-300/60 bg-zinc-50/40 p-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-900/30 dark:text-zinc-400">
-                  No matching nodes found.
-                </p>
-              ) : (
-                filteredProcesses.map((process) => {
-                  const isSelected = contextNodeIds.includes(process.pk);
-                  const isChecked = selectedNodePks.has(process.pk);
-                  const canOpenDetail = isProcessLikeNode(process);
-                  const typeIndicator = getNodeTypeIndicator(process);
-                  const titleText = getNodeTitleText(process);
-                  const metadata = getNodeMetadata(process);
-
-                  const isFailed = FAILED_PROCESS_STATES.has(normalizeState(process.process_state || process.state));
-                  const isRunning = RUNNING_PROCESS_STATES.has(normalizeState(process.process_state || process.state));
-
-                  return (
-                    <div
-                      key={`${process.pk}-${process.state}`}
-                      draggable
-                      onDragStart={(event) => handleProcessDragStart(event, process)}
-                      onClick={() => onAddContextNode(process)}
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        setContextMenuNode({ pk: process.pk, x: e.pageX, y: e.pageY });
-                      }}
-                      className={cn(
-                        "group/card flex items-start gap-2 rounded-xl border px-3 py-2.5 transition-all duration-200 cursor-pointer",
-                        "border-zinc-200/75 bg-white/60 hover:border-zinc-300/85 hover:bg-white/75 dark:border-zinc-800/80 dark:bg-zinc-900/45 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/55",
-                        isSelected ? "border-zinc-300/90 bg-zinc-100/70 shadow-[0_10px_22px_-20px_rgba(15,23,42,0.65)] dark:border-zinc-700/90 dark:bg-zinc-800/55" : null,
-                        isRunning ? "animate-pulse ring-1 ring-blue-500/30" : null
-                      )}
+                return (
+                  <div
+                    key={`${process.pk}-${process.state}`}
+                    draggable
+                    onDragStart={(event) => handleProcessDragStart(event, process)}
+                    onClick={() => onAddContextNode(process)}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setContextMenuNode({ pk: process.pk, x: e.pageX, y: e.pageY });
+                    }}
+                    className={cn(
+                      "group/card flex items-start gap-2 rounded-xl border px-3 py-2.5 transition-all duration-200 cursor-pointer",
+                      "border-zinc-200/75 bg-white/60 hover:border-zinc-300/85 hover:bg-white/75 dark:border-zinc-800/80 dark:bg-zinc-900/45 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/55",
+                      isSelected ? "border-zinc-300/90 bg-zinc-100/70 shadow-[0_10px_22px_-20px_rgba(15,23,42,0.65)] dark:border-zinc-700/90 dark:bg-zinc-800/55" : null,
+                      isRunning ? "animate-pulse ring-1 ring-blue-500/30" : null
+                    )}
+                  >
+                    <button
+                      onClick={(e) => toggleSelectNode(process.pk, e)}
+                      className="mt-1 shrink-0 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300"
                     >
-                      <button
-                        onClick={(e) => toggleSelectNode(process.pk, e)}
-                        className="mt-1 shrink-0 text-zinc-400 hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300"
-                      >
-                        {isChecked ? <SquareCheck className="h-4 w-4 text-blue-500" /> : <Square className="h-4 w-4 opacity-0 transition-opacity group-hover/card:opacity-100" />}
-                      </button>
+                      {isChecked ? <SquareCheck className="h-4 w-4 text-blue-500" /> : <Square className="h-4 w-4 opacity-0 transition-opacity group-hover/card:opacity-100" />}
+                    </button>
 
-                      <div className="flex min-w-0 flex-1 flex-col gap-1">
-                        <div className="flex items-center justify-between gap-3">
-                          <p className="flex items-center gap-1.5 truncate font-sans text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-                            <span role="img" aria-label={typeIndicator.iconLabel} className="shrink-0">{typeIndicator.icon}</span>
-                            <span className="truncate">
-                              {titleText} <span className="font-mono text-[11px] font-normal text-zinc-500 dark:text-zinc-400">({process.pk})</span>
-                            </span>
-                          </p>
-                          {metadata.processStatus && (
-                            <div className="flex items-center gap-1 shrink-0">
-                              <p className={cn("text-[11px] font-semibold tracking-tight", metadata.processStatus.className)}>
-                                {metadata.processStatus.label}
-                              </p>
-                              {isFailed && (
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); onConsultFailedProcess(process); }}
-                                  className="text-rose-500 hover:text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded p-0.5"
-                                  title="AI Diagnose"
-                                >
-                                  <Wand2 className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="min-w-0 flex justify-between">
-                          <div className="flex flex-col">
-                            {metadata.lines.map((line, idx) => (
-                              <p key={idx} className={cn("truncate text-[11px] tracking-tight", idx === 0 ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-500 dark:text-zinc-400")}>
-                                {line}
-                              </p>
-                            ))}
-                          </div>
-                          <div className="mt-0.5 flex items-end justify-end gap-2">
-                            {canOpenDetail && (
+                    <div className="flex min-w-0 flex-1 flex-col gap-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="flex items-center gap-1.5 truncate font-sans text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
+                          <span role="img" aria-label={typeIndicator.iconLabel} className="shrink-0">{typeIndicator.icon}</span>
+                          <span className="truncate">
+                            {titleText} <span className="font-mono text-[11px] font-normal text-zinc-500 dark:text-zinc-400">({process.pk})</span>
+                          </span>
+                        </p>
+                        {metadata.processStatus && (
+                          <div className="flex items-center gap-1 shrink-0">
+                            <p className={cn("text-[11px] font-semibold tracking-tight", metadata.processStatus.className)}>
+                              {metadata.processStatus.label}
+                            </p>
+                            {isFailed && (
                               <button
-                                type="button"
-                                className="text-[10px] uppercase tracking-[0.08em] text-zinc-500 underline decoration-zinc-300 underline-offset-2 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:decoration-zinc-700 dark:hover:text-zinc-200"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  onOpenProcessDetail(process);
-                                }}
+                                onClick={(e) => { e.stopPropagation(); onConsultFailedProcess(process); }}
+                                className="text-rose-500 hover:text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded p-0.5"
+                                title="AI Diagnose"
                               >
-                                Inspect
+                                <Wand2 className="h-3.5 w-3.5" />
                               </button>
                             )}
                           </div>
+                        )}
+                      </div>
+
+                      <div className="min-w-0 flex justify-between">
+                        <div className="flex flex-col">
+                          {metadata.lines.map((line, idx) => (
+                            <p key={idx} className={cn("truncate text-[11px] tracking-tight", idx === 0 ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-500 dark:text-zinc-400")}>
+                              {line}
+                            </p>
+                          ))}
+                        </div>
+                        <div className="mt-0.5 flex items-end justify-end gap-2">
+                          {canOpenDetail && (
+                            <button
+                              type="button"
+                              className="text-[10px] uppercase tracking-[0.08em] text-zinc-500 underline decoration-zinc-300 underline-offset-2 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:decoration-zinc-700 dark:hover:text-zinc-200"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onOpenProcessDetail(process);
+                              }}
+                            >
+                              Inspect
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>
-                  );
-                })
-              )}
-            </div>
-
-            {/* Bulk Actions Toolbar */}
-            {selectedNodePks.size > 0 && (
-              <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-3 py-1.5 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95 animate-in slide-in-from-bottom-5">
-                <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 px-2 border-r border-zinc-200 dark:border-zinc-800">
-                  {selectedNodePks.size} selected
-                </span>
-                <button onClick={handleBulkCreateGroup} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
-                  <FolderPlus className="h-3.5 w-3.5" /> Group
-                </button>
-                <button onClick={handleBulkAddToContext} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/30">
-                  <ListPlus className="h-3.5 w-3.5" /> Context
-                </button>
-              </div>
+                  </div>
+                );
+              })
             )}
           </div>
+
+          {/* Bulk Actions Toolbar */}
+          {selectedNodePks.size > 0 && (
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-3 py-1.5 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95 animate-in slide-in-from-bottom-5">
+              <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 px-2 border-r border-zinc-200 dark:border-zinc-800">
+                {selectedNodePks.size} selected
+              </span>
+              <button onClick={handleBulkCreateGroup} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                <FolderPlus className="h-3.5 w-3.5" /> Group
+              </button>
+              <button onClick={handleBulkAddToContext} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/30">
+                <ListPlus className="h-3.5 w-3.5" /> Context
+              </button>
+            </div>
+          )}
+        </div>
+
+        <hr className="border-zinc-200/60 dark:border-zinc-800/60 shrink-0" />
+
+        {/* Infrastructure Section */}
+        <div className="flex flex-col gap-1 shrink-0">
+          <div className="flex items-center justify-between group/infra">
+            <button
+              onClick={() => setIsInfraExpanded(!isInfraExpanded)}
+              className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
+            >
+              <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isInfraExpanded && "rotate-90")} />
+              Infrastructure
+            </button>
+            <button
+              onClick={() => setIsQuickAddOpen(true)}
+              className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/infra:opacity-100"
+            >
+              <Plus className="h-3.5 w-3.5 text-zinc-500" />
+            </button>
+          </div>
+
+          {isInfraExpanded && (
+            <div className="flex flex-col gap-1 mt-1 max-h-[300px] overflow-y-auto minimal-scrollbar">
+              {infrastructure.length === 0 ? (
+                <p className="px-2 py-2 text-[11px] text-zinc-400 italic">No computers configured</p>
+              ) : renderInfrastructureTree()}
+            </div>
+          )}
         </div>
       </Panel>
 
@@ -882,6 +1086,13 @@ export function Sidebar({
         </div>
       )}
 
+      <QuickAddModal
+        isOpen={isQuickAddOpen}
+        onClose={() => setIsQuickAddOpen(false)}
+        onSuccess={() => {
+          void queryClient.invalidateQueries({ queryKey: ["aiida-infrastructure"] });
+        }}
+      />
     </aside>
   );
 }

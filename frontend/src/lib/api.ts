@@ -12,8 +12,10 @@ import type {
   GroupExportResponse,
   GroupMutationResponse,
   GroupsResponse,
+  InfrastructureComputer,
   LogsResponse,
   NodeHoverMetadataResponse,
+  ParseInfrastructureResponse,
   ProcessDetailResponse,
   ProcessLogsResponse,
   ProcessesResponse,
@@ -21,6 +23,8 @@ import type {
   SoftDeleteNodeResponse,
   SubmissionResponse,
   UploadArchiveResponse,
+  UserInfoResponse,
+  ProfileSetupRequest,
 } from "@/types/aiida";
 
 const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
@@ -249,6 +253,16 @@ export async function getBridgeProfiles(): Promise<BridgeProfilesResponse> {
   }
 }
 
+export async function getCurrentUserInfo(): Promise<UserInfoResponse> {
+  const { data } = await aiidaApi.get<UserInfoResponse>("/management/profiles/current-user-info");
+  return data;
+}
+
+export async function setupProfile(payload: ProfileSetupRequest): Promise<{ status: string; profile_name: string }> {
+  const { data } = await aiidaApi.post<{ status: string; profile_name: string }>("/management/profiles/setup", payload);
+  return data;
+}
+
 export async function switchBridgeProfile(profile: string): Promise<BridgeSwitchProfileResponse> {
   const { data } = await aiidaApi.post<BridgeSwitchProfileResponse>("/profiles/switch", { profile });
   return data;
@@ -261,4 +275,37 @@ export async function getBridgeResources(): Promise<BridgeResourcesResponse> {
   } catch {
     return DEFAULT_BRIDGE_RESOURCES;
   }
+}
+
+export async function getInfrastructure(): Promise<InfrastructureComputer[]> {
+  const { data } = await aiidaApi.get<InfrastructureComputer[]>("/management/infrastructure");
+  return data;
+}
+
+export async function setupInfrastructure(config: any): Promise<any> {
+  const { data } = await aiidaApi.post("/management/infrastructure/setup", config);
+  return data;
+}
+
+export interface SSHHostDetails {
+  alias: string;
+  hostname?: string;
+  username?: string;
+  port?: number;
+  proxy_jump?: string;
+  proxy_command?: string;
+  identity_file?: string;
+}
+
+export async function getSshHosts(): Promise<SSHHostDetails[]> {
+  const { data } = await frontendApi.get<{ items: SSHHostDetails[] }>("/ssh-hosts");
+  return data.items;
+}
+
+export async function parseInfrastructure(text: string, sshHostDetails?: SSHHostDetails | null): Promise<ParseInfrastructureResponse> {
+  const { data } = await frontendApi.post<ParseInfrastructureResponse>("/parse-infrastructure", {
+    text,
+    ssh_host_details: sshHostDetails || null
+  });
+  return data;
 }

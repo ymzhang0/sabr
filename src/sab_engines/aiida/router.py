@@ -49,6 +49,7 @@ from .service import (
     soft_delete_node,
     hub,
 )
+from .infrastructure_manager import infrastructure_manager
 
 FRONTEND_TAG = "AiiDA-Frontend-API"
 WORKER_PROXY_TAG = "AiiDA-Worker-Proxy"
@@ -160,12 +161,33 @@ class FrontendGroupAssignNodesRequest(BaseModel):
 class FrontendNodeSoftDeleteRequest(BaseModel):
     deleted: bool = True
 
-
 class NodeHoverMetadataResponse(BaseModel):
     pk: int
     formula: str | None = None
     spacegroup: str | None = None
     node_type: str = "Unknown"
+
+
+class InfrastructureComputerCode(BaseModel):
+    pk: int
+    label: str
+    description: str | None = None
+    default_calc_job_plugin: str | None = None
+
+
+class InfrastructureComputer(BaseModel):
+    pk: int
+    label: str
+    hostname: str
+    description: str | None = None
+    scheduler_type: str
+    transport_type: str
+    is_enabled: bool
+    codes: list[InfrastructureComputerCode] = Field(default_factory=list)
+
+
+class ParseInfrastructureRequest(BaseModel):
+    text: str = Field(..., min_length=1)
 
 
 def _coerce_chat_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -534,6 +556,24 @@ async def switch_bridge_profile(payload: BridgeSwitchProfileRequest) -> BridgeSw
         return BridgeSwitchProfileResponse(status="error", current_profile=None)
 
 
+@router.get("/management/infrastructure", response_model=list[InfrastructureComputer], tags=[WORKER_PROXY_TAG])
+async def get_management_infrastructure():
+    """Proxy to fetch hierarchical infrastructure (Computers -> Codes)."""
+    try:
+        return await bridge_service.inspect_infrastructure_v2()
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+
+@router.post("/management/infrastructure/setup", tags=[WORKER_PROXY_TAG])
+async def setup_management_infrastructure(payload: dict[str, Any]):
+    """Proxy to setup a new computer, authentication, and code."""
+    try:
+        return await bridge_service.setup_infrastructure(payload)
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+
 @router.post("/submission/submit", tags=[WORKER_PROXY_TAG])
 async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequest):
     if not payload.draft:
@@ -789,6 +829,116 @@ async def frontend_processes(
         logger.exception(log_event("aiida.frontend.processes.failed", error=str(error)))
         processes = []
     return {"items": _serialize_processes(processes)}
+
+
+@router.get("/frontend/ssh-hosts", tags=[FRONTEND_TAG])
+async def frontend_ssh_hosts():
+    """
+    Proxy the worker's SSH config endpoint to list available hosts.
+    """
+    try:
+        hosts = await bridge_service.get_ssh_config()
+        return {"items": hosts}
+    except Exception as error:
+        logger.exception(log_event("aiida.frontend.ssh_hosts.failed", error=str(error)))
+        raise HTTPException(status_code=500, detail="Failed to fetch SSH hosts")
+
+
+class ParseInfrastructureRequest(BaseModel):
+    text: str
+    ssh_host_details: dict[str, Any] | None = None
+
+@router.post("/frontend/parse-infrastructure", tags=[FRONTEND_TAG])
+async def parse_infrastructure_via_ai(payload: ParseInfrastructureRequest):
+    """
+    Use Gemini to parse raw text into AiiDA Computer/Code configuration.
+    """
+    api_key = settings.GEMINI_API_KEY
+    if api_key == "your-key-here":
+        raise HTTPException(status_code=400, detail="Gemini API key not configured")
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"api_version": settings.GEMINI_API_VERSION},
+    )
+
+    prompt = f"""
+    You are an AiiDA infrastructure expert. Parse the following text into a structured JSON for configuring an AiiDA Computer or Code.
+
+    Input Text:
+    {payload.text}
+
+    Output format:
+    {{
+      "type": "computer" | "code" | "both",
+      "computer": {{
+        "label": "string",
+        "hostname": "string",
+        "username": "string",
+        "description": "string",
+        "transport_type": "core.ssh",
+        "scheduler_type": "core.direct" | "core.slurm" | "core.pbspro" | "core.lsf",
+        "work_dir": "string",
+        "mpiprocs_per_machine": number,
+        "mpirun_command": "string"
+      }},
+      "code": {{
+        "label": "string",
+        "description": "string",
+        "default_calc_job_plugin": "string (e.g. quantumespresso.pw)",
+        "remote_abspath": "string"
+      }}
+    }}
+
+    Return ONLY the raw JSON. No markdown blocks, no explanations. If unknown, omit the key.
+    """
+
+    try:
+        response = client.models.generate_content(
+            model=settings.DEFAULT_MODEL,
+            contents=prompt,
+        )
+        raw_text = response.text.strip()
+        # Basic cleanup if model includes markdown code blocks
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:].strip()
+        
+        # Handle explicitly passed SSH Host Details
+        if payload.ssh_host_details:
+            if not parsed.get("computer"):
+                parsed["computer"] = {}
+                parsed["type"] = "computer" if not parsed.get("type") else parsed["type"]
+            
+            ssh_info = payload.ssh_host_details
+            parsed["computer"]["label"] = ssh_info.get("alias")
+            
+            # Prioritize SSH Hostname over AI parsed if missing
+            if ssh_info.get("hostname"):
+                parsed["computer"]["hostname"] = ssh_info.get("hostname")
+            if ssh_info.get("username"):
+                parsed["computer"]["username"] = ssh_info.get("username")
+            if ssh_info.get("proxy_jump"):
+                parsed["computer"]["proxy_jump"] = ssh_info.get("proxy_jump")
+            if ssh_info.get("proxy_command"):
+                parsed["computer"]["proxy_command"] = ssh_info.get("proxy_command")
+            if ssh_info.get("identity_file"):
+                parsed["computer"]["key_filename"] = ssh_info.get("identity_file")
+
+        # Merge with presets if it's a computer
+        if parsed.get("computer"):
+            # The merge now uses whatever hostname became the dominant one
+            merge_result = infrastructure_manager.merge_preset(parsed["computer"])
+            parsed["computer"] = merge_result.get("config", parsed["computer"])
+            parsed["preset_matched"] = merge_result.get("matched", False)
+            if parsed["preset_matched"]:
+                parsed["preset_domain"] = merge_result.get("domain_pattern", "")
+                
+        return {"status": "success", "data": parsed}
+    except Exception as error:
+        logger.exception(log_event("aiida.frontend.parse_infrastructure.failed", error=str(error)))
+        raise HTTPException(status_code=500, detail=f"AI Parsing failed: {str(error)}")
 
 
 @router.get(
