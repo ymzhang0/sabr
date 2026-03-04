@@ -19,6 +19,14 @@ class Settings(BaseSettings):
         os.getenv("SABR_GEMINI_UNAVAILABLE_RETRY_BACKOFF_SECONDS", "2.0")
     )
     SABR_MEMORY_DIR: str = os.getenv("SABR_MEMORY_DIR",  "default")
+    SABR_PRESETS_FILE: str = os.getenv(
+        "SABR_PRESETS_FILE", 
+        os.path.join(os.getcwd(), "config", "aiida_presets.yaml")
+    )
+    SABR_AIIDA_SETTINGS_FILE: str = os.getenv(
+        "SABR_AIIDA_SETTINGS_FILE", 
+        os.path.join(os.getcwd(), "config", "aiida_settings.yaml")
+    )
 
     # --- Observability ---
     SABR_DEBUG_LEVEL: str = os.getenv("SABR_DEBUG_LEVEL",  "default")

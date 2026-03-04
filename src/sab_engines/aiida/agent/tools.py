@@ -654,6 +654,7 @@ async def draft_workchain_builder(
     code_label: str,
     protocol: str = "moderate",
     overrides: dict[str, Any] | None = None,
+    protocol_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, Any] | str:
     """Request builder draft creation (`POST /submission/draft-builder`)."""
     body = {
@@ -663,6 +664,8 @@ async def draft_workchain_builder(
         "protocol": protocol,
         "overrides": overrides or {},
     }
+    if protocol_kwargs:
+        body.update(protocol_kwargs)
 
     try:
         payload = await request_json("POST", "/submission/draft-builder", json=body)

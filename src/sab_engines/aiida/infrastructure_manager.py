@@ -1,14 +1,29 @@
-import os
+from __future__ import annotations
+
+import fnmatch
 from pathlib import Path
 from typing import Any, Dict
+
 import yaml
-import fnmatch
+
+from src.sab_core.config import settings
+
 
 class InfrastructureManager:
-    config_path = Path("config/aiida_presets.yaml")
+    @property
+    def config_path(self) -> Path:
+        return Path(settings.SABR_PRESETS_FILE)
 
     def __init__(self):
-        self.presets = self._load_presets()
+        # We load presets on demand or at least don't hardcode the path in __init__ 
+        # to ensure settings are loaded first.
+        self._presets = None
+
+    @property
+    def presets(self) -> Dict[str, Any]:
+        if self._presets is None:
+            self._presets = self._load_presets()
+        return self._presets
 
     def _load_presets(self) -> Dict[str, Any]:
         """Loads presets from the YAML configuration file."""
@@ -54,15 +69,16 @@ class InfrastructureManager:
 
         codes = preset_config.get("codes", [])
         if codes:
-            # Provide default code
+            # Provide default code from the first available in preset
             first_code = codes[0]
             if not merged.get("code_label"):
-                merged["code_label"] = first_code.get("label", "pw")
+                merged["code_label"] = first_code.get("label", "code")  # Use generic "code" default
             if not merged.get("default_calc_job_plugin"):
                 merged["default_calc_job_plugin"] = first_code.get("default_calc_job_plugin", "")
             if not merged.get("remote_abspath"):
                 merged["remote_abspath"] = first_code.get("remote_abspath", "")
                 
         return {"matched": True, "domain_pattern": pattern, "config": merged}
+
 
 infrastructure_manager = InfrastructureManager()

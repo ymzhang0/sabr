@@ -31,39 +31,29 @@ DEFAULT_ENGINE = "aiida"
 
 
 def _configure_proxy_environment() -> None:
-    """
-    Normalize proxy environment variables from SABR settings.
-
-    Why:
-    - Third-party SDKs (e.g. google-genai via pydantic-ai/httpx) read proxy env vars.
-    - A stale lowercase `http_proxy`/`https_proxy` in `.env` can break LLM calls.
-    """
-
+    """Normalize proxy environment variables from SABR settings."""
     use_proxy = bool(settings.SABR_USE_OUTBOUND_PROXY)
     http_proxy = str(settings.HTTP_PROXY or "").strip() if use_proxy else ""
     https_proxy = str(settings.HTTPS_PROXY or "").strip() if use_proxy else ""
 
-    if http_proxy:
-        os.environ["HTTP_PROXY"] = http_proxy
-        os.environ["http_proxy"] = http_proxy
-    else:
-        os.environ.pop("HTTP_PROXY", None)
-        os.environ.pop("http_proxy", None)
+    # Clear or set environment variables
+    for env_key in ("HTTP_PROXY", "http_proxy"):
+        if http_proxy:
+            os.environ[env_key] = http_proxy
+        else:
+            os.environ.pop(env_key, None)
 
-    if https_proxy:
-        os.environ["HTTPS_PROXY"] = https_proxy
-        os.environ["https_proxy"] = https_proxy
-    else:
-        os.environ.pop("HTTPS_PROXY", None)
-        os.environ.pop("https_proxy", None)
+    for env_key in ("HTTPS_PROXY", "https_proxy"):
+        if https_proxy:
+            os.environ[env_key] = https_proxy
+        else:
+            os.environ.pop(env_key, None)
 
-    # Ensure localhost traffic is never proxied when proxies are configured.
+    # Ensure localhost traffic is never proxied
     no_proxy_raw = str(os.getenv("NO_PROXY") or os.getenv("no_proxy") or "").strip()
-    no_proxy_items = [item.strip() for item in no_proxy_raw.split(",") if item.strip()]
-    for local_host in ("127.0.0.1", "localhost"):
-        if local_host not in no_proxy_items:
-            no_proxy_items.append(local_host)
-    no_proxy_value = ",".join(no_proxy_items)
+    no_proxy_items = {item.strip() for item in no_proxy_raw.split(",") if item.strip()}
+    no_proxy_items.update({"127.0.0.1", "localhost", "::1"})
+    no_proxy_value = ",".join(sorted(no_proxy_items))
     os.environ["NO_PROXY"] = no_proxy_value
     os.environ["no_proxy"] = no_proxy_value
 
@@ -216,42 +206,16 @@ async def aiida_logs_copy_page():
     _, lines = get_log_buffer_snapshot(limit=240)
     payload = "\n".join(lines[-120:]) if lines else "No logs yet."
     safe_payload = escape(payload)
-    html = f"""
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Copy Logs</title>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 24px; }}
-    textarea {{ width: 100%; height: 280px; }}
-    .muted {{ color: #666; font-size: 13px; }}
-  </style>
-</head>
-<body>
-  <p class="muted">Copying runtime logs… If browser blocks clipboard, use the textarea below.</p>
-  <textarea id="logs">{safe_payload}</textarea>
-  <script>
-    const text = document.getElementById('logs').value;
-    const done = () => {{ document.querySelector('.muted').textContent = 'Logs copied to clipboard.'; }};
-    const fail = () => {{ document.querySelector('.muted').textContent = 'Clipboard blocked. Press Cmd/Ctrl+C to copy.'; }};
-    (async () => {{
-      try {{
-        await navigator.clipboard.writeText(text);
-        done();
-      }} catch (e) {{
-        fail();
-      }}
-      const ta = document.getElementById('logs');
-      ta.focus();
-      ta.select();
-    }})();
-  </script>
-</body>
-</html>
-"""
-    return HTMLResponse(html)
+    
+    template_path = os.path.join(os.getcwd(), "src", "sab_engines", "aiida", "static", "logs_template.html")
+    try:
+        with open(template_path, "r", encoding="utf-8") as f:
+            template = f.read()
+            html = template.replace("{{safe_payload}}", safe_payload)
+            return HTMLResponse(html)
+    except Exception as error:
+        logger.error(log_event("aiida.logs.template.missing", path=template_path, error=str(error)))
+        return HTMLResponse(f"<html><body><pre>{safe_payload}</pre></body></html>")
 
 
 # ============================================================

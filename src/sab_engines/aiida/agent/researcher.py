@@ -936,16 +936,16 @@ async def submit_new_workflow(
                 ctx.deps.log_step(
                     f"Protocol builder missing pseudo family; retrying with {resolved_pseudo_family}"
                 )
-                pseudo_overrides = _build_pseudo_family_overrides(resolved_pseudo_family)
+                pseudo_protocol_kwargs = _build_pseudo_family_overrides(resolved_pseudo_family)
             else:
                 ctx.deps.log_step("Protocol builder missing pseudo family; retrying with PseudoDojo override")
-                pseudo_overrides = _build_pseudodojo_overrides()
+                pseudo_protocol_kwargs = _build_pseudodojo_overrides()
             draft = await draft_workchain_builder(
                 workchain,
                 structure_pk,
                 code,
                 protocol,
-                overrides=pseudo_overrides,
+                protocol_kwargs=pseudo_protocol_kwargs,
             )
     if isinstance(draft, dict) and draft.get("status") == "DRAFT_READY":
         validation = await validate_job(draft)

@@ -47,7 +47,7 @@ type NodeHoverMetadataState = {
 };
 
 const SUBMISSION_DRAFT_TAG = "[SUBMISSION_DRAFT]";
-const SUBMISSION_DRAFT_JSON_GLOBAL_REGEX = /(?:\[SUBMISSION_DRAFT\])\s*(\{[\s\S]*?\})/gis;
+const SUBMISSION_DRAFT_JSON_GLOBAL_REGEX = /(?:\[SUBMISSION_DRAFT\])\s*(?:```(?:json)?\s*)?(\{[\s\S]*?\})(?:\s*```)?/gis;
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
 

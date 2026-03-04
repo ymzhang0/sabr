@@ -10,7 +10,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type { BridgeCodeResource, BridgeComputerResource, ResourceAttachment } from "@/types/aiida";
-import { NewProfileModal } from "./new-profile-modal";
+import { NewProfileDrawer } from "./new-profile-drawer";
 
 const STATUS_POLL_INTERVAL_MS = 10_000;
 const DETAILS_POLL_INTERVAL_MS = 30_000;
@@ -105,7 +105,7 @@ interface BridgeStatusProps {
 export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSwitchProfileEnd }: BridgeStatusProps) {
   const queryClient = useQueryClient();
   const [hoveredDetail, setHoveredDetail] = useState<HoveredDetail>(null);
-  const [isNewProfileModalOpen, setIsNewProfileModalOpen] = useState(false);
+  const [isNewProfileDrawerOpen, setIsNewProfileDrawerOpen] = useState(false);
 
   const statusQuery = useQuery({
     queryKey: ["aiida-bridge-status"],
@@ -287,17 +287,19 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
               ))}
             </select>
             <button
-              onClick={() => setIsNewProfileModalOpen(true)}
+              onClick={() => setIsNewProfileDrawerOpen(true)}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
               title="Create New Profile"
             >
               <Plus className="h-4 w-4" />
             </button>
-            <NewProfileModal
-              isOpen={isNewProfileModalOpen}
-              onClose={() => setIsNewProfileModalOpen(false)}
-              onSuccess={() => { }}
-            />
+            {isNewProfileDrawerOpen && (
+              <NewProfileDrawer
+                isOpen={isNewProfileDrawerOpen}
+                onClose={() => setIsNewProfileDrawerOpen(false)}
+                onSuccess={() => { }}
+              />
+            )}
             {switchProfileMutation.isPending ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500 dark:text-zinc-300" />
             ) : null}

@@ -878,29 +878,7 @@ def _build_fallback_port_spec(entry_points: list[str], inputs: dict[str, Any]) -
             code_paths.add(path)
 
     lowered_entry_points = [_normalize_key(entry_point) for entry_point in entry_points]
-    looks_like_pw = any(
-        token in entry_point
-        for entry_point in lowered_entry_points
-        for token in ("quantumespresso.pw", "pwrelaxworkchain", "pwbaseworkchain", "pw.relax", "pw.base")
-    )
-    if looks_like_pw:
-        namespace_paths.update(
-            {
-                "base",
-                "base.pw",
-                "base.pw.parameters",
-                "base_final",
-                "base_final.pw",
-                "base_final.pw.parameters",
-                "metadata",
-                "metadata.options",
-                "metadata.options.resources",
-            }
-        )
-        code_paths.update({"base.pw.code", "base_final.pw.code"})
-        code_paths.discard("code")
-
-    if any(path.startswith("metadata.") for path in flattened.keys()) or looks_like_pw:
+    if any(path.startswith("metadata.") for path in flattened.keys()):
         namespace_paths.update({"metadata", "metadata.options", "metadata.options.resources"})
 
     if not namespace_paths and not code_paths:
@@ -1305,7 +1283,32 @@ def _validate_builder_inputs(
 
 def enrich_submission_draft_payload(submission_draft: dict[str, Any]) -> dict[str, Any]:
     payload = dict(submission_draft)
+    
+    meta = _as_dict(payload.get("meta"))
+    if meta is None:
+        meta = {}
+        payload["meta"] = meta
+
     inputs = _as_dict(payload.get("inputs")) or {}
+    
+    validation = _as_dict(meta.get("validation"))
+    if validation is None:
+        validation = _validate_builder_inputs(payload, inputs)
+        if isinstance(validation, dict):
+            meta["validation"] = validation
+            
+    builder_inputs: dict[str, Any] | None = None
+    if isinstance(validation, dict) and isinstance(validation.get("builder_inputs"), dict):
+        builder_inputs = validation["builder_inputs"]
+    elif isinstance(meta.get("draft"), dict) and isinstance(meta["draft"].get("builder_inputs"), dict):
+        builder_inputs = meta["draft"]["builder_inputs"]
+        
+    if builder_inputs:
+        for k, v in list(builder_inputs.items()):
+            if k not in inputs or inputs[k] is None:
+                inputs[k] = v
+        payload["inputs"] = inputs
+
     recommended_inputs = _as_dict(payload.get("recommended_inputs"))
     if recommended_inputs is None:
         recommended_inputs = _as_dict(payload.get("advanced_settings")) or {}
@@ -1313,11 +1316,6 @@ def enrich_submission_draft_payload(submission_draft: dict[str, Any]) -> dict[st
 
     payload["all_inputs"] = _build_all_inputs(inputs, recommended_inputs)
     payload["input_groups"] = _build_input_groups(payload["all_inputs"])
-
-    meta = _as_dict(payload.get("meta"))
-    if meta is None:
-        meta = {}
-        payload["meta"] = meta
 
     if not isinstance(meta.get("recommended_inputs"), dict):
         meta["recommended_inputs"] = recommended_inputs

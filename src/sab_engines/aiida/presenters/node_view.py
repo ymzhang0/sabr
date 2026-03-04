@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, Literal
 
 from src.sab_engines.aiida.client import BridgeAPIError, BridgeOfflineError, request_json
+from ..schemas import NodeHoverMetadataResponse
 
 
 def _normalize_process_state(state: str | None) -> str:
@@ -621,6 +622,127 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
     return detail
 
 
+def _coerce_chat_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    metadata: dict[str, Any] = {}
+    for key, value in raw.items():
+        cleaned_key = str(key).strip()
+        if not cleaned_key:
+            continue
+        metadata[cleaned_key] = value
+    return metadata
+
+
+def _is_empty_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    return False
+
+
+def _find_first_named_value(payload: Any, candidate_keys: set[str], depth: int = 0) -> Any:
+    if depth > 8:
+        return None
+
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered = str(key).strip().lower()
+            if lowered in candidate_keys and not _is_empty_value(value):
+                return value
+            nested = _find_first_named_value(value, candidate_keys, depth + 1)
+            if nested is not None:
+                return nested
+        return None
+
+    if isinstance(payload, (list, tuple, set)):
+        for entry in payload:
+            nested = _find_first_named_value(entry, candidate_keys, depth + 1)
+            if nested is not None:
+                return nested
+
+    return None
+
+
+def _format_spacegroup_value(value: Any) -> str | None:
+    if isinstance(value, dict):
+        symbol = _coerce_text(
+            value.get("symbol")
+            or value.get("international_short")
+            or value.get("international_symbol")
+            or value.get("spacegroup")
+            or value.get("space_group")
+            or value.get("name")
+        )
+        number = _coerce_text(
+            value.get("number")
+            or value.get("spacegroup_number")
+            or value.get("international_number")
+        )
+        if symbol and number:
+            return f"{symbol} ({number})"
+        return symbol or number
+
+    if isinstance(value, (list, tuple, set)):
+        for entry in value:
+            formatted = _format_spacegroup_value(entry)
+            if formatted:
+                return formatted
+        return None
+
+    return _coerce_text(value)
+
+
+def extract_node_hover_metadata(node_payload: dict[str, Any], pk: int) -> NodeHoverMetadataResponse:
+    formula = _coerce_text(node_payload.get("formula") or node_payload.get("chemical_formula"))
+    if formula is None:
+        formula = _coerce_text(
+            _find_first_named_value(
+                node_payload,
+                {
+                    "formula",
+                    "chemical_formula",
+                    "formula_hill",
+                    "formula_reduced",
+                    "reduced_formula",
+                },
+            )
+        )
+
+    node_type = _coerce_text(node_payload.get("node_type") or node_payload.get("type"))
+    if node_type is None:
+        node_type = _coerce_text(
+            _find_first_named_value(
+                node_payload,
+                {"node_type", "type"},
+            )
+        )
+
+    raw_spacegroup = _find_first_named_value(
+        node_payload,
+        {
+            "spacegroup",
+            "space_group",
+            "spacegroup_symbol",
+            "spacegroup_number",
+            "international_symbol",
+            "international_number",
+            "symmetry",
+        },
+    )
+    spacegroup = _format_spacegroup_value(raw_spacegroup)
+
+    return NodeHoverMetadataResponse(
+        pk=pk,
+        formula=formula,
+        spacegroup=spacegroup,
+        node_type=node_type or "Unknown",
+    )
+
+
 __all__ = [
     "serialize_processes",
     "serialize_group_labels",
@@ -628,4 +750,6 @@ __all__ = [
     "extract_folder_preview",
     "attach_tree_links",
     "enrich_process_detail_payload",
+    "extract_node_hover_metadata",
+    "_coerce_chat_metadata",
 ]

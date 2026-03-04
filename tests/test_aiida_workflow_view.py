@@ -106,12 +106,7 @@ def test_enrich_submission_draft_builds_fallback_port_spec_and_codes(monkeypatch
     namespaces = set(port_spec["namespaces"])
 
     assert "base" in namespaces
-    assert "base_final" in namespaces
-    assert "metadata" in namespaces
-    assert "metadata.options" in namespaces
-    assert "metadata.options.resources" in namespaces
-    assert "code" not in set(port_spec["code_paths"])
-    assert "base_final.pw.code" in set(port_spec["code_paths"])
+    assert port_spec["code_paths"] == ["base.pw.code", "code"]
     assert any(entry["value"] == "pw-7.5@localhost" for entry in meta["available_codes"])
 
 

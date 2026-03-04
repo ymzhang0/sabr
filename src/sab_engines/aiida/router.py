@@ -3,15 +3,16 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
+import yaml
 from fastapi import APIRouter, File, HTTPException, Path as ApiPath, Query, Request, UploadFile
 from google import genai
 from loguru import logger
-from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from src.sab_core.config import settings
@@ -31,6 +32,8 @@ from .presenters.node_view import (
     extract_folder_preview as _extract_folder_preview,
     serialize_groups as _serialize_groups,
     serialize_processes as _serialize_processes,
+    extract_node_hover_metadata as _extract_node_hover_metadata,
+    _coerce_chat_metadata,
 )
 from .presenters.workflow_view import (
     extract_submitted_pk as _extract_submitted_pk,
@@ -48,274 +51,51 @@ from .service import (
     rename_group,
     soft_delete_node,
     hub,
+    parse_infrastructure_via_ai as _parse_infrastructure_via_ai,
 )
 from .infrastructure_manager import infrastructure_manager
+from .schemas import (
+    FrontendChatRequest,
+    FrontendStopChatRequest,
+    SubmissionDraftRequest,
+    SystemCountsResponse,
+    BridgeStatusResponse,
+    BridgeSystemInfoResponse,
+    BridgeResourcesResponse,
+    BridgeProfilesResponse,
+    BridgeSwitchProfileRequest,
+    BridgeSwitchProfileResponse,
+    FrontendGroupCreateRequest,
+    FrontendGroupRenameRequest,
+    FrontendGroupAssignNodesRequest,
+    FrontendNodeSoftDeleteRequest,
+    NodeHoverMetadataResponse,
+    InfrastructureComputer,
+    ParseInfrastructureRequest,
+)
 
 FRONTEND_TAG = "AiiDA-Frontend-API"
 WORKER_PROXY_TAG = "AiiDA-Worker-Proxy"
 
 router = APIRouter()
 DEFAULT_MODELS = [settings.DEFAULT_MODEL]
-QUICK_PROMPTS: list[tuple[str, str]] = [
-    ("structure relaxation", "perform vc-relax using PseudoDojo"),
-    ("band structure", "calculate the electron band structure using PseudoDojo"),
-    (
-        "relax+band",
-        "perform vc-relax and then use the optimized structure to calculate the electron band structure",
-    ),
-    ("check pseudopotential", "check the PseudoDojo library in the database"),
-]
 ARCHIVE_EXTENSIONS = {".aiida", ".zip"}
 PENDING_SUBMISSION_KEY = "aiida_pending_submission"
 
 
-class FrontendChatRequest(BaseModel):
-    intent: str = Field(..., min_length=1, max_length=12000)
-    model_name: str | None = None
-    context_archive: str | None = None
-    context_node_ids: list[int] | None = None
-    context_pks: list[int] | None = None
-    metadata: dict[str, Any] | None = None
-
-
-class FrontendStopChatRequest(BaseModel):
-    turn_id: int | None = None
-
-
-class SubmissionDraftRequest(BaseModel):
-    draft: dict[str, Any] | list[dict[str, Any]] = Field(default_factory=dict)
-
-
-class SystemCountsResponse(BaseModel):
-    computers: int = 0
-    codes: int = 0
-    workchains: int = 0
-
-
-class BridgeStatusResponse(BaseModel):
-    status: Literal["online", "offline"]
-    url: str
-    environment: str
-    profile: str = "unknown"
-    daemon_status: bool = False
-    resources: SystemCountsResponse = Field(default_factory=SystemCountsResponse)
-    plugins: list[str] = Field(default_factory=list)
-
-
-class BridgeSystemInfoResponse(BaseModel):
-    profile: str = "unknown"
-    counts: SystemCountsResponse = Field(default_factory=SystemCountsResponse)
-    daemon_status: bool = False
-
-
-class ComputerResourceResponse(BaseModel):
-    label: str
-    hostname: str
-    description: str | None = None
-
-
-class CodeResourceResponse(BaseModel):
-    label: str
-    default_plugin: str | None = None
-    computer_label: str | None = None
-
-
-class BridgeResourcesResponse(BaseModel):
-    computers: list[ComputerResourceResponse] = Field(default_factory=list)
-    codes: list[CodeResourceResponse] = Field(default_factory=list)
-
-
-class BridgeProfileResponse(BaseModel):
-    name: str
-    is_default: bool = False
-    is_active: bool = False
-
-
-class BridgeProfilesResponse(BaseModel):
-    current_profile: str | None = None
-    default_profile: str | None = None
-    profiles: list[BridgeProfileResponse] = Field(default_factory=list)
-
-
-class BridgeSwitchProfileRequest(BaseModel):
-    profile: str = Field(..., min_length=1)
-
-
-class BridgeSwitchProfileResponse(BaseModel):
-    status: str = "switched"
-    current_profile: str | None = None
-
-
-class FrontendGroupCreateRequest(BaseModel):
-    label: str = Field(..., min_length=1, max_length=255)
-
-
-class FrontendGroupRenameRequest(BaseModel):
-    label: str = Field(..., min_length=1, max_length=255)
-
-
-class FrontendGroupAssignNodesRequest(BaseModel):
-    node_pks: list[int] = Field(default_factory=list)
-
-
-class FrontendNodeSoftDeleteRequest(BaseModel):
-    deleted: bool = True
-
-class NodeHoverMetadataResponse(BaseModel):
-    pk: int
-    formula: str | None = None
-    spacegroup: str | None = None
-    node_type: str = "Unknown"
-
-
-class InfrastructureComputerCode(BaseModel):
-    pk: int
-    label: str
-    description: str | None = None
-    default_calc_job_plugin: str | None = None
-
-
-class InfrastructureComputer(BaseModel):
-    pk: int
-    label: str
-    hostname: str
-    description: str | None = None
-    scheduler_type: str
-    transport_type: str
-    is_enabled: bool
-    codes: list[InfrastructureComputerCode] = Field(default_factory=list)
-
-
-class ParseInfrastructureRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-
-
-def _coerce_chat_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        return {}
-    metadata: dict[str, Any] = {}
-    for key, value in raw.items():
-        cleaned_key = str(key).strip()
-        if not cleaned_key:
-            continue
-        metadata[cleaned_key] = value
-    return metadata
-
-
-def _coerce_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _is_empty_value(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str):
-        return not value.strip()
-    if isinstance(value, (list, tuple, set, dict)):
-        return len(value) == 0
-    return False
-
-
-def _find_first_named_value(payload: Any, candidate_keys: set[str], depth: int = 0) -> Any:
-    if depth > 8:
-        return None
-
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            lowered = str(key).strip().lower()
-            if lowered in candidate_keys and not _is_empty_value(value):
-                return value
-            nested = _find_first_named_value(value, candidate_keys, depth + 1)
-            if nested is not None:
-                return nested
-        return None
-
-    if isinstance(payload, (list, tuple, set)):
-        for entry in payload:
-            nested = _find_first_named_value(entry, candidate_keys, depth + 1)
-            if nested is not None:
-                return nested
-
-    return None
-
-
-def _format_spacegroup_value(value: Any) -> str | None:
-    if isinstance(value, dict):
-        symbol = _coerce_text(
-            value.get("symbol")
-            or value.get("international_short")
-            or value.get("international_symbol")
-            or value.get("spacegroup")
-            or value.get("space_group")
-            or value.get("name")
-        )
-        number = _coerce_text(
-            value.get("number")
-            or value.get("spacegroup_number")
-            or value.get("international_number")
-        )
-        if symbol and number:
-            return f"{symbol} ({number})"
-        return symbol or number
-
-    if isinstance(value, (list, tuple, set)):
-        for entry in value:
-            formatted = _format_spacegroup_value(entry)
-            if formatted:
-                return formatted
-        return None
-
-    return _coerce_text(value)
-
-
-def _extract_node_hover_metadata(node_payload: dict[str, Any], pk: int) -> NodeHoverMetadataResponse:
-    formula = _coerce_text(node_payload.get("formula") or node_payload.get("chemical_formula"))
-    if formula is None:
-        formula = _coerce_text(
-            _find_first_named_value(
-                node_payload,
-                {
-                    "formula",
-                    "chemical_formula",
-                    "formula_hill",
-                    "formula_reduced",
-                    "reduced_formula",
-                },
-            )
-        )
-
-    node_type = _coerce_text(node_payload.get("node_type") or node_payload.get("type"))
-    if node_type is None:
-        node_type = _coerce_text(
-            _find_first_named_value(
-                node_payload,
-                {"node_type", "type"},
-            )
-        )
-
-    raw_spacegroup = _find_first_named_value(
-        node_payload,
-        {
-            "spacegroup",
-            "space_group",
-            "spacegroup_symbol",
-            "spacegroup_number",
-            "international_symbol",
-            "international_number",
-            "symmetry",
-        },
-    )
-    spacegroup = _format_spacegroup_value(raw_spacegroup)
-
-    return NodeHoverMetadataResponse(
-        pk=pk,
-        formula=formula,
-        spacegroup=spacegroup,
-        node_type=node_type or "Unknown",
-    )
+def _get_quick_prompts() -> list[dict[str, str]]:
+    """Load quick prompts from external settings file."""
+    try:
+        settings_path = settings.SABR_AIIDA_SETTINGS_FILE
+        if not os.path.exists(settings_path):
+            return []
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+            prompts = data.get("quick_prompts", [])
+            return prompts if isinstance(prompts, list) else []
+    except Exception as error:
+        logger.warning(log_event("aiida.settings.load_failed", error=str(error)))
+        return []
 
 
 def _get_node_hover_metadata(pk: int) -> NodeHoverMetadataResponse:
@@ -711,7 +491,7 @@ async def frontend_bootstrap(request: Request):
         },
         "models": available_models,
         "selected_model": selected_model,
-        "quick_prompts": [{"label": label, "prompt": prompt} for label, prompt in QUICK_PROMPTS],
+        "quick_prompts": _get_quick_prompts(),
     }
 
 
@@ -844,100 +624,16 @@ async def frontend_ssh_hosts():
         raise HTTPException(status_code=500, detail="Failed to fetch SSH hosts")
 
 
-class ParseInfrastructureRequest(BaseModel):
-    text: str
-    ssh_host_details: dict[str, Any] | None = None
-
 @router.post("/frontend/parse-infrastructure", tags=[FRONTEND_TAG])
 async def parse_infrastructure_via_ai(payload: ParseInfrastructureRequest):
-    """
-    Use Gemini to parse raw text into AiiDA Computer/Code configuration.
-    """
-    api_key = settings.GEMINI_API_KEY
-    if api_key == "your-key-here":
-        raise HTTPException(status_code=400, detail="Gemini API key not configured")
-
-    client = genai.Client(
-        api_key=api_key,
-        http_options={"api_version": settings.GEMINI_API_VERSION},
-    )
-
-    prompt = f"""
-    You are an AiiDA infrastructure expert. Parse the following text into a structured JSON for configuring an AiiDA Computer or Code.
-
-    Input Text:
-    {payload.text}
-
-    Output format:
-    {{
-      "type": "computer" | "code" | "both",
-      "computer": {{
-        "label": "string",
-        "hostname": "string",
-        "username": "string",
-        "description": "string",
-        "transport_type": "core.ssh",
-        "scheduler_type": "core.direct" | "core.slurm" | "core.pbspro" | "core.lsf",
-        "work_dir": "string",
-        "mpiprocs_per_machine": number,
-        "mpirun_command": "string"
-      }},
-      "code": {{
-        "label": "string",
-        "description": "string",
-        "default_calc_job_plugin": "string (e.g. quantumespresso.pw)",
-        "remote_abspath": "string"
-      }}
-    }}
-
-    Return ONLY the raw JSON. No markdown blocks, no explanations. If unknown, omit the key.
-    """
-
+    """Proxy to AiiDA service for AI infrastructure parsing."""
     try:
-        response = client.models.generate_content(
-            model=settings.DEFAULT_MODEL,
-            contents=prompt,
-        )
-        raw_text = response.text.strip()
-        # Basic cleanup if model includes markdown code blocks
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:].strip()
-        
-        # Handle explicitly passed SSH Host Details
-        if payload.ssh_host_details:
-            if not parsed.get("computer"):
-                parsed["computer"] = {}
-                parsed["type"] = "computer" if not parsed.get("type") else parsed["type"]
-            
-            ssh_info = payload.ssh_host_details
-            parsed["computer"]["label"] = ssh_info.get("alias")
-            
-            # Prioritize SSH Hostname over AI parsed if missing
-            if ssh_info.get("hostname"):
-                parsed["computer"]["hostname"] = ssh_info.get("hostname")
-            if ssh_info.get("username"):
-                parsed["computer"]["username"] = ssh_info.get("username")
-            if ssh_info.get("proxy_jump"):
-                parsed["computer"]["proxy_jump"] = ssh_info.get("proxy_jump")
-            if ssh_info.get("proxy_command"):
-                parsed["computer"]["proxy_command"] = ssh_info.get("proxy_command")
-            if ssh_info.get("identity_file"):
-                parsed["computer"]["key_filename"] = ssh_info.get("identity_file")
-
-        # Merge with presets if it's a computer
-        if parsed.get("computer"):
-            # The merge now uses whatever hostname became the dominant one
-            merge_result = infrastructure_manager.merge_preset(parsed["computer"])
-            parsed["computer"] = merge_result.get("config", parsed["computer"])
-            parsed["preset_matched"] = merge_result.get("matched", False)
-            if parsed["preset_matched"]:
-                parsed["preset_domain"] = merge_result.get("domain_pattern", "")
-                
+        parsed = await _parse_infrastructure_via_ai(payload.text, payload.ssh_host_details)
         return {"status": "success", "data": parsed}
     except Exception as error:
         logger.exception(log_event("aiida.frontend.parse_infrastructure.failed", error=str(error)))
+        if isinstance(error, HTTPException):
+            raise
         raise HTTPException(status_code=500, detail=f"AI Parsing failed: {str(error)}")
 
 

@@ -1,5 +1,5 @@
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Folder, Loader2, X } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState, useRef } from "react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -216,7 +216,9 @@ function stringifyCompact(value: unknown): string {
     if (compact.length === 0) {
       return "";
     }
-    return `${compact.join(", ")}${value.length > compact.length ? " ..." : ""}`;
+    const joined = compact.join(", ");
+    const trailer = value.length > compact.length ? " ..." : "";
+    return `${joined}${trailer}`;
   }
   try {
     return JSON.stringify(value);
@@ -291,7 +293,7 @@ function normalizeCodeOptions(raw: unknown): NormalizedCodeOption[] {
       typeof record.value === "string" && record.value.trim()
         ? record.value.trim()
         : computerLabel && codeLabel
-          ? `${codeLabel}@${computerLabel}`
+          ? `${codeLabel} @${computerLabel} `
           : codeLabel;
     if (!value) {
       return;
@@ -467,7 +469,7 @@ function normalizePrimaryField(
   const pk = toPositiveInteger(value);
   return {
     label,
-    value: pk !== null && label.toLowerCase() === "structure" ? `PK ${pk}` : stringifyCompact(value),
+    value: pk !== null && label.toLowerCase() === "structure" ? `PK ${pk} ` : stringifyCompact(value),
     pk: pk !== null && label.toLowerCase() === "structure" ? pk : undefined,
   };
 }
@@ -519,7 +521,7 @@ function renderPkLinkedText(
     if (pk !== null) {
       nodes.push(
         <button
-          key={`${seed}-${start}-${pk}`}
+          key={`${seed} -${start} -${pk} `}
           type="button"
           className="font-mono text-sky-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-200"
           onClick={() => onOpenDetail(pk)}
@@ -602,7 +604,7 @@ function flattenInputPorts(payload: unknown, prefix = "", out: Record<string, un
     if (!cleanKey) {
       return;
     }
-    const path = prefix ? `${prefix}.${cleanKey}` : cleanKey;
+    const path = prefix ? `${prefix}.${cleanKey} ` : cleanKey;
     if (asRecord(value)) {
       flattenInputPorts(value, path, out);
       return;
@@ -1081,7 +1083,7 @@ function normalizeValidationSummary(
   const summaryText =
     typeof summaryRecord.summary_text === "string" && summaryRecord.summary_text.trim()
       ? summaryRecord.summary_text.trim()
-      : `Status: ${normalizedStatus}\nBlocking errors: ${blockingErrorCount}\nWarnings: ${warningCount}`;
+      : `Status: ${normalizedStatus} \nBlocking errors: ${blockingErrorCount} \nWarnings: ${warningCount} `;
 
   return {
     status: normalizedStatus,
@@ -1365,7 +1367,7 @@ function buildMetadataFallbackEntries(
   const additions: SubmissionAllInputEntry[] = [];
 
   METADATA_OPTION_PATHS.forEach((candidate) => {
-    const fullPath = targetPrefix ? `${targetPrefix}.${candidate.path}` : candidate.path;
+    const fullPath = targetPrefix ? `${targetPrefix}.${candidate.path} ` : candidate.path;
     const normalized = fullPath.toLowerCase();
     if (existing.has(normalized)) {
       return;
@@ -1378,7 +1380,7 @@ function buildMetadataFallbackEntries(
       }
     }
     additions.push({
-      path: candidate.path,
+      path: fullPath,
       value,
       isRecommended: false,
     });
@@ -1594,30 +1596,49 @@ function setValueByCandidatePaths(target: Record<string, unknown>, path: string,
   if (!normalizedPath) {
     return false;
   }
+
+  const isProtocolBuilder = Boolean(target.protocol && (target.intent_data || target.overrides));
+
   const candidates = [
     normalizedPath,
-    `inputs.${normalizedPath}`,
-    `builder.${normalizedPath}`,
-    `draft.${normalizedPath}`,
+    `inputs.${normalizedPath} `,
+    `builder.${normalizedPath} `,
+    `draft.${normalizedPath} `,
   ];
+  if (isProtocolBuilder) {
+    candidates.unshift(`overrides.${normalizedPath} `);
+  }
+
   for (const candidatePath of candidates) {
     if (setValueByPath(target, candidatePath, value, { createMissing: false })) {
       return true;
     }
   }
 
+  if (isProtocolBuilder) {
+    if (normalizedPath.includes(".")) {
+      if (setValueByPath(target, `overrides.${normalizedPath} `, value, { createMissing: true })) {
+        return true;
+      }
+    } else {
+      if (setValueByPath(target, normalizedPath, value, { createMissing: true })) {
+        return true;
+      }
+    }
+  }
+
   const inputsRecord = asRecord(target.inputs);
-  if (inputsRecord && setValueByPath(target, `inputs.${normalizedPath}`, value, { createMissing: true })) {
+  if (inputsRecord && setValueByPath(target, `inputs.${normalizedPath} `, value, { createMissing: true })) {
     return true;
   }
 
   const builderRecord = asRecord(target.builder);
-  if (builderRecord && setValueByPath(target, `builder.${normalizedPath}`, value, { createMissing: true })) {
+  if (builderRecord && setValueByPath(target, `builder.${normalizedPath} `, value, { createMissing: true })) {
     return true;
   }
 
   const draftRecord = asRecord(target.draft);
-  if (draftRecord && setValueByPath(target, `draft.${normalizedPath}`, value, { createMissing: true })) {
+  if (draftRecord && setValueByPath(target, `draft.${normalizedPath} `, value, { createMissing: true })) {
     return true;
   }
 
@@ -1786,14 +1807,14 @@ function formatRuntimeEstimate(seconds: number | null): string {
   }
   const minutes = Math.max(1, Math.round(seconds / 60));
   if (minutes < 60) {
-    return `~${minutes}m`;
+    return `~${minutes} m`;
   }
   const hours = Math.floor(minutes / 60);
   const remainderMinutes = minutes % 60;
   if (remainderMinutes === 0) {
-    return `~${hours}h`;
+    return `~${hours} h`;
   }
-  return `~${hours}h ${remainderMinutes}m`;
+  return `~${hours}h ${remainderMinutes} m`;
 }
 
 function extractSymmetryLabel(payload: unknown): string | null {
@@ -1830,7 +1851,7 @@ function extractSymmetryLabel(payload: unknown): string | null {
     }
     const number = toPositiveInteger(record.number);
     if (number !== null) {
-      return `Space group ${number}`;
+      return `Space group ${number} `;
     }
   }
   if (typeof candidate === "string" && candidate.trim()) {
@@ -1838,7 +1859,7 @@ function extractSymmetryLabel(payload: unknown): string | null {
   }
   const numeric = toPositiveInteger(candidate);
   if (numeric !== null) {
-    return `Space group ${numeric}`;
+    return `Space group ${numeric} `;
   }
   return null;
 }
@@ -1944,7 +1965,7 @@ function extractBatchJobRows(submissionDraft: SubmissionDraftPayload): BatchJobD
       const formula =
         (typeof entry.formula === "string" && entry.formula.trim() ? entry.formula.trim() : null) ??
         (typeof entry.label === "string" && entry.label.trim() ? entry.label.trim() : null) ??
-        (pk ? `Structure #${pk}` : `Task ${index + 1}`);
+        (pk ? `Structure #${pk} ` : `Task ${index + 1} `);
       const symmetry =
         (typeof entry.symmetry === "string" && entry.symmetry.trim() ? entry.symmetry.trim() : null) ??
         "System selected";
@@ -1957,7 +1978,7 @@ function extractBatchJobRows(submissionDraft: SubmissionDraftPayload): BatchJobD
         rowDraft.structure_pk = pk;
       }
       return {
-        id: `${index}-${pk ?? "none"}`,
+        id: `${index} -${pk ?? "none"} `,
         pk: pk ?? null,
         label: formula,
         formula,
@@ -1984,7 +2005,7 @@ function extractBatchJobRows(submissionDraft: SubmissionDraftPayload): BatchJobD
         draft,
         new Set(["label", "structure_label", "name", "formula", "structure_name"]),
       ),
-    ) || (structurePk ? `Structure #${structurePk}` : `Task ${index + 1}`);
+    ) || (structurePk ? `Structure #${structurePk} ` : `Task ${index + 1} `);
     const metadataMatch =
       metadataEntries.find((entry) => entry.pk !== null && entry.pk === structurePk) ??
       metadataEntries[index] ??
@@ -2005,7 +2026,7 @@ function extractBatchJobRows(submissionDraft: SubmissionDraftPayload): BatchJobD
       toPositiveInteger(metadataMatch?.num_atoms) ??
       toPositiveInteger(findFirstNamedValue(draft, new Set(["num_atoms", "natoms", "number_of_atoms"])));
     return {
-      id: `${index}-${structurePk ?? "none"}`,
+      id: `${index} -${structurePk ?? "none"} `,
       pk: structurePk ?? null,
       label,
       formula,
@@ -2302,16 +2323,16 @@ export function SubmissionModal({
       .map(([key, value]) => {
         let displayValue = stringifyCompact(value);
         if (typeof value === "object" && value !== null && "pk" in value) {
-          displayValue = `Node<${value.pk}>`;
+          displayValue = `Node < ${value.pk}> `;
         } else if (typeof value === "object" && value !== null && "uuid" in value) {
-          displayValue = `Node<${String(value.uuid).split("-")[0]}>`;
+          displayValue = `Node < ${String(value.uuid).split("-")[0]}> `;
         } else if (typeof displayValue === "string" && displayValue.length > 20) {
           displayValue = `"${displayValue.slice(0, 17)}..."`;
         }
-        return `${key}=${displayValue}`;
+        return `${key}=${displayValue} `;
       })
       .join(", ");
-    return `get_builder_from_protocol(${args}${args ? ", " : ""}protocol="${protocol}")`;
+    return `get_builder_from_protocol(${args}${args ? ", " : ""}protocol = "${protocol}")`;
   }, [isProtocolBuilder, submissionDraft]);
 
   const batchJobs = useMemo(
@@ -2347,6 +2368,8 @@ export function SubmissionModal({
     setSelectedBatchIds(batchJobs.map((job) => job.id));
   }, [batchJobs, isBatchDraft, open]);
 
+  const prevTurnIdRef = useRef<number | null>(null);
+
   useEffect(() => {
     if (!open || !submissionDraft) {
       setDraftState({});
@@ -2357,6 +2380,7 @@ export function SubmissionModal({
       setCodeSearchByPath({});
       setSelectedNamespace("");
       setShowValidationDetails(false);
+      prevTurnIdRef.current = turnId;
       return;
     }
     const nextDraftState = buildDraftFieldEditorState(inspectorInputEntries);
@@ -2366,25 +2390,42 @@ export function SubmissionModal({
         nextCodeSearch[path] = "";
       }
     });
-    setDraftState(nextDraftState);
-    setDraftStateErrors({});
-    setExpandedJsonFields({});
-    setCodeSearchByPath(nextCodeSearch);
-    const preferredOverride =
-      Object.values(nextDraftState).find((field) =>
-        ["kpoints_distance", "kpoint_distance", "ecutwfc", "ecutrho"].includes(
-          field.path.split(".").pop()?.toLowerCase() ?? "",
-        ),
-      ) ?? Object.values(nextDraftState)[0];
-    if (preferredOverride) {
-      setGlobalOverridePath(preferredOverride.path);
-      setGlobalOverrideValue(String(preferredOverride.value));
-    } else {
-      setGlobalOverridePath("");
-      setGlobalOverrideValue("");
+
+    setDraftState((current) => {
+      if (prevTurnIdRef.current !== turnId) {
+        return nextDraftState;
+      }
+      const merged = { ...nextDraftState };
+      Object.keys(current).forEach((key) => {
+        if (merged[key] && current[key].value !== merged[key].initialValue) {
+          merged[key].value = current[key].value;
+        }
+      });
+      return merged;
+    });
+
+    if (prevTurnIdRef.current !== turnId) {
+      setDraftStateErrors({});
+      setExpandedJsonFields({});
+      setCodeSearchByPath(nextCodeSearch);
+      const preferredOverride =
+        Object.values(nextDraftState).find((field) =>
+          ["kpoints_distance", "kpoint_distance", "ecutwfc", "ecutrho"].includes(
+            field.path.split(".").pop()?.toLowerCase() ?? "",
+          ),
+        ) ?? Object.values(nextDraftState)[0];
+      if (preferredOverride) {
+        setGlobalOverridePath(preferredOverride.path);
+        setGlobalOverrideValue(String(preferredOverride.value));
+      } else {
+        setGlobalOverridePath("");
+        setGlobalOverrideValue("");
+      }
+      setShowValidationDetails(false);
     }
-    setShowValidationDetails(false);
-  }, [codeFieldPathsArray, inspectorInputEntries, open, submissionDraft]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    prevTurnIdRef.current = turnId;
+  }, [codeFieldPathsArray, inspectorInputEntries, open, submissionDraft, turnId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!open) {
@@ -2443,7 +2484,7 @@ export function SubmissionModal({
         return "System estimated";
       }
       const totalSeconds = runtimeValues.reduce((total, value) => total + value, 0);
-      return `Total ${formatRuntimeEstimate(totalSeconds)}`;
+      return `Total ${formatRuntimeEstimate(totalSeconds)} `;
     }
     const singleRuntime =
       extractRuntimePredictionSeconds(singleDraftPayload) ??
@@ -2556,12 +2597,12 @@ export function SubmissionModal({
     const fieldPk = toPositiveInteger(field?.pk);
     return (
       <div
-        key={`${turnId}-primary-${key}`}
+        key={`${turnId} -primary - ${key} `}
         className="rounded-xl border border-slate-200/85 bg-white/85 px-3 py-3 dark:border-slate-800 dark:bg-slate-950/50"
       >
         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">{title}</p>
         {pathHint ? (
-          <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${pathHint}`}>
+          <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${pathHint} `}>
             inputs.{pathHint}
           </p>
         ) : null}
@@ -2577,7 +2618,7 @@ export function SubmissionModal({
                 {stringifyCompact(field.value)}
               </button>
             ) : (
-              renderValueNode(field.value, `${turnId}-primary-${key}`, onOpenDetail)
+              renderValueNode(field.value, `${turnId} -primary - ${key} `, onOpenDetail)
             )}
           </div>
         ) : (
@@ -2661,7 +2702,7 @@ export function SubmissionModal({
               )}
             >
               {!hasCurrentOption && currentValue ? (
-                <option value={currentValue}>{`Current: ${currentValue}`}</option>
+                <option value={currentValue}>{`Current: ${currentValue} `}</option>
               ) : null}
               {filteredOptions.length === 0 ? (
                 <option value={currentValue} disabled>
@@ -2669,7 +2710,7 @@ export function SubmissionModal({
                 </option>
               ) : null}
               {filteredOptions.map((option) => (
-                <option key={`${turnId}-${path}-${option.value}`} value={option.value}>
+                <option key={`${turnId} -${path} -${option.value} `} value={option.value}>
                   {option.plugin ? `${option.label} (${option.plugin})` : option.label}
                 </option>
               ))}
@@ -2722,7 +2763,7 @@ export function SubmissionModal({
         <div>
           <div className="inline-flex items-center gap-1">
             {[0, 1, 2].map((index) => (
-              <div key={`${path}-mesh-${index}`} className="inline-flex items-center gap-1">
+              <div key={`${path} -mesh - ${index} `} className="inline-flex items-center gap-1">
                 <input
                   type="number"
                   min={1}
@@ -2917,8 +2958,8 @@ export function SubmissionModal({
                       <p className="font-semibold uppercase tracking-[0.08em]">Blocking Ports</p>
                       <ul className="mt-1 space-y-1">
                         {validationErrors.map((message, index) => (
-                          <li key={`${turnId}-validation-error-${index}`} className="rounded-md bg-white/60 px-2 py-1 dark:bg-slate-900/45">
-                            {renderPkLinkedText(message, `${turnId}-validation-error-${index}`, onOpenDetail)}
+                          <li key={`${turnId} -validation - error - ${index} `} className="rounded-md bg-white/60 px-2 py-1 dark:bg-slate-900/45">
+                            {renderPkLinkedText(message, `${turnId} -validation - error - ${index} `, onOpenDetail)}
                           </li>
                         ))}
                       </ul>
@@ -2929,8 +2970,8 @@ export function SubmissionModal({
                       <p className="font-semibold uppercase tracking-[0.08em]">Warnings</p>
                       <ul className="mt-1 space-y-1">
                         {validationWarnings.map((message, index) => (
-                          <li key={`${turnId}-validation-warning-${index}`} className="rounded-md bg-white/55 px-2 py-1 dark:bg-slate-900/40">
-                            {renderPkLinkedText(message, `${turnId}-validation-warning-${index}`, onOpenDetail)}
+                          <li key={`${turnId} -validation - warning - ${index} `} className="rounded-md bg-white/55 px-2 py-1 dark:bg-slate-900/40">
+                            {renderPkLinkedText(message, `${turnId} -validation - warning - ${index} `, onOpenDetail)}
                           </li>
                         ))}
                       </ul>
@@ -2950,7 +2991,7 @@ export function SubmissionModal({
               </h2>
               <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
                 <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                  Structure: {primaryFields.structure?.pk ? `#${primaryFields.structure.pk}` : "System selected"}
+                  Structure: {primaryFields.structure?.pk ? `#${primaryFields.structure.pk} ` : "System selected"}
                 </span>
                 <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
                   Symmetry: {symmetrySummary}
@@ -3051,19 +3092,19 @@ export function SubmissionModal({
               <div className="mt-4 grid gap-2 md:grid-cols-3">
                 {keyParameterEntries.map((entry) => (
                   <div
-                    key={`${turnId}-key-parameter-${entry.label}`}
+                    key={`${turnId} -key - parameter - ${entry.label} `}
                     className="rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/35"
                   >
                     <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                       {entry.label}
                     </p>
                     {entry.path ? (
-                      <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${entry.path}`}>
+                      <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${entry.path} `}>
                         inputs.{entry.path}
                       </p>
                     ) : null}
                     <p className="mt-1 break-all text-sm text-slate-800 dark:text-slate-100" title={stringifyCompact(entry.value)}>
-                      {renderValueNode(entry.value, `${turnId}-key-parameter-${entry.label}`, onOpenDetail)}
+                      {renderValueNode(entry.value, `${turnId} -key - parameter - ${entry.label} `, onOpenDetail)}
                     </p>
                   </div>
                 ))}
@@ -3099,7 +3140,7 @@ export function SubmissionModal({
                         className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
                       >
                         {globalOverrideOptions.map((field) => (
-                          <option key={`${turnId}-override-${field.path}`} value={field.path}>
+                          <option key={`${turnId} -override - ${field.path} `} value={field.path}>
                             {field.label}
                           </option>
                         ))}
@@ -3194,7 +3235,7 @@ export function SubmissionModal({
                           const selected = selectedBatchIds.includes(job.id);
                           return (
                             <tr
-                              key={`${turnId}-batch-${job.id}`}
+                              key={`${turnId} -batch - ${job.id} `}
                               className={cn(
                                 "border-t border-slate-200/70 text-slate-700 dark:border-slate-800 dark:text-slate-200",
                                 selected ? "bg-white/60 dark:bg-slate-950/20" : "opacity-75",
@@ -3211,7 +3252,7 @@ export function SubmissionModal({
                                         : [...current, job.id],
                                     );
                                   }}
-                                  aria-label={`Select ${job.formula}`}
+                                  aria-label={`Select ${job.formula} `}
                                   className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
                                 />
                               </td>
@@ -3249,7 +3290,7 @@ export function SubmissionModal({
                   <div className="mt-4 grid gap-3 sm:grid-cols-3">
                     {renderPrimaryCell(
                       "code",
-                      primaryCodePath ? `Code (${primaryCodePath.split(".").pop()})` : "Code",
+                      primaryCodePath ? `Code(${primaryCodePath.split(".").pop()})` : "Code",
                       primaryFields.code,
                       "System Selected",
                       primaryCodePath,
@@ -3272,7 +3313,7 @@ export function SubmissionModal({
                         <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Computer</p>
                         <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
                           {targetComputer ? (
-                            <span className="inline-flex rounded-full bg-slate-200/50 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800/80 dark:text-slate-200">{renderValueNode(targetComputer, `${turnId}-target`, onOpenDetail)}</span>
+                            <span className="inline-flex rounded-full bg-slate-200/50 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800/80 dark:text-slate-200">{renderValueNode(targetComputer, `${turnId} -target`, onOpenDetail)}</span>
                           ) : (
                             <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
                               System Selected
@@ -3334,7 +3375,7 @@ export function SubmissionModal({
                         const leaf = entry.path.split(".").pop() ?? entry.path;
                         return (
                           <div
-                            key={`${turnId}-atomic-${entry.path}`}
+                            key={`${turnId} -atomic - ${entry.path} `}
                             className="rounded-md border border-slate-200/80 bg-slate-50/80 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900/50"
                           >
                             <p className="font-semibold text-slate-700 dark:text-slate-200">{formatSettingKey(leaf)}</p>
@@ -3362,7 +3403,7 @@ export function SubmissionModal({
                           const isSelected = namespaceItem.path === selectedNamespace;
                           return (
                             <button
-                              key={`${turnId}-namespace-${namespaceItem.path}`}
+                              key={`${turnId} -namespace - ${namespaceItem.path} `}
                               type="button"
                               className={cn(
                                 "flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs transition-colors",
@@ -3402,7 +3443,7 @@ export function SubmissionModal({
                       inputs
                     </button>
                     {namespaceBreadcrumb.map((breadcrumb) => (
-                      <span key={`${turnId}-breadcrumb-${breadcrumb.path}`} className="inline-flex items-center gap-1">
+                      <span key={`${turnId} -breadcrumb - ${breadcrumb.path} `} className="inline-flex items-center gap-1">
                         <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
                         <button
                           type="button"
@@ -3426,7 +3467,7 @@ export function SubmissionModal({
                         const childLabel = childPath.split(".").pop() ?? childPath;
                         return (
                           <button
-                            key={`${turnId}-namespace-folder-${childPath}`}
+                            key={`${turnId} -namespace - folder - ${childPath} `}
                             type="button"
                             className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:bg-slate-800"
                             onClick={() => setSelectedNamespace(childPath)}
@@ -3458,7 +3499,7 @@ export function SubmissionModal({
                             const isInheritedCode = isCodeField && inheritedCodePaths.has(entry.path);
                             return (
                               <tr
-                                key={`${turnId}-namespace-entry-${entry.path}`}
+                                key={`${turnId} -namespace - entry - ${entry.path} `}
                                 className="border-t border-slate-200/70 align-top dark:border-slate-800"
                               >
                                 <td className="px-2 py-1.5">
@@ -3518,11 +3559,11 @@ export function SubmissionModal({
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
                   {pkEntries.map((entry, index) => (
                     <button
-                      key={`${turnId}-pk-${entry.pk}-${index}`}
+                      key={`${turnId} -pk - ${entry.pk} -${index} `}
                       type="button"
                       className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/50"
                       onClick={() => onOpenDetail(entry.pk)}
-                      title={entry.path ?? `PK ${entry.pk}`}
+                      title={entry.path ?? `PK ${entry.pk} `}
                     >
                       #{entry.pk}
                     </button>
@@ -3581,7 +3622,7 @@ export function SubmissionModal({
                         <div className="mt-1 flex flex-wrap gap-1.5 text-xs text-emerald-700 dark:text-emerald-300">
                           {state.processPks.slice(0, 8).map((pk) => (
                             <button
-                              key={`${turnId}-submitted-${pk}`}
+                              key={`${turnId} -submitted - ${pk} `}
                               type="button"
                               className="rounded-full bg-emerald-100 px-2 py-0.5 font-mono font-semibold underline underline-offset-2 dark:bg-emerald-900/45"
                               onClick={() => onOpenDetail(pk)}

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Copy Logs</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; margin: 24px; }
+    textarea { width: 100%; height: 280px; }
+    .muted { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <p class="muted">Copying runtime logs… If browser blocks clipboard, use the textarea below.</p>
+  <textarea id="logs">{{safe_payload}}</textarea>
+  <script>
+    const text = document.getElementById('logs').value;
+    const done = () => { document.querySelector('.muted').textContent = 'Logs copied to clipboard.'; };
+    const fail = () => { document.querySelector('.muted').textContent = 'Clipboard blocked. Press Cmd/Ctrl+C to copy.'; };
+    (async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        done();
+      } catch (e) {
+        fail();
+      }
+      const ta = document.getElementById('logs');
+      ta.focus();
+      ta.select();
+    })();
+  </script>
+</body>
+</html>

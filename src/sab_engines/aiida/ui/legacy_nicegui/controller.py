@@ -3,7 +3,7 @@ import httpx
 import tkinter as tk
 from tkinter import filedialog
 from nicegui import ui, run
-from src.sab_core.protocols.controller import BaseController
+from src.sab_core.protocols import BaseController
 
 class RemoteAiiDAController(BaseController):
     """
@@ -173,7 +173,7 @@ class RemoteAiiDAController(BaseController):
                         .classes('text-[11px] px-3 border-primary/20 text-primary/70 hover:bg-primary/10 transition-all italic')
 
     def _load_archive_history(self):
-        history = self.global_mem.get_raw_data("recent_archives") or []
+        history = self.global_mem.get_kv("recent_archives") or []
         self.components['archive_select'].options = history
         with self.components['archive_history']:
             for path in history:
