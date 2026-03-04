@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CHAT_STREAM_URL,
   LOGS_STREAM_URL,
+  PROCESS_EVENTS_URL,
   addNodesToGroup,
   createGroup,
   deleteGroup,
@@ -459,6 +460,33 @@ export default function App() {
       source.close();
     };
   }, [applyChatSnapshot, bootstrapQuery.isSuccess]);
+
+  // ── SSE: Real-time process state changes ──
+  useEffect(() => {
+    if (!bootstrapQuery.isSuccess) {
+      return;
+    }
+
+    const source = new EventSource(PROCESS_EVENTS_URL);
+
+    source.addEventListener("process_state_change", () => {
+      queryClient.invalidateQueries({ queryKey: ["processes"] });
+    });
+    source.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.event === "process_state_change" || data.pk) {
+          queryClient.invalidateQueries({ queryKey: ["processes"] });
+        }
+      } catch {
+        // ignore unparseable keepalive messages
+      }
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [bootstrapQuery.isSuccess, queryClient]);
 
   useEffect(() => {
     if (selectedModel) {

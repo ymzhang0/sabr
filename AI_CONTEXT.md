@@ -18,9 +18,9 @@ SABR operates as the **Brain**. It communicates with the AiiDA-Worker (**Body**)
 **Location:** `src/sab_engines/aiida/client.py`, `bridge_client.py`
 **Implementation:** Wraps all `httpx` logic dynamically. It implements connection state caching, infrastructure introspection (counting codes/computers), connection offline awareness (`BridgeOfflineError`), and error payload normalization (`_extract_error_payload`).
 
-### Registry Pattern (Agent Capability Growth)
+### Registry & Analysis Integration (Agent Capability Growth)
 **Location:** `src/sab_engines/aiida/agent/tools.py`, `researcher.py`
-**Implementation:** SABR interacts with the Worker's `core.scripts` via `/registry/list` and `/registry/register`. The agent's LLM prompt explicitly instructs it to check for registered skills on startup. A registered tool dynamically receives AiiDA execution context on the worker.
+**Implementation:** SABR interacts with the Worker's `core.scripts` and `repository/analysis/` via the REST bridge. The agent can now execute standardized analysis modules (e.g., `run_born`) on the worker to retrieve complex physical insights without needing to implement the parsing logic locally. This preserves the Brain-Body split while enabling sophisticated scientific reasoning.
 
 ### Observer Pattern (Streaming)
 **Location:** `src/sab_engines/aiida/router.py` (SSE Streams), `deps.py` (`log_step`)

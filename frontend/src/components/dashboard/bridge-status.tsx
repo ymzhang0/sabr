@@ -260,50 +260,48 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
       </div>
 
       <div className="space-y-2 text-xs text-zinc-700 dark:text-zinc-200">
-        <div className="rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-2 dark:border-zinc-700/80 dark:bg-zinc-800/65">
-          <p className="mb-1 text-zinc-500 dark:text-zinc-400">Remote Profile</p>
-          <div className="flex items-center gap-2">
-            <select
-              className="h-8 w-full rounded-lg border border-zinc-200/70 bg-zinc-50/80 px-2 text-[12px] text-zinc-800 outline-none transition-colors duration-200 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900/65 dark:text-zinc-100 dark:focus:border-zinc-500"
-              value={profileName === "unknown" ? "" : profileName}
-              disabled={!isOnline || switchProfileMutation.isPending || profileOptions.length === 0}
-              onChange={(event) => {
-                const next = event.target.value.trim();
-                if (!next || next === profileName || switchProfileMutation.isPending) {
-                  return;
-                }
-                onSwitchProfileStart?.();
-                switchProfileMutation.mutate(next);
-              }}
-              aria-label="Select remote AiiDA profile"
-            >
-              {profileOptions.length === 0 ? (
-                <option value="">No profiles</option>
-              ) : null}
-              {profileOptions.map((profile) => (
-                <option key={profile.name} value={profile.name}>
-                  {profile.name}
-                </option>
-              ))}
-            </select>
-            <button
-              onClick={() => setIsNewProfileDrawerOpen(true)}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-              title="Create New Profile"
-            >
-              <Plus className="h-4 w-4" />
-            </button>
-            {isNewProfileDrawerOpen && (
-              <NewProfileDrawer
-                isOpen={isNewProfileDrawerOpen}
-                onClose={() => setIsNewProfileDrawerOpen(false)}
-                onSuccess={() => { }}
-              />
-            )}
-            {switchProfileMutation.isPending ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500 dark:text-zinc-300" />
+        <div className="flex items-center gap-2 rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-1.5 dark:border-zinc-700/80 dark:bg-zinc-800/65">
+          <p className="shrink-0 text-zinc-500 dark:text-zinc-400">Profile</p>
+          <select
+            className="h-7 w-full rounded-lg border border-zinc-200/70 bg-zinc-50/80 px-2 text-[12px] text-zinc-800 outline-none transition-colors duration-200 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900/65 dark:text-zinc-100 dark:focus:border-zinc-500"
+            value={profileName === "unknown" ? "" : profileName}
+            disabled={!isOnline || switchProfileMutation.isPending || profileOptions.length === 0}
+            onChange={(event) => {
+              const next = event.target.value.trim();
+              if (!next || next === profileName || switchProfileMutation.isPending) {
+                return;
+              }
+              onSwitchProfileStart?.();
+              switchProfileMutation.mutate(next);
+            }}
+            aria-label="Select AiiDA profile"
+          >
+            {profileOptions.length === 0 ? (
+              <option value="">No profiles</option>
             ) : null}
-          </div>
+            {profileOptions.map((profile) => (
+              <option key={profile.name} value={profile.name}>
+                {profile.name}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => setIsNewProfileDrawerOpen(true)}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+            title="Create New Profile"
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+          {isNewProfileDrawerOpen && (
+            <NewProfileDrawer
+              isOpen={isNewProfileDrawerOpen}
+              onClose={() => setIsNewProfileDrawerOpen(false)}
+              onSuccess={() => { }}
+            />
+          )}
+          {switchProfileMutation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500 dark:text-zinc-300" />
+          ) : null}
         </div>
 
       </div>

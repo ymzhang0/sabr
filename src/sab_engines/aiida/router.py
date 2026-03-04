@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 from fastapi import APIRouter, File, HTTPException, Path as ApiPath, Query, Request, UploadFile
 from google import genai
@@ -25,6 +26,7 @@ from .chat import (
     serialize_chat_history,
     start_chat_turn,
 )
+from .bridge_client import bridge_endpoint
 from .client import BridgeAPIError, BridgeOfflineError, bridge_service, request_json
 from .presenters.node_view import (
     attach_tree_links as _attach_tree_links,
@@ -430,6 +432,53 @@ async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequ
     except BridgeAPIError as exc:
         detail = exc.payload if isinstance(exc.payload, dict) else {"error": exc.message, "details": exc.payload}
         raise HTTPException(status_code=max(400, int(exc.status_code or 502)), detail=detail) from exc
+
+
+@router.get("/process/events", tags=[WORKER_PROXY_TAG])
+async def worker_process_events(request: Request):
+    """Proxy SSE stream of real-time process state changes from the worker."""
+    worker_url = bridge_endpoint("/process/events")
+
+    async def _proxy_generator():
+        try:
+            async with httpx.AsyncClient(timeout=None, trust_env=False) as client:
+                async with client.stream("GET", worker_url) as response:
+                    if response.status_code != 200:
+                        yield {
+                            "event": "error",
+                            "data": json.dumps({"error": f"Worker returned {response.status_code}"}),
+                        }
+                        return
+                    buffer = ""
+                    async for chunk in response.aiter_text():
+                        buffer += chunk
+                        while "\n\n" in buffer:
+                            raw_event, buffer = buffer.split("\n\n", 1)
+                            lines = raw_event.strip().split("\n")
+                            event_name = "message"
+                            data_lines = []
+                            for line in lines:
+                                if line.startswith("event:"):
+                                    event_name = line[6:].strip()
+                                elif line.startswith("data:"):
+                                    data_lines.append(line[5:].strip())
+                                elif line.startswith(":"):
+                                    continue  # comment / keepalive
+                            if data_lines:
+                                yield {"event": event_name, "data": "\n".join(data_lines)}
+        except httpx.ConnectError:
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": "AiiDA Worker is offline"}),
+            }
+        except Exception as exc:
+            logger.warning(log_event("aiida.process_events.proxy.failed", error=str(exc)))
+            yield {
+                "event": "error",
+                "data": json.dumps({"error": str(exc)}),
+            }
+
+    return EventSourceResponse(_proxy_generator())
 
 
 @router.get("/process/{identifier}", tags=[WORKER_PROXY_TAG])
