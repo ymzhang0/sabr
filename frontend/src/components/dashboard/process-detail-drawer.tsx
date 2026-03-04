@@ -28,7 +28,7 @@ type ProcessTreeNodeViewProps = {
 
 type NodeLinksBlockProps = {
   title: string;
-  links: ProcessNodeLink[];
+  links: Record<string, ProcessNodeLink>;
   onAddContextNode: (node: FocusNode) => void;
   emptyText: string;
   compact?: boolean;
@@ -218,11 +218,11 @@ function formatLinkPreview(link: ProcessNodeLink): string | null {
   return null;
 }
 
-function NodeLinkRow({ link, onAddContextNode, compact = false }: { link: ProcessNodeLink; onAddContextNode: (node: FocusNode) => void; compact?: boolean }) {
+function NodeLinkRow({ portName, link, onAddContextNode, compact = false }: { portName: string; link: ProcessNodeLink; onAddContextNode: (node: FocusNode) => void; compact?: boolean }) {
   const previewText = formatLinkPreview(link);
   const nodeType = String(link.node_type || "Node");
   const typeIndicator = iconForNodeType(nodeType);
-  const linkLabel = String(link.link_label || "").trim() || `link_${link.pk}`;
+  const linkLabel = portName || String(link.link_label || "").trim() || `link_${link.pk}`;
   return (
     <div
       className={cn(
@@ -235,8 +235,9 @@ function NodeLinkRow({ link, onAddContextNode, compact = false }: { link: Proces
           {typeIndicator.icon}
         </span>
         <p className={cn("min-w-0 truncate text-xs text-zinc-700 dark:text-zinc-300", compact && "text-[11px]")}>
-          <span className="font-medium">{linkLabel}</span>
-          <span>: {link.label || nodeType}</span>
+          <span className="font-medium text-blue-600 dark:text-blue-400 font-mono">{linkLabel}</span>
+          <span className="text-zinc-500 dark:text-zinc-400 mx-1">:</span>
+          <span>{link.label || nodeType}</span>
           <span className="text-zinc-500 dark:text-zinc-400"> (</span>
           <button
             type="button"
@@ -271,13 +272,14 @@ function NodeLinksBlock({
           {title}
         </h4>
       ) : null}
-      {links.length === 0 ? (
+      {Object.keys(links).length === 0 ? (
         <p className={cn("px-2 py-1 text-xs text-zinc-500 dark:text-zinc-400", compact && "text-[11px]")}>{emptyText}</p>
       ) : (
         <div className="space-y-0.5">
-          {links.map((link, index) => (
+          {Object.entries(links).map(([portName, link]) => (
             <NodeLinkRow
-              key={`${title}-${link.pk}-${link.link_label}-${index}`}
+              key={`${title}-${link.pk}-${portName}`}
+              portName={portName}
               link={link}
               onAddContextNode={onAddContextNode}
               compact={compact}
@@ -341,10 +343,18 @@ function ProcessTreeNodeView({ label, node, depth = 0, onAddContextNode }: Proce
   const durationLabel = getDurationLabel(node);
   const nodeLabel = node.process_label || label || "Process";
   const RowIcon = children.length > 0 ? GitBranch : CircleDot;
-  const inputLinks = node.inputs ?? [];
-  const outputLinks = node.outputs ?? [];
-  const hasLinks = inputLinks.length > 0 || outputLinks.length > 0;
   const [isLinksOpen, setIsLinksOpen] = useState(false);
+  const [showVerbose, setShowVerbose] = useState(false);
+
+  const rawInputLinks = node.inputs ?? {};
+  const rawOutputLinks = node.outputs ?? {};
+  const directInputLinks = node.direct_inputs ?? rawInputLinks;
+  const directOutputLinks = node.direct_outputs ?? rawOutputLinks;
+
+  const inputLinks = showVerbose ? rawInputLinks : directInputLinks;
+  const outputLinks = showVerbose ? rawOutputLinks : directOutputLinks;
+
+  const hasLinks = Object.keys(rawInputLinks).length > 0 || Object.keys(rawOutputLinks).length > 0 || Object.keys(directInputLinks).length > 0 || Object.keys(directOutputLinks).length > 0;
 
   return (
     <div className={cn("space-y-1", depth > 0 && "ml-3 border-l border-zinc-200/80 pl-4 dark:border-zinc-800/80")}>
@@ -378,6 +388,17 @@ function ProcessTreeNodeView({ label, node, depth = 0, onAddContextNode }: Proce
 
       {hasLinks && isLinksOpen ? (
         <div className="ml-5 space-y-2">
+          <div className="flex items-center justify-end px-2">
+            <label className="flex cursor-pointer items-center gap-1.5 text-[10px] uppercase tracking-wider text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+              <input
+                type="checkbox"
+                className="h-3 w-3 rounded-sm border-zinc-300 text-blue-500 focus:ring-blue-500/50 dark:border-zinc-700 bg-transparent"
+                checked={showVerbose}
+                onChange={() => setShowVerbose((v) => !v)}
+              />
+              Verbose Links
+            </label>
+          </div>
           <NodeLinksBlock
             title="Inputs"
             links={inputLinks}
@@ -458,8 +479,8 @@ function renderProcessTree(
     process_label: summary.type || "ProcessNode",
     state: summary.state || "unknown",
     exit_status: summary.exit_status ?? null,
-    inputs: detail?.inputs ?? [],
-    outputs: detail?.outputs ?? [],
+    inputs: detail?.inputs ?? {},
+    outputs: detail?.outputs ?? {},
     children: {},
   };
 
@@ -475,6 +496,7 @@ function renderProcessTree(
 
 export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: ProcessDetailDrawerProps) {
   const isOpen = process !== null;
+  const [showVerbose, setShowVerbose] = useState(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -509,8 +531,14 @@ export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: Proc
   });
 
   const summaryState = detailQuery.data?.summary?.state ?? process?.process_state ?? process?.state ?? "unknown";
-  const detailInputs = detailQuery.data?.inputs ?? [];
-  const detailOutputs = detailQuery.data?.outputs ?? [];
+  const detailInputs = detailQuery.data?.inputs ?? {};
+  const detailOutputs = detailQuery.data?.outputs ?? {};
+  const detailDirectInputs = detailQuery.data?.direct_inputs ?? detailInputs;
+  const detailDirectOutputs = detailQuery.data?.direct_outputs ?? detailOutputs;
+
+  const currentInputs = showVerbose ? detailInputs : detailDirectInputs;
+  const currentOutputs = showVerbose ? detailOutputs : detailDirectOutputs;
+
   const showProcessTree =
     isWorkChainType(process?.node_type) ||
     isWorkChainType(detailQuery.data?.summary?.type) ||
@@ -567,9 +595,20 @@ export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: Proc
               <section className="space-y-2">
                 <div className="mb-1 flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Inputs & Outputs</h3>
-                  {detailQuery.isFetching ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
-                  ) : null}
+                  <div className="flex items-center gap-3">
+                    <label className="flex cursor-pointer items-center gap-1.5 text-xs text-zinc-500 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-200">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 rounded-sm border-zinc-300 text-blue-500 focus:ring-blue-500/50 bg-transparent dark:border-zinc-700"
+                        checked={showVerbose}
+                        onChange={() => setShowVerbose((v) => !v)}
+                      />
+                      Verbose Mode
+                    </label>
+                    {detailQuery.isFetching ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
+                    ) : null}
+                  </div>
                 </div>
                 {detailQuery.isError ? (
                   <p className="text-sm text-rose-500">Failed to load node links.</p>
@@ -580,7 +619,7 @@ export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: Proc
                     <NodeLinksAccordion
                       key={`calc-inputs-${process?.pk ?? "none"}`}
                       title="Inputs"
-                      links={detailInputs}
+                      links={currentInputs}
                       onAddContextNode={onAddContextNode}
                       emptyText="No incoming links reported."
                       defaultOpen
@@ -588,7 +627,7 @@ export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: Proc
                     <NodeLinksAccordion
                       key={`calc-outputs-${process?.pk ?? "none"}`}
                       title="Outputs"
-                      links={detailOutputs}
+                      links={currentOutputs}
                       onAddContextNode={onAddContextNode}
                       emptyText="No outgoing links reported."
                       defaultOpen

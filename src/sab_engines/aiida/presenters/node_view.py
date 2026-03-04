@@ -286,7 +286,17 @@ def _extract_directional_links(payload: dict[str, Any], direction: Literal["inpu
     links: list[dict[str, Any]] = []
     for key in direct_keys:
         if key in payload:
-            links.extend(_normalize_links_payload(payload.get(key), direction[:-1]))
+            raw_val = payload.get(key)
+            if not isinstance(raw_val, int):
+                links.extend(_normalize_links_payload(raw_val, direction[:-1]))
+
+    calc_block = payload.get("calculation")
+    if isinstance(calc_block, dict):
+        for key in direct_keys:
+            if key in calc_block:
+                raw_val = calc_block.get(key)
+                if not isinstance(raw_val, int):
+                    links.extend(_normalize_links_payload(raw_val, direction[:-1]))
 
     links_block = payload.get("links")
     if isinstance(links_block, dict):
@@ -328,18 +338,42 @@ def _collect_tree_node_ids(tree_root: Any) -> list[int]:
     return node_ids
 
 
+def _links_list_to_dict(links: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    counts: dict[str, int] = {}
+    for link in links:
+        label = str(link.get("link_label") or "unknown")
+        unique_label = f"{label}_{counts[label]}" if label in counts else label
+        counts[label] = counts.get(label, 0) + 1
+        result[unique_label] = link
+    return result
+
+
 def attach_tree_links(
     tree_root: Any,
-    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]],
+    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]],
 ) -> None:
     def walk(node: Any) -> None:
         if not isinstance(node, dict):
             return
         pk = _coerce_int(node.get("pk"))
         if pk is not None:
-            input_links, output_links = links_by_pk.get(pk, ([], []))
-            node["inputs"] = input_links
-            node["outputs"] = output_links
+            # Only enrich if we actually have linked data, to avoid discarding existing dictionaries from the worker if they are richer
+            input_links, output_links, direct_inputs, direct_outputs = links_by_pk.get(pk, (None, None, None, None))
+            if input_links:
+                node["inputs"] = _links_list_to_dict(input_links)
+            elif "inputs" not in node:
+                node["inputs"] = {}
+                
+            if output_links:
+                node["outputs"] = _links_list_to_dict(output_links)
+            elif "outputs" not in node:
+                node["outputs"] = {}
+                
+            if direct_inputs:
+                node["direct_inputs"] = _links_list_to_dict(direct_inputs)
+            if direct_outputs:
+                node["direct_outputs"] = _links_list_to_dict(direct_outputs)
         children = node.get("children")
         if isinstance(children, dict):
             for child in children.values():
@@ -574,7 +608,7 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
     node_payload_cache: dict[int, dict[str, Any] | None] = {}
     data_payload_cache: dict[int, dict[str, Any] | None] = {}
     repo_listing_cache: dict[int, list[str]] = {}
-    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]]]] = {}
+    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]] = {}
 
     if node_ids:
         summaries = await asyncio.gather(*[_fetch_node_payload(pk, node_payload_cache) for pk in node_ids])
@@ -582,25 +616,50 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
             if isinstance(node_payload, dict):
                 input_links = _extract_directional_links(node_payload, "inputs")
                 output_links = _extract_directional_links(node_payload, "outputs")
+                direct_inputs = node_payload.get("direct_inputs", [])
+                direct_outputs = node_payload.get("direct_outputs", [])
+                if isinstance(direct_inputs, dict):
+                    direct_inputs = _dedupe_links(_normalize_links_payload(direct_inputs, "inputs"))
+                if isinstance(direct_outputs, dict):
+                    direct_outputs = _dedupe_links(_normalize_links_payload(direct_outputs, "outputs"))
             else:
                 input_links = []
                 output_links = []
-            links_by_pk[pk] = (input_links, output_links)
+                direct_inputs = []
+                direct_outputs = []
+            links_by_pk[pk] = (input_links, output_links, direct_inputs, direct_outputs)
 
     detail_inputs = _extract_directional_links(detail, "inputs")
     detail_outputs = _extract_directional_links(detail, "outputs")
+    
+    # Process explicit direct inputs from the root detail if available
+    detail_direct_inputs = detail.get("direct_inputs", [])
+    detail_direct_outputs = detail.get("direct_outputs", [])
+    if isinstance(detail_direct_inputs, dict):
+        detail_direct_inputs = _dedupe_links(_normalize_links_payload(detail_direct_inputs, "inputs"))
+    if isinstance(detail_direct_outputs, dict):
+        detail_direct_outputs = _dedupe_links(_normalize_links_payload(detail_direct_outputs, "outputs"))
+        
     if root_pk is not None and root_pk in links_by_pk:
-        root_input_links, root_output_links = links_by_pk[root_pk]
+        root_input_links, root_output_links, root_direct_in, root_direct_out = links_by_pk[root_pk]
         detail_inputs = _dedupe_links(detail_inputs + root_input_links)
         detail_outputs = _dedupe_links(detail_outputs + root_output_links)
+        detail_direct_inputs = _dedupe_links(detail_direct_inputs + root_direct_in)
+        detail_direct_outputs = _dedupe_links(detail_direct_outputs + root_direct_out)
     else:
         detail_inputs = _dedupe_links(detail_inputs)
         detail_outputs = _dedupe_links(detail_outputs)
+        detail_direct_inputs = _dedupe_links(detail_direct_inputs)
+        detail_direct_outputs = _dedupe_links(detail_direct_outputs)
 
-    all_link_lists: list[list[dict[str, Any]]] = [detail_inputs, detail_outputs]
-    for input_links, output_links in links_by_pk.values():
+    all_link_lists: list[list[dict[str, Any]]] = [detail_inputs, detail_outputs, detail_direct_inputs, detail_direct_outputs]
+    for input_links, output_links, direct_in, direct_out in links_by_pk.values():
         all_link_lists.append(input_links)
         all_link_lists.append(output_links)
+        if direct_in:
+            all_link_lists.append(direct_in)
+        if direct_out:
+            all_link_lists.append(direct_out)
 
     await asyncio.gather(
         *[
@@ -615,8 +674,16 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
         ]
     )
 
-    detail["inputs"] = detail_inputs
-    detail["outputs"] = detail_outputs
+    if getattr(detail_inputs, "__len__", lambda: 0)() > 0 or "inputs" not in detail:
+        detail["inputs"] = _links_list_to_dict(detail_inputs)
+    if getattr(detail_outputs, "__len__", lambda: 0)() > 0 or "outputs" not in detail:
+        detail["outputs"] = _links_list_to_dict(detail_outputs)
+        
+    if getattr(detail_direct_inputs, "__len__", lambda: 0)() > 0 or "direct_inputs" not in detail:
+        detail["direct_inputs"] = _links_list_to_dict(detail_direct_inputs)
+    if getattr(detail_direct_outputs, "__len__", lambda: 0)() > 0 or "direct_outputs" not in detail:
+        detail["direct_outputs"] = _links_list_to_dict(detail_direct_outputs)
+
     if isinstance(tree_root, dict):
         attach_tree_links(tree_root, links_by_pk)
     return detail

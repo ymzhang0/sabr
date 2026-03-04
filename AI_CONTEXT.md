@@ -12,6 +12,7 @@ SABR operates as the **Brain**. It communicates with the AiiDA-Worker (**Body**)
 ### Presenter Pattern (Demonstration Layer)
 **Location:** `src/sab_engines/aiida/presenters/` (`node_view.py`, `workflow_view.py`)
 **Implementation:** Takes raw JSON payloads returned by the Worker's API and recursively formats/ flattens them for the React frontend. It handles previews, link dereferencing, and stripping complex nested attributes into primitive JSON dictionaries.
+- **Dual Link Support:** Enriches both `inputs`/`outputs` (Verbose provenance) and `direct_inputs`/`direct_outputs` (Concise port-based) payloads for presentation.
 
 ### Bridge/Proxy Pattern
 **Location:** `src/sab_engines/aiida/client.py`, `bridge_client.py`
@@ -30,5 +31,7 @@ User -> Next.js Frontend -> FastAPI SABR Routers -> SABR Auto-Agent -> Tool Call
 
 ## 3. Frontend Architecture Insights
 ### Submission Review & Draft Builders
-**Location:** `sabr/frontend/src/components/dashboard/submission-modal.tsx`
-**Implementation:** The submission UI dynamically reads AiiDA Builder outputs. To support WorkChains (like `pwrelaxworkchain`), specific port parameters like `metadata.options` (e.g., `workdir`, `account`, `resources`) must be mapped deeply into nested calculation namespaces (e.g., `base.pw.metadata.options`) instead of the root directory. Furthermore, form state hooks relying on `metadata` or `inputs` (like global code inheritance) require stable references, avoiding immediate resets upon edits.
+**Location:** `sabr/frontend/src/components/dashboard/submission-modal.tsx`, `process-detail-drawer.tsx`
+**Implementation:** The submission UI dynamically reads AiiDA Builder outputs. To support WorkChains (like `pwrelaxworkchain`), specific port parameters like `metadata.options` (e.g., `workdir`, `account`, `resources`) must be mapped deeply into nested calculation namespaces (e.g., `base.pw.metadata.options`) instead of the root directory. 
+- **Process Detail Dual-View:** `ProcessDetailDrawer` and `ProcessTreeNodeView` implement a "Verbose Mode" toggle. By default, they display `direct_inputs` (clean port names) and fallback to the full provenance `inputs` graph when toggled.
+- **State management:** Form state hooks relying on `metadata` or `inputs` (like global code inheritance) require stable references, avoiding immediate resets upon edits.

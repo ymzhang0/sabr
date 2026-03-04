@@ -188,8 +188,10 @@ export type ProcessTreeNode = {
   process_label: string;
   state: string;
   exit_status: number | null;
-  inputs?: ProcessNodeLink[];
-  outputs?: ProcessNodeLink[];
+  inputs?: Record<string, ProcessNodeLink>;
+  outputs?: Record<string, ProcessNodeLink>;
+  direct_inputs?: Record<string, ProcessNodeLink>;
+  direct_outputs?: Record<string, ProcessNodeLink>;
   children: Record<string, ProcessTreeNode>;
 };
 
@@ -233,8 +235,10 @@ export type ProcessDetailResponse = {
     state?: string;
     exit_status?: number | null;
   };
-  inputs?: ProcessNodeLink[];
-  outputs?: ProcessNodeLink[];
+  inputs?: Record<string, ProcessNodeLink>;
+  outputs?: Record<string, ProcessNodeLink>;
+  direct_inputs?: Record<string, ProcessNodeLink>;
+  direct_outputs?: Record<string, ProcessNodeLink>;
   workchain?: {
     provenance_tree?: ProcessTreeNode;
   };
