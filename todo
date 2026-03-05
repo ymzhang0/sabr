@@ -1,4 +1,4 @@
-i notice that you've put the bridge_service:AiiDABridgeService inside sab_core which is a bit unsettling.
+i notice that you have put the bridge_service:AiiDABridgeService inside sab_core which is a bit unsettling.
 sab_core defined the framework of this kind of agent and aiida is one of the implementation.
 would it be better if the code related to aiida is separated from the core and be be put inside engines/
 or another specifically created new folder if necessary? done
@@ -102,3 +102,6 @@ AiiDA 的核心是数据溯源（Provenance）。
 优化方案：在任务预览或详情中，增加一个简单的 溯源树状图。
 
 丝滑点：你可以一眼看到这个结构是从哪个 Parent 节点优化过来的，或者是通过哪个初始 CIF 文件导入的。这能极大减少你在高通量计算中迷失方向的概率。
+
+
+refresh automatically

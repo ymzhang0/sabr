@@ -74,6 +74,10 @@ from .schemas import (
     NodeHoverMetadataResponse,
     InfrastructureComputer,
     ParseInfrastructureRequest,
+    UserInfoResponse,
+    ProfileSetupRequest,
+    CodeSetupRequest,
+    CodeDetailedResponse,
 )
 
 FRONTEND_TAG = "AiiDA-Frontend-API"
@@ -352,6 +356,24 @@ async def setup_management_infrastructure(payload: dict[str, Any]):
     """Proxy to setup a new computer, authentication, and code."""
     try:
         return await bridge_service.setup_infrastructure(payload)
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+
+@router.get("/management/profiles/current-user-info", response_model=UserInfoResponse, tags=[WORKER_PROXY_TAG])
+async def get_current_user_info():
+    """Proxy to fetch current user information from the worker."""
+    try:
+        return await bridge_service.get_current_user_info()
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+
+@router.post("/management/profiles/setup", tags=[WORKER_PROXY_TAG])
+async def setup_profile(payload: ProfileSetupRequest):
+    """Proxy to setup a new AiiDA profile on the worker."""
+    try:
+        return await bridge_service.setup_profile(payload.model_dump())
     except Exception as exc:
         _raise_worker_http_error(exc)
 
@@ -662,15 +684,33 @@ async def frontend_processes(
 
 @router.get("/frontend/ssh-hosts", tags=[FRONTEND_TAG])
 async def frontend_ssh_hosts():
-    """
-    Proxy the worker's SSH config endpoint to list available hosts.
-    """
     try:
         hosts = await bridge_service.get_ssh_config()
         return {"items": hosts}
     except Exception as error:
         logger.exception(log_event("aiida.frontend.ssh_hosts.failed", error=str(error)))
         raise HTTPException(status_code=500, detail="Failed to fetch SSH hosts")
+
+@router.post("/frontend/infrastructure/setup-code", tags=[FRONTEND_TAG])
+async def frontend_setup_code(payload: CodeSetupRequest):
+    """Proxy code setup to AIIDA worker."""
+    logger.info(log_event("aiida.frontend.setup_code.request", computer=payload.computer_label, label=payload.label))
+    try:
+        response = await bridge_service.setup_code(payload)
+        logger.info(log_event("aiida.frontend.setup_code.success", pk=response.get("pk")))
+        return response
+    except Exception as exc:
+        logger.error(log_event("aiida.frontend.setup_code.failed", error=str(exc)))
+        _raise_worker_http_error(exc)
+
+@router.get("/frontend/infrastructure/computer/{computer_label}/codes", response_model=list[CodeDetailedResponse], tags=[FRONTEND_TAG])
+async def frontend_get_computer_codes(computer_label: str):
+    """Proxy fetching detailed computer codes to AIIDA worker."""
+    try:
+        response = await bridge_service.get_computer_codes(computer_label)
+        return response
+    except Exception as exc:
+        _raise_worker_http_error(exc)
 
 
 @router.post("/frontend/parse-infrastructure", tags=[FRONTEND_TAG])

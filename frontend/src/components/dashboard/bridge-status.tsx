@@ -137,12 +137,14 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
     mutationFn: switchBridgeProfile,
     onSuccess: async () => {
       await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["bootstrap"] }),
         queryClient.invalidateQueries({ queryKey: ["aiida-bridge-status"] }),
         queryClient.invalidateQueries({ queryKey: ["aiida-bridge-profiles"] }),
         queryClient.invalidateQueries({ queryKey: ["aiida-bridge-resources"] }),
         // Invalidate process and groups to get the new snapshot
         queryClient.invalidateQueries({ queryKey: ["processes"] }),
-        queryClient.invalidateQueries({ queryKey: ["groups"] })
+        queryClient.invalidateQueries({ queryKey: ["groups"] }),
+        queryClient.invalidateQueries({ queryKey: ["aiida-infrastructure"] })
       ]);
     },
     onSettled: () => {

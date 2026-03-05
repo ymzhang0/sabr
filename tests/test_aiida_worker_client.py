@@ -60,3 +60,38 @@ async def test_inspect_infrastructure_uses_cache(monkeypatch: pytest.MonkeyPatch
     assert first == second
     assert first["profile"] == "default"
     assert first["code_targets"] == ["pw@localhost"]
+
+
+@pytest.mark.anyio
+async def test_get_current_user_info(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")
+    user_info = {
+        "first_name": "John",
+        "last_name": "Doe",
+        "email": "john.doe@example.com",
+        "institution": "Test Inst",
+    }
+
+    async def _fake_fetch_json(path: str, **kwargs):
+        assert path == "/management/profiles/current-user-info"
+        return user_info
+
+    monkeypatch.setattr(client, "_fetch_json", _fake_fetch_json)
+    result = await client.get_current_user_info()
+    assert result == user_info
+
+
+@pytest.mark.anyio
+async def test_setup_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")
+    payload = {"profile_name": "new_profile"}
+
+    async def _fake_post_json(path: str, payload: dict, **kwargs):
+        assert path == "/management/profiles/setup"
+        assert payload["profile_name"] == "new_profile"
+        return {"status": "success", "profile_name": "new_profile"}
+
+    monkeypatch.setattr(client, "_post_json", _fake_post_json)
+    result = await client.setup_profile(payload)
+    assert result["status"] == "success"
+    assert result["profile_name"] == "new_profile"

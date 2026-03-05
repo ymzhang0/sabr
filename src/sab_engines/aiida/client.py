@@ -20,6 +20,7 @@ from loguru import logger
 
 from src.sab_core.logging_utils import log_event
 from src.sab_engines.aiida.config import aiida_engine_settings
+from .schemas import CodeSetupRequest
 
 DEFAULT_BRIDGE_URL = aiida_engine_settings.default_bridge_url
 OFFLINE_WORKER_MESSAGE = aiida_engine_settings.offline_worker_message
@@ -306,6 +307,20 @@ class AiiDAWorkerClient:
             return {"current_profile": None, "default_profile": None, "profiles": []}
         return payload
 
+    async def get_current_user_info(self) -> dict[str, Any]:
+        payload = await self._fetch_json(
+            "/management/profiles/current-user-info",
+            timeout_seconds=max(5.0, self._request_timeout_seconds),
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    async def setup_profile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return await self._post_json(
+            "/management/profiles/setup",
+            payload=payload,
+            timeout_seconds=max(30.0, self._request_timeout_seconds),
+        )
+
     async def switch_profile(self, profile: str) -> dict[str, Any]:
         payload = await self._post_json(
             "/management/profiles/switch",
@@ -365,6 +380,22 @@ class AiiDAWorkerClient:
             payload=config,
             timeout_seconds=max(10.0, self._request_timeout_seconds),
         )
+
+    async def setup_code(self, payload: CodeSetupRequest) -> dict[str, Any]:
+        """Create a new code on a computer."""
+        return await self._post_json(
+            "/management/infrastructure/setup-code",
+            payload=payload.model_dump(),
+            timeout_seconds=max(10.0, self._request_timeout_seconds),
+        )
+
+    async def get_computer_codes(self, computer_label: str) -> list[dict[str, Any]]:
+        """Fetch detailed codes for a specific computer."""
+        payload = await self._fetch_json(
+            f"/management/infrastructure/computer/{computer_label}/codes",
+            timeout_seconds=max(8.0, self._request_timeout_seconds),
+        )
+        return payload if isinstance(payload, list) else []
 
     async def get_ssh_config(self) -> list[dict[str, Any]]:
         """Fetch parsed SSH hosts from ~/.ssh/config via aiida-worker."""

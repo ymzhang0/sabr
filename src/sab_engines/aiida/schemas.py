@@ -125,3 +125,41 @@ class InfrastructureComputer(BaseModel):
 class ParseInfrastructureRequest(BaseModel):
     text: str = Field(..., min_length=1)
     ssh_host_details: dict[str, Any] | None = None
+class UserInfoResponse(BaseModel):
+    first_name: str
+    last_name: str
+    email: str
+    institution: str
+
+
+class ProfileSetupRequest(BaseModel):
+    profile_name: str
+    first_name: str
+    last_name: str
+    email: str
+    institution: str
+    filepath: str
+    backend: str = "core.sqlite_dos"
+    set_as_default: bool = True
+
+class CodeSetupRequest(BaseModel):
+    computer_label: str
+    label: str
+    description: str | None = None
+    default_calc_job_plugin: str
+    remote_abspath: str
+    prepend_text: str | None = None
+    append_text: str | None = None
+    with_mpi: bool = True
+    use_double_quotes: bool = False
+
+class CodeDetailedResponse(BaseModel):
+    pk: int
+    label: str
+    description: str | None = None
+    default_calc_job_plugin: str
+    remote_abspath: str
+    prepend_text: str | None = None
+    append_text: str | None = None
+    with_mpi: bool
+    use_double_quotes: bool

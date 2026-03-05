@@ -27,9 +27,10 @@ import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
-import { QuickAddModal } from "@/components/dashboard/quick-add-modal";
 import { cn } from "@/lib/utils";
 import { getInfrastructure } from "@/lib/api";
+import { QuickAddModal } from "@/components/dashboard/quick-add-modal";
+import { CodeSetupModal } from "@/components/dashboard/code-setup-modal";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GroupItem, ProcessItem, InfrastructureComputer } from "@/types/aiida";
 
@@ -475,6 +476,8 @@ export function Sidebar({
   const [isGroupsExpanded, setIsGroupsExpanded] = useState(true);
   const [isInfraExpanded, setIsInfraExpanded] = useState(false);
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
+  const [isCodeSetupOpen, setIsCodeSetupOpen] = useState(false);
+  const [selectedComputerLabel, setSelectedComputerLabel] = useState("");
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [expandedComputers, setExpandedComputers] = useState<Set<number>>(new Set());
 
@@ -704,7 +707,7 @@ export function Sidebar({
                   e.preventDefault();
                   setContextMenuComputer({ pk: computer.pk, label: computer.label, x: e.pageX, y: e.pageY });
                 }}
-                className="flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+                className="group flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
               >
                 <div className="flex items-center gap-2 overflow-hidden">
                   <ChevronRight className={cn("h-3.5 w-3.5 transition-transform shrink-0", isExpanded && "rotate-90")} />
@@ -712,6 +715,17 @@ export function Sidebar({
                   <Cpu className="h-4 w-4 shrink-0 text-zinc-400" />
                   <span className="truncate font-medium">{computer.label}</span>
                 </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedComputerLabel(computer.label);
+                    setIsCodeSetupOpen(true);
+                  }}
+                  className="p-1 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover:opacity-100"
+                  title="Add Code"
+                >
+                  <Plus className="h-3.5 w-3.5 text-zinc-500" />
+                </button>
               </div>
               {isExpanded && (
                 <div className="flex flex-col gap-1 ml-4 mt-1">
@@ -802,18 +816,26 @@ export function Sidebar({
           </div>
         </div>
 
-        {/* Groups Section */}
         <div className="flex flex-col gap-1 shrink-0">
-          <button
-            onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
-            className="flex items-center justify-between group/groupbtn"
-          >
-            <div className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
+          <div className="flex items-center justify-between group/groupbtn">
+            <button
+              onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
+              className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
+            >
               <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
               Groups
-            </div>
-            <Plus className="h-3.5 w-3.5 text-zinc-400 opacity-0 transition-opacity group-hover/groupbtn:opacity-100" />
-          </button>
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const label = window.prompt("Enter new group name:");
+                if (label) onCreateGroup(label);
+              }}
+              className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/groupbtn:opacity-100"
+            >
+              <Plus className="h-3.5 w-3.5 text-zinc-400" />
+            </button>
+          </div>
 
           {isGroupsExpanded && (
             <div className="flex flex-col gap-1 mt-1 max-h-[300px] overflow-y-auto minimal-scrollbar">
@@ -1089,6 +1111,15 @@ export function Sidebar({
       <QuickAddModal
         isOpen={isQuickAddOpen}
         onClose={() => setIsQuickAddOpen(false)}
+        onSuccess={() => {
+          void queryClient.invalidateQueries({ queryKey: ["aiida-infrastructure"] });
+        }}
+      />
+
+      <CodeSetupModal
+        isOpen={isCodeSetupOpen}
+        onClose={() => setIsCodeSetupOpen(false)}
+        computerLabel={selectedComputerLabel}
         onSuccess={() => {
           void queryClient.invalidateQueries({ queryKey: ["aiida-infrastructure"] });
         }}

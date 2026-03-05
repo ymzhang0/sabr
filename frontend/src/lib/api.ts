@@ -27,9 +27,9 @@ import type {
   ProfileSetupRequest,
 } from "@/types/aiida";
 
-const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
-const FRONTEND_API_PREFIX = "/api/aiida/frontend";
-const AIIDA_API_PREFIX = "/api/aiida";
+export const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
+export const FRONTEND_API_PREFIX = "/api/aiida/frontend";
+export const AIIDA_API_PREFIX = "/api/aiida";
 const frontendBaseURL = `${API_BASE_URL}${FRONTEND_API_PREFIX}`;
 const aiidaBaseURL = `${API_BASE_URL}${AIIDA_API_PREFIX}`;
 
