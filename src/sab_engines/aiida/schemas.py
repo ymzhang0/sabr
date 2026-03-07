@@ -17,6 +17,24 @@ class FrontendStopChatRequest(BaseModel):
     turn_id: int | None = None
 
 
+class FrontendChatSessionCreateRequest(BaseModel):
+    title: str | None = None
+    snapshot: dict[str, Any] | None = None
+    archive_session_id: str | None = None
+    project_id: str | None = None
+
+
+class FrontendChatSessionUpdateRequest(BaseModel):
+    title: str | None = None
+    tags: list[str] | None = None
+    snapshot: dict[str, Any] | None = None
+
+
+class FrontendChatProjectCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    root_path: str | None = None
+
+
 class SubmissionDraftRequest(BaseModel):
     draft: dict[str, Any] | list[dict[str, Any]] = Field(default_factory=dict)
 
@@ -102,6 +120,13 @@ class NodeHoverMetadataResponse(BaseModel):
     formula: str | None = None
     spacegroup: str | None = None
     node_type: str = "Unknown"
+
+
+class NodeScriptResponse(BaseModel):
+    pk: int
+    node_type: str
+    language: str = "python"
+    script: str
 
 
 class InfrastructureComputerCode(BaseModel):

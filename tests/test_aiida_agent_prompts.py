@@ -7,6 +7,8 @@ from src.sab_engines.aiida.agent.prompts import (
 def test_build_system_prompt_includes_submission_draft_required_rule() -> None:
     prompt = build_system_prompt()
     assert SUBMISSION_DRAFT_REQUIRED_RULE in prompt
+    assert "PROFILE DISCIPLINE" in prompt
+    assert "At most one automatic profile switch is allowed in a turn" in prompt
 
 
 def test_build_system_prompt_injects_skill_overlays_and_htp_constraints() -> None:

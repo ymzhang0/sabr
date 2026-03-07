@@ -30,6 +30,13 @@ _bridge_call_listener: contextvars.ContextVar[BridgeCallListener | None] = conte
     "aiida_bridge_call_listener",
     default=None,
 )
+WORKSPACE_PATH_HEADER = "X-SABR-Active-Workspace-Path"
+SESSION_ID_HEADER = "X-SABR-Session-Id"
+PROJECT_ID_HEADER = "X-SABR-Project-Id"
+_bridge_request_headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "aiida_bridge_request_headers",
+    default=None,
+)
 
 BridgeConnectionState = Literal["online", "offline"]
 
@@ -115,6 +122,20 @@ def _extract_error_payload(response: httpx.Response) -> tuple[str, Any]:
     return message, payload
 
 
+def _merge_request_headers(headers: Mapping[str, Any] | None = None) -> dict[str, str] | None:
+    merged: dict[str, str] = {}
+    scoped_headers = _bridge_request_headers.get()
+    for payload in (scoped_headers, headers):
+        if not payload:
+            continue
+        for key, value in payload.items():
+            cleaned_key = str(key or "").strip()
+            cleaned_value = str(value or "").strip()
+            if cleaned_key and cleaned_value:
+                merged[cleaned_key] = cleaned_value
+    return merged or None
+
+
 class AiiDAWorkerClient:
     def __init__(
         self,
@@ -163,6 +184,7 @@ class AiiDAWorkerClient:
         *,
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
+        headers: Mapping[str, Any] | None = None,
         timeout: float = 10.0,
         retries: int | None = None,
     ) -> Any:
@@ -170,11 +192,18 @@ class AiiDAWorkerClient:
         endpoint = self.bridge_endpoint(path)
         _emit_bridge_call_event(method_upper, path)
         retry_budget = self._resolve_retry_budget(method_upper, retries)
+        request_headers = _merge_request_headers(headers)
 
         for attempt in range(retry_budget + 1):
             try:
                 async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                    response = await client.request(method_upper, endpoint, params=params, json=json)
+                    response = await client.request(
+                        method_upper,
+                        endpoint,
+                        params=params,
+                        json=json,
+                        headers=request_headers,
+                    )
             except httpx.ConnectError as exc:
                 self._mark_offline()
                 if attempt < retry_budget:
@@ -214,6 +243,53 @@ class AiiDAWorkerClient:
 
         raise BridgeAPIError(status_code=0, message="Unknown worker request failure", payload={"path": path})
 
+    async def request_multipart(
+        self,
+        method: str,
+        path: str,
+        *,
+        files: Mapping[str, Any] | None = None,
+        data: Mapping[str, Any] | None = None,
+        headers: Mapping[str, Any] | None = None,
+        timeout: float = 60.0,
+    ) -> Any:
+        method_upper = method.upper()
+        endpoint = self.bridge_endpoint(path)
+        _emit_bridge_call_event(method_upper, path)
+        request_headers = _merge_request_headers(headers)
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+                response = await client.request(
+                    method_upper,
+                    endpoint,
+                    files=files,
+                    data=data,
+                    headers=request_headers,
+                )
+        except httpx.ConnectError as exc:
+            self._mark_offline()
+            raise BridgeOfflineError() from exc
+        except httpx.RequestError as exc:
+            self._mark_offline()
+            raise BridgeAPIError(status_code=0, message=str(exc), payload={"error": str(exc)}) from exc
+
+        if response.status_code >= 400:
+            message, payload = _extract_error_payload(response)
+            raise BridgeAPIError(status_code=response.status_code, message=message, payload=payload)
+
+        self._mark_online()
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise BridgeAPIError(
+                status_code=response.status_code,
+                message="Invalid JSON response",
+                payload=response.text,
+            ) from exc
+
+        raise BridgeAPIError(status_code=0, message="Unknown worker request failure", payload={"path": path})
+
     def request_json_sync(
         self,
         method: str,
@@ -221,6 +297,7 @@ class AiiDAWorkerClient:
         *,
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
+        headers: Mapping[str, Any] | None = None,
         timeout: float = 10.0,
         retries: int | None = None,
     ) -> Any:
@@ -228,11 +305,18 @@ class AiiDAWorkerClient:
         endpoint = self.bridge_endpoint(path)
         _emit_bridge_call_event(method_upper, path)
         retry_budget = self._resolve_retry_budget(method_upper, retries)
+        request_headers = _merge_request_headers(headers)
 
         for attempt in range(retry_budget + 1):
             try:
                 with httpx.Client(timeout=timeout, trust_env=False) as client:
-                    response = client.request(method_upper, endpoint, params=params, json=json)
+                    response = client.request(
+                        method_upper,
+                        endpoint,
+                        params=params,
+                        json=json,
+                        headers=request_headers,
+                    )
             except httpx.ConnectError as exc:
                 self._mark_offline()
                 if attempt < retry_budget:
@@ -854,12 +938,24 @@ def reset_bridge_call_listener(token: contextvars.Token[BridgeCallListener | Non
     _bridge_call_listener.reset(token)
 
 
+def set_bridge_request_headers(
+    headers: Mapping[str, Any] | None,
+) -> contextvars.Token[dict[str, str] | None]:
+    normalized_headers = _merge_request_headers(headers)
+    return _bridge_request_headers.set(normalized_headers)
+
+
+def reset_bridge_request_headers(token: contextvars.Token[dict[str, str] | None]) -> None:
+    _bridge_request_headers.reset(token)
+
+
 async def request_json(
     method: str,
     path: str,
     *,
     params: Mapping[str, Any] | None = None,
     json: Mapping[str, Any] | None = None,
+    headers: Mapping[str, Any] | None = None,
     timeout: float = 10.0,
     retries: int | None = None,
 ) -> Any:
@@ -868,6 +964,7 @@ async def request_json(
         path,
         params=params,
         json=json,
+        headers=headers,
         timeout=timeout,
         retries=retries,
     )
@@ -879,6 +976,7 @@ def request_json_sync(
     *,
     params: Mapping[str, Any] | None = None,
     json: Mapping[str, Any] | None = None,
+    headers: Mapping[str, Any] | None = None,
     timeout: float = 10.0,
     retries: int | None = None,
 ) -> Any:
@@ -887,6 +985,7 @@ def request_json_sync(
         path,
         params=params,
         json=json,
+        headers=headers,
         timeout=timeout,
         retries=retries,
     )

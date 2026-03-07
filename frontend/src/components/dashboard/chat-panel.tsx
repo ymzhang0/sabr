@@ -1,6 +1,8 @@
-import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, PlugZap, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, Pin, PlugZap, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
 import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ActionToolbar } from "@/components/dashboard/action-toolbar";
 import {
   SubmissionModal,
   type SubmissionModalState,
@@ -10,9 +12,18 @@ import {
 import { ThinkingIndicator, type ProcessLogEntry } from "@/components/dashboard/thinking-indicator";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
-import { cancelPendingSubmission, getNodeHoverMetadata, submitPreviewDraft } from "@/lib/api";
+import { cancelPendingSubmission, getActiveSpecializations, getNodeHoverMetadata, submitPreviewDraft } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import type { ChatMessage, FocusNode, NodeHoverMetadataResponse, ResourceAttachment } from "@/types/aiida";
+import type {
+  ActiveSpecializationsResponse,
+  ChatMessage,
+  FocusNode,
+  NodeHoverMetadataResponse,
+  ResourceAttachment,
+  SessionParameter,
+  SpecializationAction,
+  SpecializationSummary,
+} from "@/types/aiida";
 
 type ChatTurn = {
   turnId: number;
@@ -46,6 +57,36 @@ type NodeHoverMetadataState = {
   data: NodeHoverMetadataResponse | null;
 };
 
+type RecoveryPlanIssue = {
+  type: string;
+  message: string;
+  port: string | null;
+  stage: string | null;
+  resourceDomain: string | null;
+};
+
+type RecoveryPlanAction = {
+  action: string;
+  reason: string;
+  toolHints: string[];
+};
+
+type RecoveryPlanPayload = {
+  status: string | null;
+  summary: string | null;
+  issues: RecoveryPlanIssue[];
+  missingPorts: string[];
+  resourceDomains: string[];
+  recommendedActions: RecoveryPlanAction[];
+  userDecisionRequired: boolean;
+};
+
+type RecoveryPlanState = {
+  status: string | null;
+  nextStep: string | null;
+  plan: RecoveryPlanPayload | null;
+};
+
 const SUBMISSION_DRAFT_TAG = "[SUBMISSION_DRAFT]";
 const SUBMISSION_DRAFT_JSON_GLOBAL_REGEX = /(?:\[SUBMISSION_DRAFT\])\s*(?:```(?:json)?\s*)?(\{[\s\S]*?\})(?:\s*```)?/gis;
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
@@ -57,72 +98,53 @@ const FRIENDLY_TOOL_STEP_MAP: Record<string, string> = {
   submit_job: "Submitting calculation to cluster...",
   validate_job: "Validating submission...",
 };
-const STRUCTURE_NODE_TYPE = "StructureData";
 
-type QuickActionKind = "relax" | "band" | "full" | "pseudo" | "generic";
-
-function inferQuickActionKind(label: string, prompt: string): QuickActionKind {
-  const text = `${label} ${prompt}`.toLowerCase();
-  if (
-    text.includes("relax+band") ||
-    text.includes("then use the optimized structure") ||
-    (text.includes("vc-relax") && text.includes("band structure"))
-  ) {
-    return "full";
+function normalizeSlashCommand(value: string | null | undefined): string {
+  const cleaned = String(value || "").trim();
+  if (!cleaned) {
+    return "";
   }
-  if (
-    text.includes("structure relaxation") ||
-    text.includes("vc-relax") ||
-    text.includes("几何优化")
-  ) {
-    return "relax";
-  }
-  if (text.includes("band structure")) {
-    return "band";
-  }
-  if (text.includes("pseudo") || text.includes("pseudopotential")) {
-    return "pseudo";
-  }
-  return "generic";
+  return cleaned.startsWith("/") ? cleaned.toLowerCase() : `/${cleaned.toLowerCase()}`;
 }
 
-function quickActionIcon(kind: QuickActionKind): string {
-  if (kind === "relax") {
-    return "🧪";
+
+function buildActionIntent(action: SpecializationAction, note = ""): string {
+  const base = action.prompt.trim();
+  const extra = note.trim();
+  if (!extra) {
+    return base;
   }
-  if (kind === "band") {
-    return "📈";
-  }
-  if (kind === "full") {
-    return "🔄";
-  }
-  if (kind === "pseudo") {
-    return "📚";
-  }
-  return "⚙️";
+  return `${base}\n\nAdditional user note: ${extra}`;
 }
 
-function quickActionRequiresStructure(kind: QuickActionKind): boolean {
-  return kind === "relax" || kind === "band" || kind === "full";
-}
 
-function buildQuickActionIntent(
-  label: string,
-  prompt: string,
-  structurePks: number[],
-): string {
-  const kind = inferQuickActionKind(label, prompt);
-  if (kind !== "relax") {
-    return prompt;
+function filterSlashSections(
+  payload: ActiveSpecializationsResponse | undefined,
+  query: string,
+): Array<{ id: string; label: string; items: SpecializationAction[] }> {
+  if (!payload) {
+    return [];
   }
-  if (structurePks.length === 0) {
-    return prompt;
-  }
-  if (/#\d+|\bpk\s*\d+\b/i.test(prompt)) {
-    return prompt;
-  }
-  const targets = structurePks.map((pk) => `#${pk}`).join(", ");
-  return `${prompt.trim()} for structures ${targets}`;
+  const search = query.trim().toLowerCase();
+  return payload.slash_menu
+    .map((section) => {
+      const items = section.items.filter((item) => {
+        if (!search) {
+          return true;
+        }
+        return [
+          item.command ?? "",
+          item.label,
+          item.description ?? "",
+          item.specialization_label,
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(search);
+      });
+      return { ...section, items };
+    })
+    .filter((section) => section.items.length > 0);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -338,6 +360,118 @@ function extractSubmissionDraft(payload: Record<string, unknown> | null | undefi
   }
 
   return null;
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  value.forEach((item) => {
+    const text = String(item ?? "").trim();
+    if (!text) {
+      return;
+    }
+    const key = text.toLowerCase();
+    if (seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    normalized.push(text);
+  });
+  return normalized;
+}
+
+function normalizeRecoveryPlanPayload(rawPlan: Record<string, unknown> | null): RecoveryPlanPayload | null {
+  if (!rawPlan) {
+    return null;
+  }
+  const issues = toRecordArray(rawPlan.issues)
+    .map((item) => {
+      const message = typeof item.message === "string" ? item.message.trim() : "";
+      if (!message) {
+        return null;
+      }
+      return {
+        type: typeof item.type === "string" && item.type.trim() ? item.type.trim() : "issue",
+        message,
+        port: typeof item.port === "string" && item.port.trim() ? item.port.trim() : null,
+        stage: typeof item.stage === "string" && item.stage.trim() ? item.stage.trim() : null,
+        resourceDomain:
+          typeof item.resource_domain === "string" && item.resource_domain.trim()
+            ? item.resource_domain.trim()
+            : null,
+      } satisfies RecoveryPlanIssue;
+    })
+    .filter((item): item is RecoveryPlanIssue => Boolean(item));
+
+  const recommendedActions = toRecordArray(rawPlan.recommended_actions)
+    .map((item) => {
+      const action = typeof item.action === "string" ? item.action.trim() : "";
+      if (!action) {
+        return null;
+      }
+      return {
+        action,
+        reason: typeof item.reason === "string" ? item.reason.trim() : "",
+        toolHints: normalizeStringList(item.tool_hints),
+      } satisfies RecoveryPlanAction;
+    })
+    .filter((item): item is RecoveryPlanAction => Boolean(item));
+
+  return {
+    status: typeof rawPlan.status === "string" && rawPlan.status.trim() ? rawPlan.status.trim() : null,
+    summary: typeof rawPlan.summary === "string" && rawPlan.summary.trim() ? rawPlan.summary.trim() : null,
+    issues,
+    missingPorts: normalizeStringList(rawPlan.missing_ports),
+    resourceDomains: normalizeStringList(rawPlan.resource_domains),
+    recommendedActions,
+    userDecisionRequired: Boolean(rawPlan.user_decision_required),
+  };
+}
+
+function extractRecoveryPlanState(payload: Record<string, unknown> | null | undefined): RecoveryPlanState {
+  const root = asRecord(payload);
+  if (!root) {
+    return { status: null, nextStep: null, plan: null };
+  }
+
+  const dataPayload = asRecord(root.data_payload);
+  const submissionDraft = extractSubmissionDraft(root);
+  const draftMeta = submissionDraft ? asRecord(submissionDraft.submissionDraft.meta) : null;
+  const candidates = [root, dataPayload].filter((item): item is Record<string, unknown> => Boolean(item));
+
+  let status: string | null = null;
+  let nextStep: string | null = null;
+  let rawPlan: Record<string, unknown> | null = null;
+
+  for (const candidate of candidates) {
+    if (status === null && typeof candidate.status === "string" && candidate.status.trim()) {
+      status = candidate.status.trim();
+    }
+    if (nextStep === null && typeof candidate.next_step === "string" && candidate.next_step.trim()) {
+      nextStep = candidate.next_step.trim();
+    }
+    if (rawPlan === null) {
+      rawPlan = asRecord(candidate.recovery_plan);
+    }
+    if (rawPlan === null) {
+      const details = asRecord(candidate.details);
+      rawPlan = asRecord(details?.recovery_plan);
+    }
+  }
+
+  if (rawPlan === null) {
+    rawPlan = asRecord(draftMeta?.recovery_plan);
+  }
+
+  const plan = normalizeRecoveryPlanPayload(rawPlan);
+  if (!status && plan?.status) {
+    status = plan.status;
+  }
+
+  return { status, nextStep, plan };
 }
 
 function mergeSubmissionDraftBuffer(previous: string | undefined, fragment: string): string {
@@ -721,7 +855,7 @@ function parseToolLine(line: string): { toolName: string; args?: string | null; 
     };
   }
 
-  const stepMatch = cleaned.match(/^⚙️\s*\[Step\]:\s*(.+)$/i) || cleaned.match(/^Step:\s*(.+)$/i);
+  const stepMatch = cleaned.match(/^\u2699\uFE0F\s*\[Step\]:\s*(.+)$/i) || cleaned.match(/^Step:\s*(.+)$/i);
   if (stepMatch) {
     return {
       toolName: stepMatch[1].trim(),
@@ -1020,6 +1154,98 @@ function PkCitationLink({
   );
 }
 
+function RecoveryPlanCard({ recovery }: { recovery: RecoveryPlanState }) {
+  const plan = recovery.plan;
+  if (!plan && !recovery.nextStep) {
+    return null;
+  }
+
+  const normalizedStatus = String(recovery.status || plan?.status || "").trim().toUpperCase();
+  const isBlocked = normalizedStatus.includes("BLOCK") || String(plan?.status || "").trim().toLowerCase() === "blocked";
+  const issues = plan?.issues ?? [];
+  const missingPorts = plan?.missingPorts ?? [];
+  const recommendedActions = plan?.recommendedActions ?? [];
+  const summary = plan?.summary ?? recovery.nextStep ?? "";
+  const statusLabel = normalizedStatus || "RECOVERY_PLAN";
+
+  return (
+    <section
+      className={cn(
+        "mb-3 rounded-xl border px-3 py-2.5 text-xs",
+        isBlocked
+          ? "border-amber-200/90 bg-amber-50/85 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100"
+          : "border-sky-200/90 bg-sky-50/85 text-sky-950 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-100",
+      )}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.14em]">
+          {isBlocked ? "Recovery Plan" : "Next Step"}
+        </p>
+        <span
+          className={cn(
+            "rounded-full px-2 py-0.5 font-mono text-[10px]",
+            isBlocked
+              ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
+              : "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200",
+          )}
+        >
+          {statusLabel}
+        </span>
+      </div>
+
+      {summary ? <p className="mt-2 text-sm leading-5">{summary}</p> : null}
+
+      {missingPorts.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {missingPorts.map((port) => (
+            <span
+              key={`recovery-port-${port}`}
+              className="rounded-full border border-current/15 bg-white/65 px-2 py-0.5 font-mono text-[10px] dark:bg-zinc-950/25"
+            >
+              {port}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {issues.length > 0 ? (
+        <div className="mt-2 space-y-1.5">
+          {issues.slice(0, 4).map((issue, index) => (
+            <div key={`recovery-issue-${index}`} className="rounded-lg bg-white/55 px-2.5 py-2 dark:bg-zinc-950/20">
+              <p className="text-sm leading-5">{issue.message}</p>
+              {(issue.port || issue.resourceDomain) ? (
+                <p className="mt-1 font-mono text-[10px] opacity-80">
+                  {[issue.port ? `port=${issue.port}` : null, issue.resourceDomain ? `domain=${issue.resourceDomain}` : null]
+                    .filter(Boolean)
+                    .join(" ")}
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {recommendedActions.length > 0 ? (
+        <div className="mt-2 space-y-1.5">
+          {recommendedActions.map((item) => (
+            <div key={`recovery-action-${item.action}`} className="rounded-lg bg-white/55 px-2.5 py-2 dark:bg-zinc-950/20">
+              <p className="font-mono text-[11px] font-semibold">{item.action}</p>
+              {item.reason ? <p className="mt-1 leading-5">{item.reason}</p> : null}
+              {item.toolHints.length > 0 ? (
+                <p className="mt-1 font-mono text-[10px] opacity-80">{item.toolHints.join(" · ")}</p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {recovery.nextStep && recovery.nextStep !== summary ? (
+        <p className="mt-2 text-[11px] leading-5 opacity-85">{recovery.nextStep}</p>
+      ) : null}
+    </section>
+  );
+}
+
 function renderTextWithSmartCitations(
   text: string,
   handleOpenDetail: (pk: number) => void,
@@ -1107,8 +1333,14 @@ type ChatPanelProps = {
   models: string[];
   selectedModel: string;
   composerResetVersion: number;
-  quickPrompts: Array<{ label: string; prompt: string }>;
   contextNodes: FocusNode[];
+  pinnedNodes: FocusNode[];
+  sessionEnvironment: string | null;
+  sessionEnvironmentAuto: boolean;
+  promptOverride: string;
+  sessionParameters: SessionParameter[];
+  selectedGroup?: string;
+  projectTags?: string[];
   isLoading: boolean;
   activeTurnId: number | null;
   onSendMessage: (text: string, options?: { resourceAttachments?: ResourceAttachment[] }) => void;
@@ -1116,9 +1348,15 @@ type ChatPanelProps = {
   onModelChange: (model: string) => void;
   onAttachFile: (file: File) => void;
   onAddContextNode: (node: FocusNode) => void;
+  onPinNode: (node: FocusNode) => void;
+  onUnpinNode: (pk: number) => void;
   onRemoveContextNode: (pk: number) => void;
   onOpenDetail: (pk: number) => void;
   onRestoreContextNodes: (nodes: FocusNode[]) => void;
+  onSessionEnvironmentChange: (value: string | null) => void;
+  onSessionEnvironmentAutoChange: (value: boolean) => void;
+  onPromptOverrideChange: (value: string) => void;
+  onSessionParametersChange: (value: SessionParameter[]) => void;
 };
 
 function normalizeDroppedContextNode(raw: unknown): FocusNode | null {
@@ -1245,13 +1483,96 @@ function resourceAttachmentKey(attachment: ResourceAttachment): string {
   return `${attachment.kind}:${attachment.value.trim().toLowerCase()}`;
 }
 
+function dedupeFocusNodes(nodes: FocusNode[]): FocusNode[] {
+  const seen = new Set<number>();
+  return nodes.filter((node) => {
+    if (!node || !Number.isInteger(node.pk) || node.pk <= 0 || seen.has(node.pk)) {
+      return false;
+    }
+    seen.add(node.pk);
+    return true;
+  });
+}
+
+function normalizeSessionParameters(parameters: SessionParameter[]): SessionParameter[] {
+  const seen = new Set<string>();
+  return parameters.filter((entry) => {
+    const key = entry.key.trim();
+    const value = entry.value.trim();
+    if (!key || !value) {
+      return false;
+    }
+    const lowered = key.toLowerCase();
+    if (seen.has(lowered)) {
+      return false;
+    }
+    seen.add(lowered);
+    return true;
+  });
+}
+
+function buildEnvironmentOptions(payload: ActiveSpecializationsResponse | undefined): Array<{
+  name: string;
+  label: string;
+  description: string | null;
+  variant: "general" | "specialized";
+}> {
+  const items = [
+    ...(payload?.active_specializations ?? []),
+    ...(payload?.inactive_specializations ?? []),
+  ];
+  const options: Array<{
+    name: string;
+    label: string;
+    description: string | null;
+    variant: "general" | "specialized";
+  }> = [];
+  const seen = new Set<string>();
+  items.forEach((item) => {
+    const name = String(item.name || "").trim().toLowerCase();
+    if (!name || seen.has(name)) {
+      return;
+    }
+    seen.add(name);
+    options.push({
+      name,
+      label: item.label,
+      description: item.description,
+      variant: item.variant,
+    });
+  });
+  if (!seen.has("general")) {
+    options.unshift({
+      name: "general",
+      label: "Generic",
+      description: "General AiiDA chat environment.",
+      variant: "general",
+    });
+  }
+  return options.sort((left, right) => {
+    if (left.name === "general") {
+      return -1;
+    }
+    if (right.name === "general") {
+      return 1;
+    }
+    return left.label.localeCompare(right.label);
+  });
+}
+
 export function ChatPanel({
   messages,
   models,
   selectedModel,
   composerResetVersion,
-  quickPrompts,
   contextNodes,
+  pinnedNodes,
+  sessionEnvironment,
+  sessionEnvironmentAuto,
+  promptOverride,
+  sessionParameters,
+  selectedGroup,
+  projectTags = [],
   isLoading,
   activeTurnId,
   onSendMessage,
@@ -1259,9 +1580,15 @@ export function ChatPanel({
   onModelChange,
   onAttachFile,
   onAddContextNode,
+  onPinNode,
+  onUnpinNode,
   onRemoveContextNode,
   onOpenDetail,
   onRestoreContextNodes,
+  onSessionEnvironmentChange,
+  onSessionEnvironmentAutoChange,
+  onPromptOverrideChange,
+  onSessionParametersChange,
 }: ChatPanelProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1275,6 +1602,7 @@ export function ChatPanel({
   const [avatarFailed, setAvatarFailed] = useState(false);
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
   const [dragOverZone, setDragOverZone] = useState<"textarea" | "attachment" | null>(null);
+  const [slashSelectionIndex, setSlashSelectionIndex] = useState(0);
   const [previewStateByTurn, setPreviewStateByTurn] = useState<Record<number, SubmissionModalState>>({});
   const [submittedPreviewByTurn, setSubmittedPreviewByTurn] = useState<Record<number, SubmittedPreviewSummary>>({});
   const [expandedSubmissionByTurn, setExpandedSubmissionByTurn] = useState<Record<number, boolean>>({});
@@ -1331,6 +1659,78 @@ export function ChatPanel({
     nodeHoverMetadataRef.current = nodeHoverMetadataByPk;
   }, [nodeHoverMetadataByPk]);
 
+  const activeResourcePlugins = useMemo(() => {
+    const values = new Set<string>();
+    resourceAttachments.forEach((attachment) => {
+      if (attachment.kind === "plugin" && attachment.value.trim()) {
+        values.add(attachment.value.trim().toLowerCase());
+      }
+      if (attachment.plugin?.trim()) {
+        values.add(attachment.plugin.trim().toLowerCase());
+      }
+    });
+    return [...values];
+  }, [resourceAttachments]);
+  const effectiveContextNodes = useMemo(
+    () => dedupeFocusNodes([...pinnedNodes, ...contextNodes]),
+    [contextNodes, pinnedNodes],
+  );
+
+  const specializationActionsQuery = useQuery({
+    queryKey: [
+      "specializations",
+      "active",
+      effectiveContextNodes.map((node) => node.pk).sort((left, right) => left - right).join(","),
+      [...projectTags].sort().join(","),
+      [...activeResourcePlugins].sort().join(","),
+      sessionEnvironment ?? "",
+      sessionEnvironmentAuto ? "auto" : "manual",
+    ],
+    queryFn: () =>
+      getActiveSpecializations({
+        contextNodeIds: effectiveContextNodes.map((node) => node.pk),
+        projectTags,
+        resourcePlugins: activeResourcePlugins,
+        selectedEnvironment: sessionEnvironment,
+        autoSwitch: sessionEnvironmentAuto,
+      }),
+    staleTime: 15_000,
+  });
+
+  const toolbarActions = specializationActionsQuery.data?.chips ?? [];
+  const activeSpecializations = specializationActionsQuery.data?.active_specializations ?? [];
+  const environmentOptions = useMemo(
+    () => buildEnvironmentOptions(specializationActionsQuery.data),
+    [specializationActionsQuery.data],
+  );
+  const resolvedEnvironmentName = specializationActionsQuery.data?.environment.resolved ?? "general";
+  const resolvedEnvironmentLabel =
+    environmentOptions.find((item) => item.name === resolvedEnvironmentName)?.label ?? "Generic";
+  const selectedEnvironmentName = sessionEnvironment ?? resolvedEnvironmentName;
+  const selectedEnvironmentLabel =
+    environmentOptions.find((item) => item.name === selectedEnvironmentName)?.label ?? resolvedEnvironmentLabel;
+  const activeNode = contextNodes[contextNodes.length - 1] ?? pinnedNodes[0] ?? null;
+  const normalizedSessionParameters = useMemo(
+    () => normalizeSessionParameters(sessionParameters),
+    [sessionParameters],
+  );
+  const slashQuery = useMemo(() => {
+    const trimmed = draft.trimStart();
+    if (!trimmed.startsWith("/")) {
+      return "";
+    }
+    return trimmed.slice(1);
+  }, [draft]);
+  const slashSections = useMemo(
+    () => filterSlashSections(specializationActionsQuery.data, slashQuery),
+    [slashQuery, specializationActionsQuery.data],
+  );
+  const slashItems = useMemo(
+    () => slashSections.flatMap((section) => section.items),
+    [slashSections],
+  );
+  const showSlashMenu = slashQuery.length >= 0 && draft.trimStart().startsWith("/") && slashItems.length > 0;
+
   const ensureNodeHoverMetadata = useCallback((pk: number) => {
     if (!Number.isInteger(pk) || pk <= 0) {
       return;
@@ -1373,6 +1773,15 @@ export function ChatPanel({
     window.addEventListener("mousedown", handleOutside);
     return () => window.removeEventListener("mousedown", handleOutside);
   }, []);
+
+  useEffect(() => {
+    setSlashSelectionIndex((current) => {
+      if (slashItems.length === 0) {
+        return 0;
+      }
+      return Math.min(current, Math.max(0, slashItems.length - 1));
+    });
+  }, [slashItems]);
 
   useEffect(() => {
     return () => {
@@ -1644,7 +2053,8 @@ export function ChatPanel({
     if (isLoading) {
       return;
     }
-    const text = draft.trim();
+    const slashSelection = resolveSlashActionFromDraft();
+    const text = slashSelection ? buildActionIntent(slashSelection.action, slashSelection.note) : draft.trim();
     if (!text) {
       return;
     }
@@ -1657,15 +2067,6 @@ export function ChatPanel({
   const hasContextNodes = contextNodes.length > 0;
   const hasResourceAttachments = resourceAttachments.length > 0;
   const hasAnyAttachments = hasContextNodes || hasResourceAttachments;
-  const structureContextNodes = useMemo(
-    () => contextNodes.filter((node) => node.node_type === STRUCTURE_NODE_TYPE),
-    [contextNodes],
-  );
-  const hasStructureContext = structureContextNodes.length > 0;
-  const structureContextPks = useMemo(
-    () => structureContextNodes.map((node) => node.pk),
-    [structureContextNodes],
-  );
 
   const handleConfirmPreview = useCallback(
     async (turnId: number, preview: SubmissionDraftPreview, draftPayload?: SubmissionSubmitDraft) => {
@@ -1731,19 +2132,53 @@ export function ChatPanel({
     [onRestoreContextNodes],
   );
 
-  const handleQuickActionPrompt = useCallback(
-    (label: string, prompt: string) => {
-      const kind = inferQuickActionKind(label, prompt);
-      if (quickActionRequiresStructure(kind) && structureContextPks.length === 0) {
+  const handleToolbarAction = useCallback(
+    (action: SpecializationAction) => {
+      if (!action.enabled || isLoading) {
         return;
       }
-      const intent = buildQuickActionIntent(label, prompt, structureContextPks);
       setIsAutoScrollEnabled(true);
       scrollToBottom("smooth");
-      onSendMessage(intent, { resourceAttachments });
+      onSendMessage(buildActionIntent(action), { resourceAttachments });
     },
-    [onSendMessage, resourceAttachments, scrollToBottom, structureContextPks],
+    [isLoading, onSendMessage, resourceAttachments, scrollToBottom],
   );
+
+  const handleSelectSlashAction = useCallback((action: SpecializationAction) => {
+    if (!action.enabled) {
+      return;
+    }
+    setDraft(buildActionIntent(action));
+    window.requestAnimationFrame(() => {
+      const target = textareaRef.current;
+      if (!target) {
+        return;
+      }
+      target.focus();
+      target.setSelectionRange(target.value.length, target.value.length);
+      updateTextareaHeight(target);
+    });
+  }, []);
+
+  const resolveSlashActionFromDraft = useCallback((): { action: SpecializationAction; note: string } | null => {
+    const trimmed = draft.trim();
+    if (!trimmed.startsWith("/")) {
+      return null;
+    }
+    const [rawCommand, ...rest] = trimmed.split(/\s+/);
+    const normalizedCommand = normalizeSlashCommand(rawCommand);
+    if (!normalizedCommand) {
+      return null;
+    }
+    const matched = slashItems.find((item) => normalizeSlashCommand(item.command) === normalizedCommand);
+    if (!matched || !matched.enabled) {
+      return null;
+    }
+    return {
+      action: matched,
+      note: rest.join(" ").trim(),
+    };
+  }, [draft, slashItems]);
 
   const handleAttachResource = useCallback((attachment: ResourceAttachment) => {
     const normalizedValue = attachment.value.trim();
@@ -1764,10 +2199,52 @@ export function ChatPanel({
     setResourceAttachments((current) => current.filter((item) => resourceAttachmentKey(item) !== key));
   }, []);
 
+  const handlePinContextNode = useCallback(
+    (node: FocusNode) => {
+      onPinNode(node);
+      onRemoveContextNode(node.pk);
+    },
+    [onPinNode, onRemoveContextNode],
+  );
+
+  const handleSessionEnvironmentSelect = useCallback(
+    (value: string) => {
+      const cleaned = value.trim().toLowerCase();
+      onSessionEnvironmentChange(cleaned || null);
+      onSessionEnvironmentAutoChange(false);
+    },
+    [onSessionEnvironmentAutoChange, onSessionEnvironmentChange],
+  );
+
+  const handleSessionParameterChange = useCallback(
+    (index: number, field: "key" | "value", value: string) => {
+      const next = [...sessionParameters];
+      const current = next[index] ?? { key: "", value: "" };
+      next[index] = {
+        ...current,
+        [field]: value,
+      };
+      onSessionParametersChange(next);
+    },
+    [onSessionParametersChange, sessionParameters],
+  );
+
+  const handleAddSessionParameter = useCallback(() => {
+    onSessionParametersChange([...sessionParameters, { key: "", value: "" }]);
+  }, [onSessionParametersChange, sessionParameters]);
+
+  const handleRemoveSessionParameter = useCallback(
+    (index: number) => {
+      onSessionParametersChange(sessionParameters.filter((_, itemIndex) => itemIndex !== index));
+    },
+    [onSessionParametersChange, sessionParameters],
+  );
+
   useEffect(() => {
     setDraft("");
     setResourceAttachments([]);
     setDragOverZone(null);
+    setSlashSelectionIndex(0);
     if (textareaRef.current) {
       textareaRef.current.style.height = "56px";
     }
@@ -1775,6 +2252,48 @@ export function ChatPanel({
 
   return (
     <Panel className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden p-0">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200/80 bg-white/80 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/55 md:px-8">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="inline-flex items-center gap-2 rounded-full border border-zinc-200/80 bg-zinc-50/90 px-3 py-1.5 text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:hover:bg-zinc-800"
+              onClick={() => {
+                onSessionEnvironmentAutoChange(false);
+              }}
+            >
+              <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
+              <span className="truncate">{resolvedEnvironmentLabel}</span>
+            </button>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+              checked={sessionEnvironmentAuto}
+              onChange={(event) => onSessionEnvironmentAutoChange(event.target.checked)}
+            />
+            Allow auto-switch
+          </label>
+          <select
+            value={selectedEnvironmentName}
+            onChange={(event) => handleSessionEnvironmentSelect(event.target.value)}
+            className="h-9 rounded-lg border border-zinc-200/80 bg-zinc-50/90 px-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-200 dark:focus:border-zinc-600"
+          >
+            {environmentOptions.map((option) => (
+              <option key={option.name} value={option.name}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="min-h-0 flex flex-1 flex-col xl:flex-row">
+        <div className="min-h-0 flex flex-1 flex-col">
       <div
         ref={messagesContainerRef}
         className="minimal-scrollbar min-h-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto px-5 pb-6 pt-5 md:px-8"
@@ -1808,6 +2327,8 @@ export function ChatPanel({
               taggedSubmissionDraft.preview ??
               stableSubmissionDraftByTurn[turn.turnId] ??
               null;
+            const recovery = extractRecoveryPlanState(turn.assistantPayload);
+            const hasRecoverySignal = Boolean(recovery.plan) || Boolean(recovery.nextStep);
             const assistantText =
               taggedSubmissionDraft.cleanText.trim().length > 0
                 ? taggedSubmissionDraft.cleanText
@@ -1817,7 +2338,7 @@ export function ChatPanel({
             const hasFinalAssistantState =
               Boolean(turn.assistantStatus) &&
               turn.assistantStatus !== "thinking" &&
-              (hasAssistantText || turn.assistantStatus === "error" || Boolean(submissionDraft));
+              (hasAssistantText || turn.assistantStatus === "error" || Boolean(submissionDraft) || hasRecoverySignal);
             const thinkingToolCalls = extractToolCalls(turn.thinkingPayload);
             const assistantToolCalls = extractToolCalls(turn.assistantPayload);
             const statusSteps = extractStatusSteps(turn.thinkingPayload);
@@ -1839,7 +2360,8 @@ export function ChatPanel({
             const showThinking =
               hasThinkingSignal &&
               (isTurnActivelyThinking || !hasFinalAssistantState);
-            const showAssistant = hasAssistantText || turn.assistantStatus === "error" || Boolean(submissionDraft);
+            const showAssistant =
+              hasAssistantText || turn.assistantStatus === "error" || Boolean(submissionDraft) || hasRecoverySignal;
             const hasAssistantRowSignal =
               showThinking ||
               showAssistant ||
@@ -1960,6 +2482,7 @@ export function ChatPanel({
                               })}
                             </ul>
                           ) : null}
+                          {hasRecoverySignal ? <RecoveryPlanCard recovery={recovery} /> : null}
                           {visibleAssistantText.trim() ? (
                             <p className="whitespace-pre-wrap">
                               {renderTextWithSmartCitations(
@@ -2024,7 +2547,7 @@ export function ChatPanel({
                 {submittedPreview ? (
                   <div className="ml-10 max-w-[86%] rounded-xl border border-emerald-200/80 bg-emerald-50/85 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
                     <p className="font-medium">
-                      🚀 Job Submitted: {submittedPreview.processLabel}{" "}
+                      \uD83D\uDE80 Job Submitted: {submittedPreview.processLabel}{" "}
                       {submittedPreview.processPks.length > 0 ? `(${submittedPreview.processPks.length} jobs)` : "(PK pending)"}
                     </p>
                     {submittedPreview.processPks.length > 0 ? (
@@ -2056,118 +2579,164 @@ export function ChatPanel({
       <div className="bg-white/75 px-4 pb-4 pt-3 backdrop-blur dark:bg-zinc-950/35 md:px-6">
         <div className="pt-2">
           <div className="rounded-2xl border border-zinc-200/80 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
-            {quickPrompts.length > 0 ? (
-              <div className="mb-2 border-b border-zinc-200/70 pb-2 dark:border-zinc-800/80">
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
-                    Research Actions
-                  </p>
-                  <p className="text-[10px] text-zinc-400 dark:text-zinc-500">
-                    {hasStructureContext
-                      ? `Structure context: ${structureContextPks.map((pk) => `#${pk}`).join(", ")}`
-                      : "Select StructureData to enable relax/band workflows"}
-                  </p>
-                </div>
-                <div className="minimal-scrollbar -mx-1 overflow-x-auto px-1">
-                  <div className="flex w-max min-w-full gap-2 pb-0.5">
-                    {quickPrompts.map((quickPrompt) => {
-                      const kind = inferQuickActionKind(quickPrompt.label, quickPrompt.prompt);
-                      const needsStructure = quickActionRequiresStructure(kind);
-                      const disabled = isLoading || (needsStructure && !hasStructureContext);
-                      const highlighted = needsStructure && hasStructureContext;
-                      return (
-                        <button
-                          key={`${quickPrompt.label}-${quickPrompt.prompt}`}
-                          type="button"
-                          className={cn(
-                            "inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium transition-colors duration-200",
-                            highlighted
-                              ? "border-sky-300/90 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-800/70 dark:bg-sky-950/35 dark:text-sky-200 dark:hover:bg-sky-900/50"
-                              : "border-zinc-300/70 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300 dark:hover:bg-zinc-800/80",
-                            disabled && "cursor-not-allowed opacity-45 hover:bg-inherit dark:hover:bg-inherit",
-                          )}
-                          onClick={() => handleQuickActionPrompt(quickPrompt.label, quickPrompt.prompt)}
-                          disabled={disabled}
-                          title={quickPrompt.prompt}
-                        >
-                          <span aria-hidden>{quickActionIcon(kind)}</span>
-                          <span className="whitespace-nowrap">{quickPrompt.label}</span>
-                        </button>
-                      );
-                    })}
+            <ActionToolbar
+              actions={toolbarActions}
+              activeSpecializations={activeSpecializations}
+              isBusy={isLoading}
+              onTriggerAction={handleToolbarAction}
+            />
+            <div className="relative">
+              {showSlashMenu ? (
+                <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-2xl border border-zinc-200/85 bg-white/96 shadow-xl backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/96">
+                  <div className="minimal-scrollbar max-h-72 overflow-y-auto p-2">
+                    {slashSections.map((section) => (
+                      <div key={section.id} className="mb-2 last:mb-0">
+                        <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+                          {section.label}
+                        </p>
+                        <div className="space-y-1">
+                          {section.items.map((item) => {
+                            const flatIndex = slashItems.findIndex((candidate) => candidate.id === item.id);
+                            const isSelected = flatIndex === slashSelectionIndex;
+                            return (
+                              <button
+                                key={`${section.id}-${item.id}`}
+                                type="button"
+                                className={cn(
+                                  "flex w-full items-start gap-3 rounded-xl border px-3 py-2 text-left transition-colors duration-150",
+                                  isSelected
+                                    ? "border-zinc-300 bg-zinc-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                                    : "border-transparent text-zinc-700 hover:border-zinc-200 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:border-zinc-800 dark:hover:bg-zinc-900/70",
+                                  !item.enabled && "opacity-45",
+                                )}
+                                onMouseEnter={() => setSlashSelectionIndex(Math.max(flatIndex, 0))}
+                                onClick={() => handleSelectSlashAction(item)}
+                                disabled={!item.enabled}
+                                title={item.disabled_reason || item.description || item.prompt}
+                              >
+                                <span className="mt-0.5 shrink-0 text-sm" aria-hidden>
+                                  {item.icon ?? "↗"}
+                                </span>
+                                <span className="min-w-0">
+                                  <span className="flex items-center gap-2">
+                                    <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                                      {item.command || "/action"}
+                                    </span>
+                                    <span className="truncate text-sm font-medium">{item.label}</span>
+                                  </span>
+                                  <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
+                                    {item.description || item.prompt}
+                                  </span>
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              </div>
-            ) : null}
-            <textarea
-              ref={textareaRef}
-              rows={2}
-              value={draft}
-              placeholder="Message SABR..."
-              className={cn(
-                "max-h-[220px] min-h-[56px] w-full resize-none rounded-lg border border-transparent bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition-colors dark:text-zinc-100",
-                dragOverZone === "textarea" &&
-                "border-dashed border-sky-400/80 bg-sky-50/45 dark:border-sky-700/80 dark:bg-sky-950/30",
-              )}
-              disabled={isLoading}
-              onChange={(event) => {
-                setDraft(event.target.value);
-                updateTextareaHeight(event.currentTarget);
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "copy";
-                if (dragOverZone !== "textarea") {
-                  setDragOverZone("textarea");
-                }
-              }}
-              onDragLeave={() => {
-                if (dragOverZone === "textarea") {
-                  setDragOverZone(null);
-                }
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                if (isLoading) {
-                  return;
-                }
-                const droppedResource = parseDroppedResourceAttachment(event);
-                if (droppedResource) {
-                  handleAttachResource(droppedResource);
-                  setDragOverZone(null);
-                  return;
-                }
-                const droppedNode = parseDroppedContextNode(event);
-                if (!droppedNode) {
-                  setDragOverZone(null);
-                  return;
-                }
-                const textarea = event.currentTarget;
-                const { value, caret } = insertPkTokenAtSelection(
-                  textarea.value,
-                  droppedNode.pk,
-                  textarea.selectionStart ?? textarea.value.length,
-                  textarea.selectionEnd ?? textarea.value.length,
-                );
-                setDraft(value);
-                setDragOverZone(null);
-                window.requestAnimationFrame(() => {
-                  const target = textareaRef.current;
-                  if (!target) {
+              ) : null}
+              <textarea
+                ref={textareaRef}
+                rows={2}
+                value={draft}
+                placeholder="Message SABR... (type / for commands)"
+                className={cn(
+                  "max-h-[220px] min-h-[56px] w-full resize-none rounded-lg border border-transparent bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition-colors dark:text-zinc-100",
+                  dragOverZone === "textarea" &&
+                  "border-dashed border-sky-400/80 bg-sky-50/45 dark:border-sky-700/80 dark:bg-sky-950/30",
+                )}
+                disabled={isLoading}
+                onChange={(event) => {
+                  setDraft(event.target.value);
+                  updateTextareaHeight(event.currentTarget);
+                }}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "copy";
+                  if (dragOverZone !== "textarea") {
+                    setDragOverZone("textarea");
+                  }
+                }}
+                onDragLeave={() => {
+                  if (dragOverZone === "textarea") {
+                    setDragOverZone(null);
+                  }
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (isLoading) {
                     return;
                   }
-                  target.setSelectionRange(caret, caret);
-                  updateTextareaHeight(target);
-                  target.focus();
-                });
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-                  event.preventDefault();
-                  handleSubmit();
-                }
-              }}
-            />
+                  const droppedResource = parseDroppedResourceAttachment(event);
+                  if (droppedResource) {
+                    handleAttachResource(droppedResource);
+                    setDragOverZone(null);
+                    return;
+                  }
+                  const droppedNode = parseDroppedContextNode(event);
+                  if (!droppedNode) {
+                    setDragOverZone(null);
+                    return;
+                  }
+                  const textarea = event.currentTarget;
+                  const { value, caret } = insertPkTokenAtSelection(
+                    textarea.value,
+                    droppedNode.pk,
+                    textarea.selectionStart ?? textarea.value.length,
+                    textarea.selectionEnd ?? textarea.value.length,
+                  );
+                  setDraft(value);
+                  setDragOverZone(null);
+                  window.requestAnimationFrame(() => {
+                    const target = textareaRef.current;
+                    if (!target) {
+                      return;
+                    }
+                    target.setSelectionRange(caret, caret);
+                    updateTextareaHeight(target);
+                    target.focus();
+                  });
+                }}
+                onKeyDown={(event) => {
+                  if (showSlashMenu) {
+                    if (event.key === "ArrowDown") {
+                      event.preventDefault();
+                      setSlashSelectionIndex((current) => (current + 1) % Math.max(1, slashItems.length));
+                      return;
+                    }
+                    if (event.key === "ArrowUp") {
+                      event.preventDefault();
+                      setSlashSelectionIndex((current) => {
+                        if (slashItems.length === 0) {
+                          return 0;
+                        }
+                        return (current - 1 + slashItems.length) % slashItems.length;
+                      });
+                      return;
+                    }
+                    if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+                      event.preventDefault();
+                      const selected = slashItems[slashSelectionIndex] ?? slashItems[0];
+                      if (selected) {
+                        handleSelectSlashAction(selected);
+                      }
+                      return;
+                    }
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setDraft("");
+                      return;
+                    }
+                  }
+                  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+                    event.preventDefault();
+                    handleSubmit();
+                  }
+                }}
+              />
+            </div>
 
 
             <div className="mt-3 flex flex-row items-center justify-between gap-2">
@@ -2302,8 +2871,16 @@ export function ChatPanel({
                         key={`context-chip-${node.pk}`}
                         className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-zinc-300/80 bg-white/95 px-2 text-[11px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/85 dark:text-zinc-200"
                       >
-                        <span aria-hidden>⚛️</span>
+                        <span aria-hidden>{"\u269B\uFE0F"}</span>
                         <span className="font-mono">#{node.pk}</span>
+                        <button
+                          type="button"
+                          className="inline-flex h-4 w-4 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200/90 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                          onClick={() => handlePinContextNode(node)}
+                          aria-label={`Pin node ${node.pk} for this session`}
+                        >
+                          <Pin className="h-3 w-3" />
+                        </button>
                         <button
                           type="button"
                           className="inline-flex h-4 w-4 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200/90 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
@@ -2343,7 +2920,183 @@ export function ChatPanel({
               </Button>
             </div>
           </div>
+          </div>
         </div>
+        </div>
+        <aside className="minimal-scrollbar border-t border-zinc-200/80 bg-zinc-50/55 p-4 xl:w-[320px] xl:overflow-y-auto xl:border-l xl:border-t-0 dark:border-zinc-800 dark:bg-zinc-950/45">
+          <div className="space-y-4">
+            <div className="rounded-2xl border border-zinc-200/80 bg-white/90 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+                Context Slots
+              </p>
+              <div className="mt-3 space-y-3 text-sm">
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
+                    Active Node
+                  </p>
+                  {activeNode ? (
+                    <button
+                      type="button"
+                      className="mt-1 inline-flex items-center gap-2 rounded-full border border-zinc-200/80 bg-zinc-50 px-3 py-1.5 text-left text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                      onClick={() => onOpenDetail(activeNode.pk)}
+                    >
+                      <span className="font-mono">#{activeNode.pk}</span>
+                      <span className="truncate">{activeNode.formula || activeNode.label}</span>
+                    </button>
+                  ) : (
+                    <p className="mt-1 text-zinc-500 dark:text-zinc-400">No active node pinned.</p>
+                  )}
+                </div>
+
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
+                    Target Project
+                  </p>
+                  <p className="mt-1 text-zinc-700 dark:text-zinc-200">
+                    {resolvedEnvironmentLabel}
+                    {selectedGroup ? <span className="text-zinc-500 dark:text-zinc-400"> · Group {selectedGroup}</span> : null}
+                  </p>
+                </div>
+
+                <div>
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
+                    Parameters
+                  </p>
+                  {normalizedSessionParameters.length > 0 ? (
+                    <div className="mt-1 flex flex-wrap gap-1.5">
+                      {normalizedSessionParameters.map((entry) => (
+                        <span
+                          key={`${entry.key}:${entry.value}`}
+                          className="rounded-full border border-amber-200/80 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200"
+                        >
+                          {entry.key}: {entry.value}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-zinc-500 dark:text-zinc-400">No session parameters set.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-200/80 bg-white/90 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+                  Pinned Nodes
+                </p>
+                <span className="text-[11px] text-zinc-400 dark:text-zinc-500">{pinnedNodes.length}</span>
+              </div>
+              <div className="mt-3 space-y-2">
+                {pinnedNodes.length > 0 ? (
+                  pinnedNodes.map((node) => (
+                    <div
+                      key={`pinned-node-${node.pk}`}
+                      className="flex items-center justify-between gap-2 rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-900/60"
+                    >
+                      <button
+                        type="button"
+                        className="min-w-0 text-left"
+                        onClick={() => onOpenDetail(node.pk)}
+                      >
+                        <p className="font-mono text-xs text-zinc-600 dark:text-zinc-300">#{node.pk}</p>
+                        <p className="truncate text-sm text-zinc-800 dark:text-zinc-100">{node.formula || node.label}</p>
+                      </button>
+                      <button
+                        type="button"
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                        onClick={() => onUnpinNode(node.pk)}
+                        aria-label={`Unpin node ${node.pk}`}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    Pin a structure or workflow node to keep it in scope across turns.
+                  </p>
+                )}
+                {contextNodes.length > 0 ? (
+                  <div className="border-t border-dashed border-zinc-200 pt-3 dark:border-zinc-800">
+                    <p className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
+                      Current Context
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {contextNodes.map((node) => (
+                        <button
+                          key={`pin-candidate-${node.pk}`}
+                          type="button"
+                          className="inline-flex items-center gap-1 rounded-full border border-zinc-200/80 bg-white px-2 py-1 text-[11px] text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          onClick={() => handlePinContextNode(node)}
+                        >
+                          <Pin className="h-3 w-3" />
+                          <span className="font-mono">#{node.pk}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-zinc-200/80 bg-white/90 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+                Prompt Override
+              </p>
+              <textarea
+                value={promptOverride}
+                onChange={(event) => onPromptOverrideChange(event.target.value)}
+                rows={4}
+                placeholder="Example: Keep all reported energies to four decimal places."
+                className="mt-3 min-h-[96px] w-full rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-3 py-2 text-sm text-zinc-800 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-100 dark:focus:border-zinc-600"
+              />
+            </div>
+
+            <div className="rounded-2xl border border-zinc-200/80 bg-white/90 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+                  Session Parameters
+                </p>
+                <Button type="button" variant="outline" size="sm" onClick={handleAddSessionParameter}>
+                  Add
+                </Button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {sessionParameters.length > 0 ? (
+                  sessionParameters.map((entry, index) => (
+                    <div key={`session-parameter-${index}`} className="flex items-center gap-2">
+                      <input
+                        value={entry.key}
+                        onChange={(event) => handleSessionParameterChange(index, "key", event.target.value)}
+                        placeholder="ecut"
+                        className="min-w-0 flex-1 rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-2 text-sm text-zinc-800 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-100 dark:focus:border-zinc-600"
+                      />
+                      <input
+                        value={entry.value}
+                        onChange={(event) => handleSessionParameterChange(index, "value", event.target.value)}
+                        placeholder="40 Ry"
+                        className="min-w-0 flex-1 rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-2 text-sm text-zinc-800 outline-none focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-100 dark:focus:border-zinc-600"
+                      />
+                      <button
+                        type="button"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                        onClick={() => handleRemoveSessionParameter(index)}
+                        aria-label={`Remove session parameter ${entry.key || index}`}
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                    Store per-session values like cutoff, k-point density, or queue hints.
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </aside>
       </div>
     </Panel>
   );

@@ -4,7 +4,7 @@ module.exports = {
             name: 'aiida-worker',
             cwd: '/Users/yimingzhang/Developer/aiida-worker',
             script: 'uv',
-            args: 'run uvicorn main:app --host 127.0.0.1 --port 8001',
+            args: 'run --extra quantumespresso uvicorn main:app --host 127.0.0.1 --port 8001',
             interpreter: 'none',
             env: {
                 PYTHONPATH: '.'
@@ -24,6 +24,12 @@ module.exports = {
             cwd: '/Users/yimingzhang/Developer/sabr/frontend',
             script: 'npm',
             args: 'run dev',
+        },
+        {
+            name: "cf-tunnel",
+            script: "cloudflared",
+            args: "tunnel run sabr-aiida-tunnel",
+            autorestart: true
         }
     ]
 };

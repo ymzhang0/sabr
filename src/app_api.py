@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 from loguru import logger
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -198,6 +198,25 @@ mount_engine(app, "aiida")
 @app.get("/api/health")
 async def healthcheck():
     return {"status": "ok"}
+
+
+@app.get("/api/specializations/active")
+async def specializations_active(
+    context_node_ids: list[int] | None = Query(default=None),
+    project_tags: list[str] | None = Query(default=None),
+    resource_plugins: list[str] | None = Query(default=None),
+    selected_environment: str | None = Query(default=None),
+    auto_switch: bool = Query(default=True),
+):
+    from src.sab_engines.aiida.specializations import build_active_specializations_payload
+
+    return await build_active_specializations_payload(
+        context_node_ids=context_node_ids,
+        project_tags=project_tags,
+        resource_plugins=resource_plugins,
+        selected_environment=selected_environment,
+        auto_switch=auto_switch,
+    )
 
 
 @app.get("/api/aiida/logs/copy", response_class=HTMLResponse)

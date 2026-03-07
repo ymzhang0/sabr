@@ -102,7 +102,7 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                 className="absolute top-0 left-[calc(100%+16px)] z-[100] flex flex-col w-[420px] 
                 bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 
                 rounded-2xl shadow-2xl overflow-hidden
-                /* 核心高度逻辑：自适应高度，但最大不超过屏幕高度减去边距 */
+                /* Dynamic height logic: adaptive height, but capped at screen height minus margins */
                 h-auto max-h-[calc(100vh-100px)] 
                 animate-in slide-in-from-left duration-300"
             >

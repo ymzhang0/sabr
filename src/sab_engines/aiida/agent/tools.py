@@ -287,6 +287,7 @@ async def request_json(
     *,
     params: Mapping[str, Any] | None = None,
     json: Mapping[str, Any] | None = None,
+    headers: Mapping[str, Any] | None = None,
     timeout: float = 10.0,
 ) -> Any:
     """Tool-side worker JSON helper backed by unified singleton client."""
@@ -296,6 +297,7 @@ async def request_json(
         path,
         params=params,
         json=json,
+        headers=headers,
         timeout=timeout,
         retries=retry_budget,
     )
@@ -307,6 +309,7 @@ def request_json_sync(
     *,
     params: Mapping[str, Any] | None = None,
     json: Mapping[str, Any] | None = None,
+    headers: Mapping[str, Any] | None = None,
     timeout: float = 10.0,
     retries: int | None = None,
 ) -> Any:
@@ -317,6 +320,7 @@ def request_json_sync(
         path,
         params=params,
         json=json,
+        headers=headers,
         timeout=timeout,
         retries=retry_budget,
     )

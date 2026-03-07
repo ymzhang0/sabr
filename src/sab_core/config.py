@@ -27,6 +27,10 @@ class Settings(BaseSettings):
         "SABR_AIIDA_SETTINGS_FILE", 
         os.path.join(os.getcwd(), "config", "aiida_settings.yaml")
     )
+    SABR_PROJECTS_ROOT: str = os.getenv(
+        "SABR_PROJECTS_ROOT",
+        os.path.join(os.getcwd(), "data", "projects"),
+    )
 
     # --- Observability ---
     SABR_DEBUG_LEVEL: str = os.getenv("SABR_DEBUG_LEVEL",  "default")
@@ -48,7 +52,7 @@ class Settings(BaseSettings):
     }
     SABR_FRONTEND_ORIGINS: str = os.getenv(
         "SABR_FRONTEND_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173,https://sabr.yiming-zhang.com",
+        "http://localhost:5173,http://127.0.0.1:5173,https://aiida.yiming-zhang.com",
     )
     FRONTEND_DIST_DIR: str = os.getenv(
         "SABR_FRONTEND_DIST_DIR",

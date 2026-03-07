@@ -5,18 +5,38 @@ import hashlib
 import json
 import time
 from contextlib import suppress
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from loguru import logger
 from pydantic_ai.settings import ModelSettings
 
-from src.sab_engines.aiida.client import reset_bridge_call_listener, set_bridge_call_listener
+from src.sab_engines.aiida.client import (
+    PROJECT_ID_HEADER,
+    reset_bridge_call_listener,
+    reset_bridge_request_headers,
+    SESSION_ID_HEADER,
+    set_bridge_call_listener,
+    set_bridge_request_headers,
+    WORKSPACE_PATH_HEADER,
+)
 from src.sab_engines.aiida.presenters.workflow_view import enrich_submission_draft_payload
 from src.sab_core.config import settings
 from src.sab_core.logging_utils import log_event
 
 _PENDING_SUBMISSION_KEY = "aiida_pending_submission"
+_CHAT_SESSIONS_KV_KEY = "frontend_chat_sessions_v2"
+_LEGACY_CHAT_SESSIONS_KV_KEY = "frontend_chat_sessions_v1"
 _SUBMISSION_DRAFT_PREFIX = "[SUBMISSION_DRAFT]"
+_DEFAULT_PROJECT_NAME = "Default Project"
+_DEFAULT_SESSION_TITLE = "New conversation"
+_PROJECT_SESSIONS_DIRNAME = "sessions"
+_MAX_CHAT_SESSION_MESSAGES = 200
+_MAX_CHAT_SESSIONS = 120
+_MAX_CHAT_SESSION_TAGS = 12
+_MAX_CHAT_SESSION_TAG_LENGTH = 32
 _KNOWN_PARALLEL_KEYS = {
     "num_machines",
     "num_mpiprocs_per_machine",
@@ -34,29 +54,10 @@ _KNOWN_PARALLEL_KEYS = {
     "ndiag",
 }
 _CRITICAL_ADVANCED_KEYS = {
-    "kpoints_distance",
-    "kpoints_mesh",
-    "kpoints",
-    "mesh",
-    "ecutwfc",
-    "ecutrho",
-    "occupations",
-    "smearing",
-    "degauss",
-    "conv_thr",
-    "mixing_beta",
-    "diagonalization",
-    "electron_maxstep",
-    "nstep",
-    "hubbard_u",
-    "hubbard_v",
-    "spin_type",
-    "tot_charge",
-    "tot_magnetization",
-    "press_conv_thr",
-    "forc_conv_thr",
+    "protocol",
     *_KNOWN_PARALLEL_KEYS,
 }
+_UNSET = object()
 
 
 def _draft_fragment_hash(fragment: str) -> str:
@@ -98,6 +99,108 @@ def normalize_context_node_ids(raw: Any) -> list[int]:
     return deduped
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _trim_text(value: Any, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _resolve_filesystem_path(path_value: Any) -> Path | None:
+    cleaned = str(path_value or "").strip()
+    if not cleaned:
+        return None
+    return Path(cleaned).expanduser().resolve()
+
+
+def _managed_projects_root() -> Path:
+    root = _resolve_filesystem_path(settings.SABR_PROJECTS_ROOT)
+    if root is None:
+        root = Path.cwd() / "data" / "projects"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _managed_project_root(project_id: str) -> Path:
+    return _managed_projects_root() / str(project_id).strip()
+
+
+def _project_sessions_root_path(project: dict[str, Any]) -> Path:
+    root = _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or uuid4().hex))
+    return root / _PROJECT_SESSIONS_DIRNAME
+
+
+def _session_workspace_path(session: dict[str, Any], project: dict[str, Any]) -> Path:
+    return _project_sessions_root_path(project) / str(session.get("id") or "").strip()
+
+
+def _normalize_project_root_path(path_value: Any, *, project_id: str) -> str:
+    resolved = _resolve_filesystem_path(path_value) or _managed_project_root(project_id)
+    if resolved.exists() and not resolved.is_dir():
+        resolved = _managed_project_root(project_id)
+    return str(resolved)
+
+
+def _validate_new_project_root_path(path_value: Any, *, project_id: str) -> str:
+    resolved = _resolve_filesystem_path(path_value)
+    if resolved is None:
+        resolved = _managed_project_root(project_id)
+    if resolved.exists() and not resolved.is_dir():
+        raise ValueError(f"Project root path points to a file: {resolved}")
+    return str(resolved)
+
+
+def _ensure_directory(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _build_default_chat_project(project_id: str | None = None) -> dict[str, Any]:
+    now = _now_iso()
+    resolved_project_id = str(project_id or uuid4().hex).strip() or uuid4().hex
+    return {
+        "id": resolved_project_id,
+        "name": _DEFAULT_PROJECT_NAME,
+        "root_path": str(_managed_project_root(resolved_project_id)),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _derive_chat_session_title(intent: str) -> str:
+    cleaned = " ".join(str(intent or "").split())
+    if not cleaned:
+        return _DEFAULT_SESSION_TITLE
+    first_line = cleaned.splitlines()[0].strip(" -:;,.")
+    return _trim_text(first_line or cleaned, limit=48) or _DEFAULT_SESSION_TITLE
+
+
+def _normalize_chat_session_tags(raw_tags: Any) -> list[str]:
+    if not isinstance(raw_tags, (list, tuple, set)):
+        return []
+
+    tags: list[str] = []
+    seen: set[str] = set()
+    for value in raw_tags:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        normalized = text if text.startswith("#") else f"#{text}"
+        normalized = _trim_text(normalized, limit=_MAX_CHAT_SESSION_TAG_LENGTH)
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tags.append(normalized)
+        if len(tags) >= _MAX_CHAT_SESSION_TAGS:
+            break
+    return tags
+
+
 def serialize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
     payload: list[dict[str, Any]] = []
     for message in history:
@@ -114,14 +217,721 @@ def serialize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, Any]
     return payload
 
 
-def get_chat_history(state: Any) -> list[dict[str, Any]]:
-    history = getattr(state, "chat_history", None)
-    if history is None:
-        history = []
-        state.chat_history = history
+def _normalize_chat_messages(raw_messages: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_messages, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for entry in raw_messages:
+        if not isinstance(entry, dict):
+            continue
+        message = {
+            "role": str(entry.get("role", "assistant")),
+            "text": str(entry.get("text", "")),
+            "status": str(entry.get("status", "done")),
+            "turn_id": int(entry.get("turn_id") or 0),
+        }
+        payload = entry.get("payload")
+        if isinstance(payload, dict):
+            message["payload"] = payload
+        normalized.append(message)
+    return normalized[-_MAX_CHAT_SESSION_MESSAGES:]
+
+
+def _normalize_chat_session_snapshot(raw_snapshot: Any) -> dict[str, Any]:
+    snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else {}
+    context_nodes = _normalize_focus_context_nodes(snapshot.get("context_nodes"))
+    pinned_nodes = _normalize_focus_context_nodes(snapshot.get("pinned_nodes"))
+
+    selected_group_raw = snapshot.get("selected_group")
+    selected_group = str(selected_group_raw).strip() if isinstance(selected_group_raw, str) else ""
+    selected_model_raw = snapshot.get("selected_model")
+    selected_model = str(selected_model_raw).strip() if isinstance(selected_model_raw, str) else ""
+    session_environment_raw = snapshot.get("session_environment")
+    session_environment = str(session_environment_raw).strip().lower() if isinstance(session_environment_raw, str) else ""
+    prompt_override_raw = snapshot.get("prompt_override")
+    prompt_override = str(prompt_override_raw).strip() if isinstance(prompt_override_raw, str) else ""
+
+    normalized = {
+        "context_nodes": context_nodes,
+        "pinned_nodes": pinned_nodes,
+        "selected_group": selected_group or None,
+        "selected_model": selected_model or None,
+        "session_environment": session_environment or None,
+        "session_environment_auto": bool(snapshot.get("session_environment_auto", True)),
+        "prompt_override": prompt_override or None,
+        "session_parameters": _normalize_session_parameters(snapshot.get("session_parameters")),
+    }
+    return normalized
+
+
+def _normalize_chat_project_record(raw_project: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_project, dict):
+        return None
+
+    project_id = str(raw_project.get("id") or "").strip()
+    if not project_id:
+        return None
+
+    created_at = str(raw_project.get("created_at") or _now_iso())
+    updated_at = str(raw_project.get("updated_at") or created_at)
+    name = _trim_text(raw_project.get("name") or _DEFAULT_PROJECT_NAME, limit=80) or _DEFAULT_PROJECT_NAME
+    return {
+        "id": project_id,
+        "name": name,
+        "root_path": _normalize_project_root_path(raw_project.get("root_path"), project_id=project_id),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _normalize_chat_session_record(
+    raw_session: Any,
+    *,
+    default_project_id: str,
+    known_project_ids: set[str],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_session, dict):
+        return None
+
+    session_id = str(raw_session.get("id") or "").strip()
+    if not session_id:
+        return None
+
+    created_at = str(raw_session.get("created_at") or _now_iso())
+    updated_at = str(raw_session.get("updated_at") or created_at)
+    title = _trim_text(raw_session.get("title") or _DEFAULT_SESSION_TITLE, limit=80) or _DEFAULT_SESSION_TITLE
+    auto_title = bool(raw_session.get("auto_title", title == _DEFAULT_SESSION_TITLE))
+    project_id = str(raw_session.get("project_id") or "").strip()
+    if project_id not in known_project_ids:
+        project_id = default_project_id
+
+    return {
+        "id": session_id,
+        "project_id": project_id,
+        "title": title,
+        "auto_title": auto_title,
+        "is_archived": bool(raw_session.get("is_archived", False)),
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "tags": _normalize_chat_session_tags(raw_session.get("tags")),
+        "workspace_path": str(raw_session.get("workspace_path") or "").strip() or None,
+        "snapshot": _normalize_chat_session_snapshot(raw_session.get("snapshot")),
+        "messages": _normalize_chat_messages(raw_session.get("messages")),
+    }
+
+
+def _project_map(store: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(project.get("id")): project
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip()
+    }
+
+
+def _get_store_project(store: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
+    projects = _project_map(store)
+    target_id = str(project_id or store.get("active_project_id") or "").strip()
+    if target_id and target_id in projects:
+        return projects[target_id]
+    for project in store.get("projects", []):
+        if isinstance(project, dict):
+            return project
+    fallback = _build_default_chat_project()
+    store["projects"] = [fallback]
+    store["active_project_id"] = fallback["id"]
+    return fallback
+
+
+def _ensure_project_workspace_dir(project: dict[str, Any]) -> Path:
+    root = _ensure_directory(
+        _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or uuid4().hex))
+    )
+    project["root_path"] = str(root)
+    _ensure_directory(root / _PROJECT_SESSIONS_DIRNAME)
+    return root
+
+
+def _ensure_session_workspace_dir(store: dict[str, Any], session: dict[str, Any]) -> str:
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    _ensure_project_workspace_dir(project)
+    workspace = _ensure_directory(_session_workspace_path(session, project))
+    session["project_id"] = str(project["id"])
+    session["workspace_path"] = str(workspace)
+    return str(workspace)
+
+
+def _ensure_store_workspace_dirs(store: dict[str, Any]) -> None:
+    for project in store.get("projects", []):
+        if isinstance(project, dict):
+            _ensure_project_workspace_dir(project)
+    for session in store.get("sessions", []):
+        if isinstance(session, dict):
+            _ensure_session_workspace_dir(store, session)
+
+
+def _resolve_new_chat_session_project_id(
+    store: dict[str, Any],
+    requested_project_id: str | None = None,
+) -> str:
+    projects = _project_map(store)
+    cleaned_requested = str(requested_project_id or "").strip()
+    if cleaned_requested and cleaned_requested in projects:
+        return cleaned_requested
+
+    active_session_id = str(store.get("active_session_id") or "").strip()
+    if active_session_id:
+        active_session = next(
+            (session for session in store.get("sessions", []) if isinstance(session, dict) and session.get("id") == active_session_id),
+            None,
+        )
+        if isinstance(active_session, dict):
+            candidate_project_id = str(active_session.get("project_id") or "").strip()
+            if candidate_project_id in projects:
+                return candidate_project_id
+
+    active_project_id = str(store.get("active_project_id") or "").strip()
+    if active_project_id in projects:
+        return active_project_id
+
+    return str(_get_store_project(store).get("id"))
+
+
+def _normalize_chat_session_store(raw_store: Any) -> dict[str, Any]:
+    if not isinstance(raw_store, dict):
+        raw_store = {}
+
+    seen_project_ids: set[str] = set()
+    projects: list[dict[str, Any]] = []
+    for raw_project in raw_store.get("projects", []):
+        project = _normalize_chat_project_record(raw_project)
+        if project is None:
+            continue
+        project_id = str(project["id"])
+        if project_id in seen_project_ids:
+            continue
+        seen_project_ids.add(project_id)
+        projects.append(project)
+
+    if not projects:
+        projects.append(_build_default_chat_project())
+
+    project_ids = {str(project["id"]) for project in projects}
+    default_project_id = str(projects[0]["id"])
+
+    seen_ids: set[str] = set()
+    sessions: list[dict[str, Any]] = []
+    for raw_session in raw_store.get("sessions", []):
+        session = _normalize_chat_session_record(
+            raw_session,
+            default_project_id=default_project_id,
+            known_project_ids=project_ids,
+        )
+        if session is None:
+            continue
+        session_id = str(session["id"])
+        if session_id in seen_ids:
+            continue
+        seen_ids.add(session_id)
+        sessions.append(session)
+        if len(sessions) >= _MAX_CHAT_SESSIONS:
+            break
+
+    active_session_id = str(raw_store.get("active_session_id") or "").strip() or None
+    active_session = next((session for session in sessions if session["id"] == active_session_id), None)
+    if active_session is None or bool(active_session.get("is_archived", False)):
+        active_session_id = next(
+            (session["id"] for session in sessions if not bool(session.get("is_archived", False))),
+            None,
+        )
+
+    active_project_id = str(raw_store.get("active_project_id") or "").strip() or None
+    if active_session is None and active_session_id:
+        active_session = next((session for session in sessions if session["id"] == active_session_id), None)
+    if active_session is not None:
+        session_project_id = str(active_session.get("project_id") or "").strip()
+        if session_project_id in project_ids:
+            active_project_id = session_project_id
+    if active_project_id not in project_ids:
+        active_project_id = default_project_id
+
+    turn_seq = 0
+    for session in sessions:
+        for message in session["messages"]:
+            turn_seq = max(turn_seq, int(message.get("turn_id") or 0))
+
+    raw_turn_seq = raw_store.get("turn_seq")
+    if isinstance(raw_turn_seq, int) and raw_turn_seq > turn_seq:
+        turn_seq = raw_turn_seq
+
+    raw_version = raw_store.get("version")
+    version = int(raw_version) if isinstance(raw_version, int) else 0
+
+    store = {
+        "version": max(0, version),
+        "turn_seq": max(0, turn_seq),
+        "active_project_id": active_project_id,
+        "active_session_id": active_session_id,
+        "projects": projects,
+        "sessions": sessions,
+    }
+    _ensure_store_workspace_dirs(store)
+    return store
+
+
+def _get_chat_session_store(state: Any) -> dict[str, Any]:
+    store = getattr(state, "chat_session_store", None)
+    if isinstance(store, dict):
+        return store
+
+    raw_store: Any = None
+    memory = getattr(state, "memory", None)
+    memory_getter = getattr(memory, "get_kv", None)
+    if callable(memory_getter):
+        raw_store = memory_getter(_CHAT_SESSIONS_KV_KEY)
+        if raw_store is None:
+            raw_store = memory_getter(_LEGACY_CHAT_SESSIONS_KV_KEY)
+
+    store = _normalize_chat_session_store(raw_store)
+    state.chat_session_store = store
+    state.chat_sessions_version = int(store["version"])
+    state.chat_turn_seq = max(int(getattr(state, "chat_turn_seq", 0)), int(store["turn_seq"]))
+    state.active_chat_session_id = store["active_session_id"]
+    state.active_chat_project_id = store["active_project_id"]
+    memory_setter = getattr(memory, "set_kv", None)
+    if callable(memory_setter):
+        memory_setter(_CHAT_SESSIONS_KV_KEY, store)
     if not hasattr(state, "chat_version"):
         state.chat_version = 0
-    return history
+    return store
+
+
+def _persist_chat_session_store(state: Any) -> None:
+    store = _get_chat_session_store(state)
+    _ensure_store_workspace_dirs(store)
+    state.chat_sessions_version = int(store["version"])
+    state.chat_turn_seq = max(int(getattr(state, "chat_turn_seq", 0)), int(store["turn_seq"]))
+    state.active_chat_session_id = store["active_session_id"]
+    state.active_chat_project_id = store["active_project_id"]
+
+    memory = getattr(state, "memory", None)
+    memory_setter = getattr(memory, "set_kv", None)
+    if callable(memory_setter):
+        memory_setter(_CHAT_SESSIONS_KV_KEY, store)
+
+
+def _touch_chat_sessions(state: Any) -> None:
+    store = _get_chat_session_store(state)
+    store["version"] = int(store.get("version", 0)) + 1
+    state.chat_sessions_version = int(store["version"])
+
+
+def _find_chat_session(
+    state: Any,
+    session_id: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    store = _get_chat_session_store(state)
+    target_id = str(session_id or store.get("active_session_id") or "").strip()
+    if not target_id:
+        return None, store
+    for session in store["sessions"]:
+        if session["id"] == target_id:
+            return session, store
+    return None, store
+
+
+def _build_chat_session_snapshot(
+    metadata: dict[str, Any] | None,
+    *,
+    selected_model: str | None = None,
+) -> dict[str, Any]:
+    normalized_metadata = metadata if isinstance(metadata, dict) else {}
+    selected_group_raw = (
+        normalized_metadata.get("selected_group")
+        or normalized_metadata.get("project_label")
+        or normalized_metadata.get("group_label")
+    )
+    snapshot = {
+        "context_nodes": _normalize_focus_context_nodes(normalized_metadata.get("context_nodes")),
+        "pinned_nodes": _normalize_focus_context_nodes(normalized_metadata.get("pinned_nodes")),
+        "selected_group": str(selected_group_raw).strip() if isinstance(selected_group_raw, str) else None,
+        "selected_model": str(selected_model).strip() if isinstance(selected_model, str) and selected_model.strip() else None,
+        "session_environment": str(normalized_metadata.get("session_environment") or "").strip().lower() or None,
+        "session_environment_auto": bool(normalized_metadata.get("session_environment_auto", True)),
+        "prompt_override": str(normalized_metadata.get("prompt_override") or "").strip() or None,
+        "session_parameters": _normalize_session_parameters(normalized_metadata.get("session_parameters")),
+    }
+    return _normalize_chat_session_snapshot(snapshot)
+
+
+def _serialize_chat_session_snapshot(session: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(session, dict):
+        return _normalize_chat_session_snapshot({})
+    return _normalize_chat_session_snapshot(session.get("snapshot"))
+
+
+def _build_chat_session_preview(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        text = _trim_text(message.get("text") or "", limit=96)
+        if text:
+            return text
+    return ""
+
+
+def _serialize_chat_project_summary(project: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(project.get("id") or "")
+    project_sessions = [
+        session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict) and str(session.get("project_id") or "") == project_id
+    ]
+    latest_session_update = max(
+        (
+            str(session.get("updated_at") or session.get("created_at") or "")
+            for session in project_sessions
+            if isinstance(session, dict)
+        ),
+        default="",
+    )
+    sessions_root = _project_sessions_root_path(project)
+    return {
+        "id": project_id,
+        "name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "root_path": str(project.get("root_path") or ""),
+        "sessions_path": str(sessions_root),
+        "created_at": str(project.get("created_at") or _now_iso()),
+        "updated_at": max(str(project.get("updated_at") or _now_iso()), latest_session_update),
+        "session_count": len(project_sessions),
+        "active": str(store.get("active_project_id") or "") == project_id,
+    }
+
+
+def _serialize_chat_session_summary(session: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _serialize_chat_session_snapshot(session)
+    messages = _normalize_chat_messages(session.get("messages"))
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    workspace_path = _ensure_session_workspace_dir(store, session)
+    return {
+        "id": session["id"],
+        "project_id": str(session.get("project_id") or project.get("id") or ""),
+        "title": str(session.get("title") or _DEFAULT_SESSION_TITLE),
+        "auto_title": bool(session.get("auto_title", False)),
+        "is_archived": bool(session.get("is_archived", False)),
+        "created_at": str(session.get("created_at") or _now_iso()),
+        "updated_at": str(session.get("updated_at") or _now_iso()),
+        "tags": _normalize_chat_session_tags(session.get("tags")),
+        "project_label": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "workspace_path": workspace_path,
+        "node_count": len(snapshot.get("context_nodes") or []),
+        "preview": _build_chat_session_preview(messages),
+        "message_count": len(messages),
+        "snapshot": snapshot,
+    }
+
+
+def _serialize_chat_session_detail(session: dict[str, Any], store: dict[str, Any], state: Any | None = None) -> dict[str, Any]:
+    detail = _serialize_chat_session_summary(session, store)
+    detail["version"] = int(getattr(state, "chat_version", 0)) if state is not None else 0
+    detail["messages"] = serialize_chat_history(_normalize_chat_messages(session.get("messages")))
+    return detail
+
+
+def list_chat_projects(state: Any) -> list[dict[str, Any]]:
+    store = _get_chat_session_store(state)
+    projects = sorted(
+        store["projects"],
+        key=lambda project: _serialize_chat_project_summary(project, store)["updated_at"],
+        reverse=True,
+    )
+    return [_serialize_chat_project_summary(project, store) for project in projects]
+
+
+def list_chat_sessions(state: Any) -> list[dict[str, Any]]:
+    store = _get_chat_session_store(state)
+    sessions = sorted(
+        store["sessions"],
+        key=lambda session: str(session.get("updated_at") or session.get("created_at") or ""),
+        reverse=True,
+    )
+    return [_serialize_chat_session_summary(session, store) for session in sessions]
+
+
+def get_active_chat_project_id(state: Any) -> str | None:
+    store = _get_chat_session_store(state)
+    active_project_id = store.get("active_project_id")
+    return str(active_project_id) if isinstance(active_project_id, str) and active_project_id else None
+
+
+def get_active_chat_session_id(state: Any) -> str | None:
+    store = _get_chat_session_store(state)
+    active_session_id = store.get("active_session_id")
+    return str(active_session_id) if isinstance(active_session_id, str) and active_session_id else None
+
+
+def get_chat_session_detail(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def get_chat_session_workspace_path(state: Any, session_id: str | None = None) -> str | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    return _ensure_session_workspace_dir(store, session)
+
+
+def _build_worker_workspace_headers(state: Any, session_id: str | None = None) -> dict[str, str] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    workspace_path = _ensure_session_workspace_dir(store, session)
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    return {
+        WORKSPACE_PATH_HEADER: workspace_path,
+        SESSION_ID_HEADER: str(session.get("id") or ""),
+        PROJECT_ID_HEADER: str(project.get("id") or ""),
+    }
+
+
+def _resolve_workspace_target_path(workspace_root: Path, relative_path: str | None = None) -> Path:
+    target = workspace_root
+    cleaned_relative = str(relative_path or "").strip().strip("/")
+    if cleaned_relative:
+        target = (workspace_root / cleaned_relative).resolve()
+        try:
+            target.relative_to(workspace_root)
+        except ValueError as exc:
+            raise ValueError("Workspace path escapes the session root") from exc
+    return target
+
+
+def list_chat_session_workspace_files(
+    state: Any,
+    session_id: str,
+    *,
+    relative_path: str | None = None,
+) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    workspace_root = Path(_ensure_session_workspace_dir(store, session))
+    target = _resolve_workspace_target_path(workspace_root, relative_path=relative_path)
+    if target.exists() and not target.is_dir():
+        raise ValueError("Requested workspace path is a file")
+    target.mkdir(parents=True, exist_ok=True)
+
+    entries: list[dict[str, Any]] = []
+    for child in sorted(target.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))[:200]:
+        stat = child.stat()
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "relative_path": str(child.relative_to(workspace_root)),
+                "is_dir": child.is_dir(),
+                "size": None if child.is_dir() else int(stat.st_size),
+                "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+
+    return {
+        "session_id": str(session["id"]),
+        "project_id": str(project.get("id") or ""),
+        "project_name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "workspace_path": str(workspace_root),
+        "relative_path": str(target.relative_to(workspace_root)) if target != workspace_root else "",
+        "entries": entries,
+    }
+
+
+def get_chat_snapshot(state: Any) -> dict[str, Any]:
+    session, _store = _find_chat_session(state, None)
+    return {
+        "version": int(getattr(state, "chat_version", 0)),
+        "session_id": session["id"] if isinstance(session, dict) else None,
+        "messages": serialize_chat_history(session.get("messages", []) if isinstance(session, dict) else []),
+        "snapshot": _serialize_chat_session_snapshot(session),
+    }
+
+
+def archive_chat_session(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    changed = False
+    if not bool(session.get("is_archived", False)):
+        session["is_archived"] = True
+        changed = True
+
+    if store.get("active_session_id") == session["id"]:
+        store["active_session_id"] = None
+        state.active_chat_session_id = None
+        touch_chat(state)
+        changed = True
+
+    if not changed:
+        return _serialize_chat_session_detail(session, store, state)
+
+    session["updated_at"] = _now_iso()
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def create_chat_project(
+    state: Any,
+    *,
+    name: str,
+    root_path: str | None = None,
+    activate: bool = True,
+) -> dict[str, Any]:
+    cleaned_name = _trim_text(name or "", limit=80)
+    if not cleaned_name:
+        raise ValueError("Project name is required")
+
+    store = _get_chat_session_store(state)
+    project_id = uuid4().hex
+    normalized_root_path = _validate_new_project_root_path(root_path, project_id=project_id)
+    if any(str(project.get("root_path") or "") == normalized_root_path for project in store.get("projects", [])):
+        raise ValueError("A project with the same disk path already exists")
+
+    now = _now_iso()
+    project = {
+        "id": project_id,
+        "name": cleaned_name,
+        "root_path": normalized_root_path,
+        "created_at": now,
+        "updated_at": now,
+    }
+    store["projects"].append(project)
+    _ensure_project_workspace_dir(project)
+    if activate:
+        store["active_project_id"] = project_id
+        state.active_chat_project_id = project_id
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_project_summary(project, store)
+
+
+def create_chat_session(
+    state: Any,
+    *,
+    title: str | None = None,
+    snapshot: dict[str, Any] | None = None,
+    activate: bool = True,
+    archive_session_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    store = _get_chat_session_store(state)
+    if isinstance(archive_session_id, str) and archive_session_id.strip():
+        archive_chat_session(state, archive_session_id.strip())
+        store = _get_chat_session_store(state)
+    now = _now_iso()
+    cleaned_title = _trim_text(title or "", limit=80)
+    resolved_project_id = _resolve_new_chat_session_project_id(store, requested_project_id=project_id)
+    session = {
+        "id": uuid4().hex,
+        "project_id": resolved_project_id,
+        "title": cleaned_title or _DEFAULT_SESSION_TITLE,
+        "auto_title": not bool(cleaned_title),
+        "is_archived": False,
+        "created_at": now,
+        "updated_at": now,
+        "tags": [],
+        "workspace_path": None,
+        "snapshot": _normalize_chat_session_snapshot(snapshot),
+        "messages": [],
+    }
+    store["sessions"].append(session)
+    store["sessions"] = store["sessions"][-_MAX_CHAT_SESSIONS:]
+    _ensure_session_workspace_dir(store, session)
+    if activate:
+        store["active_session_id"] = session["id"]
+        store["active_project_id"] = resolved_project_id
+        state.active_chat_session_id = session["id"]
+        state.active_chat_project_id = resolved_project_id
+        touch_chat(state)
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def activate_chat_session(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    changed = False
+    if bool(session.get("is_archived", False)):
+        session["is_archived"] = False
+        changed = True
+    if store.get("active_session_id") != session["id"]:
+        store["active_session_id"] = session["id"]
+        store["active_project_id"] = str(session.get("project_id") or store.get("active_project_id") or "")
+        state.active_chat_session_id = session["id"]
+        state.active_chat_project_id = store["active_project_id"]
+        touch_chat(state)
+        changed = True
+    if changed:
+        session["updated_at"] = _now_iso()
+        _touch_chat_sessions(state)
+        _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def update_chat_session(
+    state: Any,
+    session_id: str,
+    *,
+    title: str | object = _UNSET,
+    tags: list[str] | object = _UNSET,
+    snapshot: dict[str, Any] | object = _UNSET,
+) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    changed = False
+    if title is not _UNSET:
+        cleaned_title = _trim_text(title or "", limit=80)
+        session["title"] = cleaned_title or _DEFAULT_SESSION_TITLE
+        session["auto_title"] = not bool(cleaned_title)
+        changed = True
+    if tags is not _UNSET:
+        session["tags"] = _normalize_chat_session_tags(tags)
+        changed = True
+    if snapshot is not _UNSET:
+        session["snapshot"] = _normalize_chat_session_snapshot(snapshot)
+        changed = True
+
+    if not changed:
+        return _serialize_chat_session_detail(session, store, state)
+
+    session["updated_at"] = _now_iso()
+    _touch_chat_sessions(state)
+    if get_active_chat_session_id(state) == session["id"]:
+        touch_chat(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def get_chat_history(state: Any, session_id: str | None = None) -> list[dict[str, Any]]:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        state.active_chat_session_id = store.get("active_session_id")
+        if not hasattr(state, "chat_version"):
+            state.chat_version = 0
+        legacy_history = getattr(state, "chat_history", None)
+        if isinstance(legacy_history, list):
+            return legacy_history
+        return []
+    if not hasattr(state, "chat_version"):
+        state.chat_version = 0
+    return session["messages"]
 
 
 def touch_chat(state: Any) -> None:
@@ -214,9 +1024,10 @@ def _update_assistant_message(
     text: str | None,
     status: str = "thinking",
     *,
+    session_id: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> None:
-    chat_history = get_chat_history(state)
+    chat_history = get_chat_history(state, session_id=session_id)
     for msg in reversed(chat_history):
         if msg.get("role") == "assistant" and msg.get("turn_id") == turn_id:
             previous_text = str(msg.get("text") or "")
@@ -292,6 +1103,25 @@ def _normalize_focus_context_nodes(raw_nodes: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def _normalize_session_parameters(raw_parameters: Any) -> list[dict[str, str]]:
+    values = raw_parameters if isinstance(raw_parameters, list) else []
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in values:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or "").strip()
+        value = str(entry.get("value") or "").strip()
+        if not key or not value:
+            continue
+        lowered = key.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append({"key": key, "value": value})
+    return normalized
+
+
 def _build_user_message_payload(
     metadata: dict[str, Any] | None,
     context_pks: list[int],
@@ -304,6 +1134,18 @@ def _build_user_message_payload(
     context_nodes = _normalize_focus_context_nodes((metadata or {}).get("context_nodes"))
     if context_nodes:
         payload["context_nodes"] = context_nodes
+    pinned_nodes = _normalize_focus_context_nodes((metadata or {}).get("pinned_nodes"))
+    if pinned_nodes:
+        payload["pinned_nodes"] = pinned_nodes
+    session_environment = str((metadata or {}).get("session_environment") or "").strip().lower()
+    if session_environment:
+        payload["session_environment"] = session_environment
+    prompt_override = str((metadata or {}).get("prompt_override") or "").strip()
+    if prompt_override:
+        payload["prompt_override"] = prompt_override
+    session_parameters = _normalize_session_parameters((metadata or {}).get("session_parameters"))
+    if session_parameters:
+        payload["session_parameters"] = session_parameters
 
     return payload or None
 
@@ -318,8 +1160,6 @@ def _extract_submission_inputs(draft: dict[str, Any]) -> dict[str, Any]:
         "code",
         "protocol",
         "overrides",
-        "pseudo_family",
-        "pseudo_family_label",
     }
     visited: set[int] = set()
 
@@ -374,6 +1214,45 @@ def _find_first_named_value(payload: Any, candidate_keys: set[str]) -> Any:
             if nested is not None:
                 return nested
     return None
+
+
+def _looks_like_code_key(key: Any) -> bool:
+    lowered = str(key).strip().lower()
+    return lowered in {"code", "code_label", "codes"} or lowered.endswith("_code")
+
+
+def _find_first_matching_value(payload: Any, predicate: Any) -> Any:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if predicate(str(key), value) and value not in (None, "", [], {}):
+                return value
+            nested = _find_first_matching_value(value, predicate)
+            if nested is not None:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = _find_first_matching_value(item, predicate)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _flatten_input_values(payload: Any, *, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
+    flattened = out if isinstance(out, dict) else {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_text = str(key).strip()
+            if not key_text:
+                continue
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if isinstance(value, dict):
+                _flatten_input_values(value, prefix=path, out=flattened)
+                continue
+            flattened[path] = value
+        return flattened
+    if prefix:
+        flattened[prefix] = payload
+    return flattened
 
 
 def _extract_target_computer(draft: dict[str, Any]) -> str | None:
@@ -483,9 +1362,9 @@ def _normalize_primary_input_field(label: str, value: Any) -> dict[str, Any] | N
 def _extract_primary_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     primary_inputs: dict[str, Any] = {}
 
-    code_value = _find_first_named_value(
+    code_value = _find_first_matching_value(
         inputs,
-        {"code", "code_label", "pw_code", "qe_code", "codes"},
+        lambda key, _value: _looks_like_code_key(key),
     )
     code_field = _normalize_primary_input_field("Code", code_value)
     if isinstance(code_field, dict):
@@ -532,27 +1411,41 @@ def _is_default_advanced_setting(key: str, value: Any) -> bool:
     return False
 
 
+def _should_include_advanced_setting(path: str, value: Any) -> bool:
+    if _is_empty_submission_value(value):
+        return False
+    lowered_path = str(path).strip().lower()
+    if not lowered_path or lowered_path.startswith("metadata."):
+        return False
+    segments = [segment for segment in lowered_path.split(".") if segment]
+    if not segments:
+        return False
+    leaf = segments[-1]
+    if leaf in {"pk", "uuid"}:
+        return False
+    if any(_looks_like_code_key(segment) for segment in segments):
+        return False
+    if any(
+        segment in {"structure", "structure_pk", "structure_id", "computer", "computer_label", "computer_name"}
+        for segment in segments
+    ):
+        return False
+    if leaf in {"process_label", "workchain", "workchain_label", "entry_point", "workflow", "workflow_label"}:
+        return False
+    return not _is_default_advanced_setting(leaf, value)
+
+
 def _collect_advanced_settings(payload: Any) -> dict[str, Any]:
     settings: dict[str, Any] = {}
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            for key, value in node.items():
-                lowered = str(key).strip().lower()
-                if (
-                    lowered in _CRITICAL_ADVANCED_KEYS
-                    and lowered not in settings
-                    and not _is_empty_submission_value(value)
-                    and not _is_default_advanced_setting(lowered, value)
-                ):
-                    settings[lowered] = value
-                if isinstance(value, (dict, list)):
-                    walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(payload)
+    for path, value in _flatten_input_values(payload).items():
+        lowered_path = str(path).strip().lower()
+        if not _should_include_advanced_setting(lowered_path, value):
+            continue
+        leaf = lowered_path.rsplit(".", 1)[-1]
+        target_key = leaf if leaf and leaf not in settings else lowered_path
+        if target_key in settings:
+            continue
+        settings[target_key] = value
     return settings
 
 
@@ -656,8 +1549,6 @@ def _normalize_submission_draft_payload(
         advanced_settings = {}
         for key, value in raw_advanced_settings.items():
             lowered = str(key).strip().lower()
-            if lowered not in _CRITICAL_ADVANCED_KEYS:
-                continue
             if _is_empty_submission_value(value) or _is_default_advanced_setting(lowered, value):
                 continue
             advanced_settings[lowered] = value
@@ -854,6 +1745,51 @@ def _extract_submission_draft_from_output_payload(output_payload: dict[str, Any]
     return None
 
 
+def _extract_recovery_plan_from_submission_draft(submission_draft: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(submission_draft, dict):
+        return None
+    meta = submission_draft.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    recovery_plan = meta.get("recovery_plan")
+    return recovery_plan if isinstance(recovery_plan, dict) and recovery_plan else None
+
+
+def _extract_recovery_payload(
+    output_payload: dict[str, Any] | None,
+    submission_draft: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    recovery_plan: dict[str, Any] | None = None
+    next_step: str | None = None
+    status: str | None = None
+
+    candidates = [output_payload]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if status is None:
+            raw_status = candidate.get("status")
+            if isinstance(raw_status, str) and raw_status.strip():
+                status = raw_status.strip()
+        if next_step is None:
+            raw_next_step = candidate.get("next_step")
+            if isinstance(raw_next_step, str) and raw_next_step.strip():
+                next_step = raw_next_step.strip()
+        direct_plan = candidate.get("recovery_plan")
+        if isinstance(direct_plan, dict) and direct_plan and recovery_plan is None:
+            recovery_plan = direct_plan
+        details = candidate.get("details")
+        if isinstance(details, dict) and recovery_plan is None:
+            nested_plan = details.get("recovery_plan")
+            if isinstance(nested_plan, dict) and nested_plan:
+                recovery_plan = nested_plan
+
+    if recovery_plan is None:
+        recovery_plan = _extract_recovery_plan_from_submission_draft(submission_draft)
+
+    return recovery_plan, next_step, status
+
+
 def _extract_submission_draft_from_text(answer_text: str | None) -> dict[str, Any] | None:
     text = str(answer_text or "")
     if not text.strip():
@@ -973,6 +1909,17 @@ def _build_chat_message_payload(
         combined["type"] = "SUBMISSION_DRAFT"
         combined["submission_draft"] = resolved_submission_draft
 
+    recovery_plan, next_step, status = _extract_recovery_payload(
+        output_payload if isinstance(output_payload, dict) else None,
+        resolved_submission_draft,
+    )
+    if isinstance(recovery_plan, dict) and recovery_plan:
+        combined["recovery_plan"] = recovery_plan
+    if isinstance(next_step, str) and next_step:
+        combined["next_step"] = next_step
+    if isinstance(status, str) and status:
+        combined["status"] = status
+
     return combined or None
 
 
@@ -1000,9 +1947,10 @@ def _append_assistant_message(
     text: str,
     status: str = "done",
     *,
+    session_id: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> None:
-    chat_history = get_chat_history(state)
+    chat_history = get_chat_history(state, session_id=session_id)
     message = {
         "role": "assistant",
         "text": text,
@@ -1144,9 +2092,40 @@ def _inject_context_priority_instruction(user_intent: str, context_pks: list[int
     )
 
 
+def _inject_session_preference_instruction(user_intent: str, metadata: dict[str, Any] | None) -> str:
+    normalized_metadata = metadata if isinstance(metadata, dict) else {}
+    session_environment = str(normalized_metadata.get("session_environment") or "").strip().lower()
+    prompt_override = str(normalized_metadata.get("prompt_override") or "").strip()
+    session_parameters = _normalize_session_parameters(normalized_metadata.get("session_parameters"))
+    pinned_nodes = _normalize_focus_context_nodes(normalized_metadata.get("pinned_nodes"))
+
+    preference_lines: list[str] = []
+    if session_environment:
+        preference_lines.append(f"- active_environment: {session_environment}")
+    if pinned_nodes:
+        serialized_nodes = ", ".join(f"#{item['pk']}" for item in pinned_nodes)
+        preference_lines.append(f"- pinned_nodes: [{serialized_nodes}]")
+    if session_parameters:
+        serialized_params = ", ".join(f"{item['key']}={item['value']}" for item in session_parameters)
+        preference_lines.append(f"- session_parameters: {serialized_params}")
+    if prompt_override:
+        preference_lines.append(f"- prompt_override: {prompt_override}")
+
+    if not preference_lines:
+        return user_intent
+
+    return (
+        "SESSION PREFERENCES:\n"
+        + "\n".join(preference_lines)
+        + "\n- Treat these preferences as defaults for this session unless the current message overrides them.\n\n"
+        + f"USER REQUEST:\n{user_intent}"
+    )
+
+
 async def _thinking_status_ticker(
     state: Any,
     turn_id: int,
+    session_id: str,
     stop_event: asyncio.Event,
     get_running_tools: Callable[[], list[str]] | None = None,
     get_step_history: Callable[[], list[str]] | None = None,
@@ -1180,6 +2159,7 @@ async def _thinking_status_ticker(
             turn_id,
             "\n".join(status_lines),
             status="thinking",
+            session_id=session_id,
             payload=status_payload,
         )
         await asyncio.sleep(0.9)
@@ -1199,11 +2179,13 @@ def cancel_chat_turn(state: Any, turn_id: int | None = None) -> int | None:
             tasks.pop(candidate_turn_id, None)
             continue
         task.cancel()
+        session_id = getattr(task, "session_id", None)
         _update_assistant_message(
             state,
             candidate_turn_id,
             "Response stopped by user.",
             status="error",
+            session_id=str(session_id) if isinstance(session_id, str) and session_id else None,
         )
         logger.info(log_event("aiida.chat_turn.cancel.requested", turn_id=candidate_turn_id))
         return candidate_turn_id
@@ -1222,13 +2204,32 @@ def start_chat_turn(
     metadata: dict[str, Any] | None = None,
     source: str = "frontend",
 ) -> int:
-    chat_history = get_chat_history(state)
     normalized_metadata = dict(metadata or {})
     normalized_node_ids = _merge_context_node_ids(context_node_ids, normalized_metadata)
     normalized_metadata["context_pks"] = normalized_node_ids
     normalized_metadata["context_node_pks"] = normalized_node_ids
-    turn_id = getattr(state, "chat_turn_seq", 0) + 1
+    session, store = _find_chat_session(state, None)
+    if session is None:
+        session_detail = create_chat_session(
+            state,
+            snapshot=_build_chat_session_snapshot(normalized_metadata, selected_model=selected_model),
+            activate=True,
+        )
+        session, store = _find_chat_session(state, session_detail["id"])
+    if session is None:
+        raise RuntimeError("Unable to initialize chat session.")
+
+    session["snapshot"] = _build_chat_session_snapshot(normalized_metadata, selected_model=selected_model)
+    if session.get("auto_title", True) and not any(message.get("role") == "user" for message in session["messages"]):
+        session["title"] = _derive_chat_session_title(user_intent)
+        session["auto_title"] = True
+    session["updated_at"] = _now_iso()
+
+    turn_id = int(store.get("turn_seq", 0)) + 1
+    store["turn_seq"] = turn_id
     state.chat_turn_seq = turn_id
+    session_id = str(session["id"])
+    chat_history = session["messages"]
 
     user_message: dict[str, Any] = {"role": "user", "text": user_intent, "turn_id": turn_id}
     user_payload = _build_user_message_payload(normalized_metadata, normalized_node_ids)
@@ -1251,12 +2252,16 @@ def start_chat_turn(
             },
         }
     )
+    session["messages"] = chat_history[-_MAX_CHAT_SESSION_MESSAGES:]
     touch_chat(state)
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
 
     logger.info(
         log_event(
             "aiida.chat_turn.queued",
             turn_id=turn_id,
+            session_id=session_id,
             source=source,
             model=selected_model,
             intent=user_intent[:120],
@@ -1270,6 +2275,7 @@ def start_chat_turn(
         _execute_chat_turn(
             state=state,
             turn_id=turn_id,
+            session_id=session_id,
             user_intent=user_intent,
             selected_model=selected_model,
             fetch_context_nodes=fetch_context_nodes,
@@ -1278,6 +2284,7 @@ def start_chat_turn(
             metadata=normalized_metadata,
         )
     )
+    setattr(task, "session_id", session_id)
     _ensure_chat_task_registry(state)[turn_id] = task
     task.add_done_callback(
         lambda _task, _state=state, _turn_id=turn_id: _ensure_chat_task_registry(_state).pop(_turn_id, None)
@@ -1288,6 +2295,7 @@ def start_chat_turn(
 async def _execute_chat_turn(
     state: Any,
     turn_id: int,
+    session_id: str,
     user_intent: str,
     selected_model: str,
     fetch_context_nodes: Callable[[list[int]], list[dict[str, Any]]],
@@ -1338,6 +2346,7 @@ async def _execute_chat_turn(
                     turn_id,
                     f"Thinking: loaded {len(context_nodes)} referenced nodes...",
                     status="thinking",
+                    session_id=session_id,
                 )
 
             deps_kwargs: dict[str, Any] = {
@@ -1366,6 +2375,7 @@ async def _execute_chat_turn(
                     turn_id,
                     None,
                     status="thinking",
+                    session_id=session_id,
                     payload=payload,
                 )
 
@@ -1373,17 +2383,20 @@ async def _execute_chat_turn(
                 setattr(current_deps, "step_callback", _record_step_update)
 
             listener_token = set_bridge_call_listener(_record_bridge_call)
+            request_headers_token = set_bridge_request_headers(_build_worker_workspace_headers(state, session_id))
             spinner_task = asyncio.create_task(
                 _thinking_status_ticker(
                     state=state,
                     turn_id=turn_id,
+                    session_id=session_id,
                     stop_event=spinner_stop,
                     get_running_tools=lambda: list(bridge_tool_calls),
                     get_step_history=lambda: list(step_history),
                 )
             )
             try:
-                run_intent = _inject_context_priority_instruction(user_intent, normalized_node_ids)
+                run_intent = _inject_session_preference_instruction(user_intent, metadata)
+                run_intent = _inject_context_priority_instruction(run_intent, normalized_node_ids)
                 resolved_model_name = _to_agent_model_name(selected_model)
                 resolved_model = _build_agent_model(selected_model)
                 retry_budget, retry_base_backoff_seconds = _get_model_unavailable_retry_policy()
@@ -1467,6 +2480,7 @@ async def _execute_chat_turn(
                     raise last_run_error
             finally:
                 reset_bridge_call_listener(listener_token)
+                reset_bridge_request_headers(request_headers_token)
 
             spinner_stop.set()
             if spinner_task:
@@ -1510,14 +2524,22 @@ async def _execute_chat_turn(
                 turn_id,
                 answer_text,
                 status="done",
+                session_id=session_id,
                 payload=message_payload,
             )
-            state.chat_history = get_chat_history(state)[-200:]
+            session_history = get_chat_history(state, session_id=session_id)
+            session_history[:] = session_history[-_MAX_CHAT_SESSION_MESSAGES:]
+            session, _store = _find_chat_session(state, session_id)
+            if session is not None:
+                session["updated_at"] = _now_iso()
             touch_chat(state)
+            _touch_chat_sessions(state)
+            _persist_chat_session_store(state)
             logger.info(
                 log_event(
                     "aiida.chat_turn.done",
                     turn_id=turn_id,
+                    session_id=session_id,
                     run_id=getattr(result, "run_id", None),
                     elapsed=f"{elapsed:.2f}s",
                     answer_chars=len(answer_text),
@@ -1554,13 +2576,21 @@ async def _execute_chat_turn(
                 turn_id,
                 "Response stopped by user.",
                 status="error",
+                session_id=session_id,
             )
-            state.chat_history = get_chat_history(state)[-200:]
+            session_history = get_chat_history(state, session_id=session_id)
+            session_history[:] = session_history[-_MAX_CHAT_SESSION_MESSAGES:]
+            session, _store = _find_chat_session(state, session_id)
+            if session is not None:
+                session["updated_at"] = _now_iso()
             touch_chat(state)
+            _touch_chat_sessions(state)
+            _persist_chat_session_store(state)
             logger.info(
                 log_event(
                     "aiida.chat_turn.cancelled",
                     turn_id=turn_id,
+                    session_id=session_id,
                     elapsed=f"{elapsed:.2f}s",
                     model=selected_model,
                 )
@@ -1582,9 +2612,16 @@ async def _execute_chat_turn(
                 turn_id,
                 f"Request failed: {error}",
                 status="error",
+                session_id=session_id,
             )
-            state.chat_history = get_chat_history(state)[-200:]
+            session_history = get_chat_history(state, session_id=session_id)
+            session_history[:] = session_history[-_MAX_CHAT_SESSION_MESSAGES:]
+            session, _store = _find_chat_session(state, session_id)
+            if session is not None:
+                session["updated_at"] = _now_iso()
             touch_chat(state)
+            _touch_chat_sessions(state)
+            _persist_chat_session_store(state)
         finally:
             spinner_stop.set()
             if spinner_task:

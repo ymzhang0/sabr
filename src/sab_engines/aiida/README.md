@@ -19,8 +19,7 @@ src/sab_engines/aiida/
 │   └── service.py     # Chat turn orchestration
 ├── schema.py          # Engine domain response models
 ├── config.py          # Engine settings (bridge URL, etc.)
-├── static/            # Static assets
-└── legacy/            # Archived legacy UI/API code (not mounted)
+└── static/            # Static assets
 ```
 
 Compatibility paths removed:

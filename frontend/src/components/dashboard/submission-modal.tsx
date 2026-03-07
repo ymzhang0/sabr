@@ -330,7 +330,7 @@ function normalizePortSpec(raw: unknown): NormalizedPortSpec {
     if (typeof entry !== "string") {
       return;
     }
-    const cleaned = entry.trim();
+    const cleaned = stripTechnicalPrefix(entry);
     if (!cleaned) {
       return;
     }
@@ -347,7 +347,7 @@ function normalizePortSpec(raw: unknown): NormalizedPortSpec {
     if (typeof entry !== "string") {
       return;
     }
-    const cleaned = entry.trim();
+    const cleaned = stripTechnicalPrefix(entry);
     if (cleaned) {
       codePaths.add(cleaned);
     }
@@ -359,10 +359,13 @@ function normalizePortSpec(raw: unknown): NormalizedPortSpec {
     if (!portRecord) {
       return;
     }
-    const path = typeof portRecord.path === "string" ? portRecord.path.trim() : "";
-    if (!path) {
+    const rawPath = typeof portRecord.path === "string" ? portRecord.path.trim() : "";
+    if (!rawPath) {
       return;
     }
+    const path = stripTechnicalPrefix(rawPath);
+    if (!path) return;
+
     const kind = typeof portRecord.kind === "string" ? portRecord.kind.trim().toLowerCase() : "";
     if (kind === "code") {
       codePaths.add(path);
@@ -408,6 +411,42 @@ function findFirstNamedValue(payload: unknown, candidateKeys: Set<string>): unkn
       return value;
     }
     const nested = findFirstNamedValue(value, candidateKeys);
+    if (!isMissingValue(nested)) {
+      return nested;
+    }
+  }
+  return null;
+}
+
+function looksLikeCodeKey(key: string): boolean {
+  const lowered = key.trim().toLowerCase();
+  return lowered === "code" || lowered === "code_label" || lowered === "codes" || lowered.endsWith("_code");
+}
+
+function findFirstMatchingValue(
+  payload: unknown,
+  predicate: (key: string, value: unknown) => boolean,
+): unknown {
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const nested = findFirstMatchingValue(item, predicate);
+      if (!isMissingValue(nested)) {
+        return nested;
+      }
+    }
+    return null;
+  }
+
+  const record = asRecord(payload);
+  if (!record) {
+    return null;
+  }
+
+  for (const [key, value] of Object.entries(record)) {
+    if (predicate(key, value) && !isMissingValue(value)) {
+      return value;
+    }
+    const nested = findFirstMatchingValue(value, predicate);
     if (!isMissingValue(nested)) {
       return nested;
     }
@@ -486,7 +525,7 @@ function extractPrimaryFields(submissionDraft: SubmissionDraftPayload): Submissi
   };
 
   const inputs = submissionDraft.inputs;
-  const fallbackCode = findFirstNamedValue(inputs, new Set(["code", "code_label", "pw_code", "qe_code", "codes"]));
+  const fallbackCode = findFirstMatchingValue(inputs, (key) => looksLikeCodeKey(key));
   const fallbackStructure = findFirstNamedValue(inputs, new Set(["structure", "structure_pk", "structure_id"]));
   const fallbackPseudos = findFirstNamedValue(
     inputs,
@@ -614,6 +653,32 @@ function flattenInputPorts(payload: unknown, prefix = "", out: Record<string, un
   return out;
 }
 
+const INTERNAL_METADATA_KEYS = new Set([
+  "success",
+  "status",
+  "entry_point",
+  "protocol",
+  "intent_data",
+  "overrides",
+  "signature",
+  "pseudo_expectations",
+  "preview",
+  "errors",
+  "missing_ports",
+  "builder_inputs",
+]);
+
+function stripTechnicalPrefix(path: string): string {
+  const trimmed = path.trim();
+  if (trimmed.toLowerCase().startsWith("builder_inputs.")) {
+    return trimmed.substring("builder_inputs.".length).trim();
+  }
+  if (trimmed.toLowerCase() === "builder_inputs") {
+    return "";
+  }
+  return trimmed;
+}
+
 function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): SubmissionAllInputEntry[] {
   const directAllInputs = asRecord(submissionDraft.all_inputs) ?? asRecord(submissionDraft.meta.all_inputs);
   const directRecommended = asRecord(submissionDraft.recommended_inputs) ?? asRecord(submissionDraft.meta.recommended_inputs) ?? {};
@@ -628,10 +693,20 @@ function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): Subm
 
   if (directAllInputs) {
     Object.entries(directAllInputs).forEach(([path, rawValue]) => {
-      const normalizedPath = path.trim();
+      const rawNormalizedPath = path.trim();
+      if (!rawNormalizedPath) {
+        return;
+      }
+      const normalizedPath = stripTechnicalPrefix(rawNormalizedPath);
       if (!normalizedPath || seen.has(normalizedPath)) {
         return;
       }
+
+      const rootKey = normalizedPath.split(".")[0].toLowerCase();
+      if (INTERNAL_METADATA_KEYS.has(rootKey)) {
+        return;
+      }
+
       seen.add(normalizedPath);
       const entryRecord = asRecord(rawValue);
       const hasValueField = entryRecord && Object.prototype.hasOwnProperty.call(entryRecord, "value");
@@ -649,16 +724,27 @@ function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): Subm
     });
   }
 
-  if (entries.length > 0) {
-    return entries;
-  }
+  const rawInputs = asRecord(submissionDraft.inputs) ?? {};
+  const builderInputs = asRecord(rawInputs.builder_inputs);
+  // Promote builder_inputs if it is the primary container for workflow parameters
+  const source = (builderInputs && Object.keys(builderInputs).length > 0) ? builderInputs : rawInputs;
 
-  const flattened = flattenInputPorts(submissionDraft.inputs);
+  const flattened = flattenInputPorts(source);
   Object.entries(flattened).forEach(([path, value]) => {
-    const normalizedPath = path.trim();
+    const rawNormalizedPath = path.trim();
+    if (!rawNormalizedPath) {
+      return;
+    }
+    const normalizedPath = stripTechnicalPrefix(rawNormalizedPath);
     if (!normalizedPath || seen.has(normalizedPath)) {
       return;
     }
+
+    const rootKey = normalizedPath.split(".")[0].toLowerCase();
+    if (INTERNAL_METADATA_KEYS.has(rootKey)) {
+      return;
+    }
+
     seen.add(normalizedPath);
     const leaf = normalizedPath.toLowerCase().split(".").pop() ?? "";
     entries.push({
@@ -756,7 +842,7 @@ function classifyInputGroup(path: string): string {
   ) {
     return "physics_protocol";
   }
-  if (lowered.includes(".parameters") || lowered.startsWith("parameters") || lowered.includes("pw.parameters")) {
+  if (lowered.includes(".parameters") || lowered.startsWith("parameters")) {
     return "computational_details";
   }
   return "computational_details";
@@ -1096,21 +1182,7 @@ function normalizeValidationSummary(
   };
 }
 
-const CUTOFF_KEYS = new Set(["ecutwfc", "ecutrho"]);
-
 function buildInspectorInputEntries(entries: SubmissionAllInputEntry[]): SubmissionAllInputEntry[] {
-  const cutoffsUnderParameters = new Set<string>();
-  entries.forEach((entry) => {
-    const normalizedPath = entry.path.trim().toLowerCase();
-    if (!normalizedPath.includes(".parameters.")) {
-      return;
-    }
-    const leaf = normalizedPath.split(".").pop() ?? "";
-    if (CUTOFF_KEYS.has(leaf)) {
-      cutoffsUnderParameters.add(leaf);
-    }
-  });
-
   const seen = new Set<string>();
   const filtered: SubmissionAllInputEntry[] = [];
   entries.forEach((entry) => {
@@ -1120,10 +1192,6 @@ function buildInspectorInputEntries(entries: SubmissionAllInputEntry[]): Submiss
     }
     const normalizedPath = path.toLowerCase();
     if (seen.has(normalizedPath)) {
-      return;
-    }
-    const leaf = normalizedPath.split(".").pop() ?? "";
-    if (CUTOFF_KEYS.has(leaf) && cutoffsUnderParameters.has(leaf) && !normalizedPath.includes(".parameters.")) {
       return;
     }
     seen.add(normalizedPath);
@@ -1193,7 +1261,9 @@ function buildNamespaceTreeIndex(
       const parent = index === 1 ? "" : segments.slice(0, index - 1).join(".");
       registerChildNamespace(parent, namespace);
     }
-    appendLeaf(segments.slice(0, -1).join("."), entry);
+    // Correctly nest the leaf under its parent namespace
+    const leafNamespace = segments.length > 1 ? segments.slice(0, -1).join(".") : "";
+    appendLeaf(leafNamespace, entry);
   });
 
   specNamespaces.forEach((namespacePath) => {
@@ -1335,8 +1405,12 @@ function buildMetadataFallbackEntries(
   }
 
   const hasMetadata = entries.some((entry) => entry.path.toLowerCase().includes("metadata."));
-  const processLabel = submissionDraft.process_label.toLowerCase();
-  const shouldSeedMetadata = hasMetadata || processLabel.includes("quantumespresso.pw") || processLabel.includes("pw");
+  const namespaces = new Set((portSpec?.namespaces ?? []).map((entry) => entry.trim().toLowerCase()));
+  const shouldSeedMetadata =
+    hasMetadata ||
+    namespaces.has("metadata") ||
+    namespaces.has("metadata.options") ||
+    namespaces.has("metadata.options.resources");
   if (!shouldSeedMetadata) {
     return entries;
   }
@@ -1367,7 +1441,7 @@ function buildMetadataFallbackEntries(
   const additions: SubmissionAllInputEntry[] = [];
 
   METADATA_OPTION_PATHS.forEach((candidate) => {
-    const fullPath = targetPrefix ? `${targetPrefix}.${candidate.path} ` : candidate.path;
+    const fullPath = targetPrefix ? `${targetPrefix}.${candidate.path}` : candidate.path;
     const normalized = fullPath.toLowerCase();
     if (existing.has(normalized)) {
       return;
@@ -2102,9 +2176,9 @@ export function SubmissionModal({
   );
   const fallbackCodeValue = useMemo(() => {
     const fromInputs = stringifyCompact(
-      findFirstNamedValue(
+      findFirstMatchingValue(
         submissionDraft?.inputs ?? {},
-        new Set(["code", "code_label", "pw_code", "qe_code", "codes"]),
+        (key) => looksLikeCodeKey(key),
       ),
     );
     if (fromInputs) {
@@ -2335,6 +2409,14 @@ export function SubmissionModal({
     return `get_builder_from_protocol(${args}${args ? ", " : ""}protocol = "${protocol}")`;
   }, [isProtocolBuilder, submissionDraft]);
 
+  const discoveryMetadata = useMemo(() => {
+    if (!submissionDraft) return [];
+    const raw = asRecord(submissionDraft.inputs) ?? {};
+    return Object.entries(raw)
+      .filter(([key]) => INTERNAL_METADATA_KEYS.has(key))
+      .map(([key, value]) => ({ key: key.trim(), value }));
+  }, [submissionDraft]);
+
   const batchJobs = useMemo(
     () => (submissionDraft ? extractBatchJobRows(submissionDraft) : []),
     [submissionDraft],
@@ -2409,11 +2491,7 @@ export function SubmissionModal({
       setExpandedJsonFields({});
       setCodeSearchByPath(nextCodeSearch);
       const preferredOverride =
-        Object.values(nextDraftState).find((field) =>
-          ["kpoints_distance", "kpoint_distance", "ecutwfc", "ecutrho"].includes(
-            field.path.split(".").pop()?.toLowerCase() ?? "",
-          ),
-        ) ?? Object.values(nextDraftState)[0];
+        Object.values(nextDraftState).find((field) => field.isRecommended) ?? Object.values(nextDraftState)[0];
       if (preferredOverride) {
         setGlobalOverridePath(preferredOverride.path);
         setGlobalOverrideValue(String(preferredOverride.value));
@@ -3571,6 +3649,36 @@ export function SubmissionModal({
                 </div>
               </div>
             ) : null}
+
+            {discoveryMetadata.length > 0 && (
+              <div className="mt-4 border-t border-slate-200/60 pt-4 dark:border-slate-800/60">
+                <details className="group">
+                  <summary className="flex cursor-pointer list-none items-center justify-between text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200">
+                    <span className="flex items-center gap-2">
+                      <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" />
+                      Internal Discovery Metadata (Debug)
+                    </span>
+                    <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[10px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                      {discoveryMetadata.length} hidden items
+                    </span>
+                  </summary>
+                  <div className="mt-4 overflow-hidden rounded-xl border border-slate-200/80 bg-slate-50/50 p-4 dark:border-slate-800 dark:bg-slate-900/40">
+                    <div className="grid gap-x-8 gap-y-4 sm:grid-cols-2">
+                      {discoveryMetadata.map(({ key, value }) => (
+                        <div key={`${turnId}-meta-${key}`} className="flex flex-col gap-1.5 overflow-hidden">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                            {formatSettingKey(key)}
+                          </span>
+                          <div className="minimal-scrollbar max-h-[120px] overflow-y-auto font-mono text-[11px] text-slate-700 dark:text-slate-300">
+                            {renderValueNode(value, `${turnId}-meta-val-${key}`, onOpenDetail)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </details>
+              </div>
+            )}
 
             <div className="mt-5 border-t border-slate-200/80 pt-4 dark:border-slate-800">
               {isInlineMode && state.status !== "submitted" ? (

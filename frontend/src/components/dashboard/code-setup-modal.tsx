@@ -54,7 +54,7 @@ export function CodeSetupModal({
     const [formData, setFormData] = useState({
         label: "",
         description: "",
-        default_calc_job_plugin: "quantumespresso.pw",
+        default_calc_job_plugin: "",
         remote_abspath: "",
         prepend_text: "",
         append_text: "",
@@ -68,7 +68,7 @@ export function CodeSetupModal({
             setFormData({
                 label: "",
                 description: "",
-                default_calc_job_plugin: "quantumespresso.pw",
+                default_calc_job_plugin: "",
                 remote_abspath: "",
                 prepend_text: "",
                 append_text: "",
@@ -270,12 +270,12 @@ export function CodeSetupModal({
 
                     {showYamlInput && (
                         <div className="space-y-3 animate-in slide-in-from-top-2 duration-300">
-                            <textarea
-                                value={yamlInput}
-                                onChange={(e) => setYamlInput(e.target.value)}
-                                placeholder="label: pw-7.5&#10;default_calc_job_plugin: quantumespresso.pw&#10;filepath_executable: /path/to/pw.x&#10;..."
-                                className="w-full h-40 bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-4 text-xs font-mono focus:ring-2 focus:ring-blue-500/50 outline-none transition-all resize-none shadow-inner"
-                            />
+                                <textarea
+                                    value={yamlInput}
+                                    onChange={(e) => setYamlInput(e.target.value)}
+                                    placeholder="label: my-code&#10;default_calc_job_plugin: plugin.calcjob&#10;filepath_executable: /path/to/executable&#10;..."
+                                    className="w-full h-40 bg-zinc-900 text-zinc-100 border border-zinc-800 rounded-xl p-4 text-xs font-mono focus:ring-2 focus:ring-blue-500/50 outline-none transition-all resize-none shadow-inner"
+                                />
                             <div className="flex justify-end gap-2">
                                 <Button
                                     variant="ghost"
@@ -301,7 +301,7 @@ export function CodeSetupModal({
                         <div className="space-y-1.5">
                             <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">Label *</label>
                             <input
-                                placeholder="e.g. pw-7.5"
+                                placeholder="e.g. my-code"
                                 value={formData.label}
                                 onChange={(e) => setFormData({ ...formData, label: e.target.value })}
                                 className="w-full bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
@@ -312,7 +312,7 @@ export function CodeSetupModal({
                         <div className="space-y-1.5">
                             <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">AiiDA Plugin *</label>
                             <input
-                                placeholder="e.g. quantumespresso.pw"
+                                placeholder="e.g. plugin.calcjob"
                                 value={formData.default_calc_job_plugin}
                                 onChange={(e) => setFormData({ ...formData, default_calc_job_plugin: e.target.value })}
                                 className="w-full bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all font-mono"
@@ -325,7 +325,7 @@ export function CodeSetupModal({
                             <div className="relative">
                                 <Terminal className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
                                 <input
-                                    placeholder="/usr/bin/pw.x"
+                                    placeholder="/path/to/executable"
                                     value={formData.remote_abspath}
                                     onChange={(e) => setFormData({ ...formData, remote_abspath: e.target.value })}
                                     className="w-full pl-10 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all font-mono"
@@ -383,7 +383,7 @@ export function CodeSetupModal({
                         <div className="space-y-1.5">
                             <div className="flex items-center justify-between px-1">
                                 <label className="text-[10px] uppercase font-bold text-zinc-400">Prepend Text</label>
-                                <span className="text-[10px] text-zinc-400 italic">e.g. module load qe/7.5</span>
+                                <span className="text-[10px] text-zinc-400 italic">e.g. module load app/1.0</span>
                             </div>
                             <textarea
                                 placeholder="Commands to run before the executable..."

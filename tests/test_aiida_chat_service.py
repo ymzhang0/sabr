@@ -1,8 +1,24 @@
 """Tests for chat context metadata normalization and priority injection."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.sab_engines.aiida.chat import service as chat_service
+
+
+class _Memory:
+    def __init__(self) -> None:
+        self._values: dict[str, object] = {}
+
+    def get_kv(self, key: str):
+        return self._values.get(key)
+
+    def set_kv(self, key: str, value: object) -> None:
+        self._values[key] = value
+
+
+def _make_chat_state() -> SimpleNamespace:
+    return SimpleNamespace(memory=_Memory(), chat_version=0)
 
 
 def test_merge_context_node_ids_prefers_union_of_fields() -> None:
@@ -210,6 +226,47 @@ def test_build_chat_message_payload_extracts_submission_draft_from_output_draft_
     assert payload["submission_draft"]["meta"]["validation_summary"]["status"] == "VALIDATION_OK"
 
 
+def test_build_chat_message_payload_surfaces_recovery_plan_and_next_step() -> None:
+    output = SimpleNamespace(
+        data_payload={
+            "status": "SUBMISSION_BLOCKED",
+            "next_step": "Inspect the spec, verify resources, and ask the user before retrying.",
+            "recovery_plan": {
+                "status": "blocked",
+                "summary": "Missing required inputs: structure, code",
+                "missing_ports": ["structure", "code"],
+                "issues": [
+                    {
+                        "type": "missing_required_inputs",
+                        "message": "Required inputs are still missing after builder construction: structure, code",
+                    }
+                ],
+                "recommended_actions": [
+                    {
+                        "action": "inspect_spec",
+                        "reason": "Review the WorkChain spec first.",
+                    }
+                ],
+            },
+        }
+    )
+    deps = SimpleNamespace(get_registry_value=lambda _key: None)
+
+    payload = chat_service._build_chat_message_payload(
+        output,
+        deps,
+        tool_calls=["POST submission.draft-builder"],
+        answer_text="",
+    )
+
+    assert payload is not None
+    assert payload["status"] == "SUBMISSION_BLOCKED"
+    assert payload["next_step"] == "Inspect the spec, verify resources, and ask the user before retrying."
+    assert payload["recovery_plan"]["summary"] == "Missing required inputs: structure, code"
+    assert payload["recovery_plan"]["missing_ports"] == ["structure", "code"]
+    assert payload["tool_calls"] == ["POST submission.draft-builder"]
+
+
 def test_build_chat_message_payload_extracts_submission_draft_from_submission_tag_field() -> None:
     output = SimpleNamespace(
         data_payload={
@@ -256,6 +313,50 @@ def test_build_user_message_payload_keeps_context_nodes() -> None:
             {"pk": 12, "label": "#12", "formula": None, "node_type": "WorkChainNode"},
         ],
     }
+
+
+def test_build_user_message_payload_keeps_session_preferences() -> None:
+    metadata = {
+        "context_nodes": [
+            {"pk": 8, "label": "Si", "formula": "Si2", "node_type": "StructureData"},
+        ],
+        "pinned_nodes": [
+            {"pk": 21, "label": "Pinned Si", "formula": "Si2", "node_type": "StructureData"},
+        ],
+        "session_environment": "quantumespresso",
+        "prompt_override": "Keep four decimal places.",
+        "session_parameters": [
+            {"key": "ecutwfc", "value": "40 Ry"},
+            {"key": "kspacing", "value": "0.15 1/Ang"},
+        ],
+    }
+
+    payload = chat_service._build_user_message_payload(metadata, [8, 21])
+
+    assert payload is not None
+    assert payload["session_environment"] == "quantumespresso"
+    assert payload["prompt_override"] == "Keep four decimal places."
+    assert payload["pinned_nodes"][0]["pk"] == 21
+    assert payload["session_parameters"][0]["key"] == "ecutwfc"
+
+
+def test_inject_session_preference_instruction_adds_session_defaults() -> None:
+    intent = "Run a relaxation."
+    metadata = {
+        "session_environment": "quantumespresso",
+        "prompt_override": "Keep four decimal places.",
+        "pinned_nodes": [{"pk": 22, "label": "Si", "node_type": "StructureData"}],
+        "session_parameters": [{"key": "ecutwfc", "value": "40 Ry"}],
+    }
+
+    scoped = chat_service._inject_session_preference_instruction(intent, metadata)
+
+    assert "SESSION PREFERENCES" in scoped
+    assert "active_environment: quantumespresso" in scoped
+    assert "pinned_nodes: [#22]" in scoped
+    assert "session_parameters: ecutwfc=40 Ry" in scoped
+    assert "prompt_override: Keep four decimal places." in scoped
+    assert intent in scoped
 
 
 def test_build_submission_draft_text_block_for_ui_tag() -> None:
@@ -438,3 +539,115 @@ def test_is_retryable_model_unavailable_error_detects_high_demand_503() -> None:
 def test_is_retryable_model_unavailable_error_ignores_non_retryable_errors() -> None:
     model_rejected = RuntimeError("Request failed: status_code: 404, model is not found for api version")
     assert chat_service._is_retryable_model_unavailable_error(model_rejected) is False
+
+
+def test_create_chat_session_archives_previous_active_session() -> None:
+    state = _make_chat_state()
+
+    original = chat_service.create_chat_session(state, title="Original", activate=True)
+    fresh = chat_service.create_chat_session(
+        state,
+        title="Fresh",
+        activate=True,
+        archive_session_id=original["id"],
+    )
+
+    sessions = {session["id"]: session for session in chat_service.list_chat_sessions(state)}
+
+    assert chat_service.get_active_chat_session_id(state) == fresh["id"]
+    assert sessions[original["id"]]["is_archived"] is True
+    assert sessions[fresh["id"]]["is_archived"] is False
+
+
+def test_activate_chat_session_unarchives_history_session() -> None:
+    state = _make_chat_state()
+
+    archived = chat_service.create_chat_session(state, title="Archived candidate", activate=True)
+    current = chat_service.create_chat_session(
+        state,
+        title="Current",
+        activate=True,
+        archive_session_id=archived["id"],
+    )
+
+    restored = chat_service.activate_chat_session(state, archived["id"])
+
+    assert current["id"] != archived["id"]
+    assert restored is not None
+    assert restored["id"] == archived["id"]
+    assert restored["is_archived"] is False
+    assert chat_service.get_active_chat_session_id(state) == archived["id"]
+
+
+def test_normalize_chat_session_store_skips_archived_active_session() -> None:
+    normalized = chat_service._normalize_chat_session_store(
+        {
+            "active_session_id": "archived-session",
+            "sessions": [
+                {"id": "archived-session", "title": "Archived", "is_archived": True},
+                {"id": "active-session", "title": "Active", "is_archived": False},
+            ],
+        }
+    )
+
+    assert normalized["active_session_id"] == "active-session"
+
+
+def test_create_chat_session_creates_default_project_workspace(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.SABR_PROJECTS_ROOT
+    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    try:
+        session = chat_service.create_chat_session(state, title="Workspace session", activate=True)
+    finally:
+        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+
+    assert session["project_id"]
+    assert session["project_label"] == "Default Project"
+    workspace_path = Path(session["workspace_path"])
+    assert workspace_path.exists()
+    assert workspace_path.name == session["id"]
+    assert workspace_path.parent.name == "sessions"
+
+
+def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.SABR_PROJECTS_ROOT
+    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    try:
+        project = chat_service.create_chat_project(
+            state,
+            name="Born Charge Study",
+            root_path=str(tmp_path / "born-study"),
+            activate=True,
+        )
+        session = chat_service.create_chat_session(
+            state,
+            title="Analyze Born charges",
+            activate=True,
+            project_id=project["id"],
+        )
+    finally:
+        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+
+    assert session["project_id"] == project["id"]
+    assert session["project_label"] == "Born Charge Study"
+    assert Path(session["workspace_path"]).parent.parent == Path(project["root_path"])
+
+
+def test_list_chat_session_workspace_files_returns_saved_entries(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.SABR_PROJECTS_ROOT
+    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    try:
+        session = chat_service.create_chat_session(state, title="Workspace browser", activate=True)
+        workspace_path = Path(session["workspace_path"])
+        (workspace_path / "plots").mkdir(parents=True, exist_ok=True)
+        (workspace_path / "plots" / "band-structure.png").write_bytes(b"png")
+        payload = chat_service.list_chat_session_workspace_files(state, session["id"], relative_path="plots")
+    finally:
+        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+
+    assert payload is not None
+    assert payload["relative_path"] == "plots"
+    assert payload["entries"][0]["name"] == "band-structure.png"

@@ -29,7 +29,6 @@ from src.sab_engines.aiida.agent.tools import (
     inspect_lab_infrastructure as inspect_lab_infrastructure_via_bridge,
     inspect_process,
     inspect_workchain_spec,
-    list_group_labels,
     list_groups,
     list_local_archives,
     list_remote_files,
@@ -65,29 +64,55 @@ _KNOWN_PARALLEL_KEYS = {
     "ndiag",
 }
 _CRITICAL_ADVANCED_KEYS = {
-    "kpoints_distance",
-    "kpoints_mesh",
-    "kpoints",
-    "mesh",
-    "ecutwfc",
-    "ecutrho",
-    "occupations",
-    "smearing",
-    "degauss",
-    "conv_thr",
-    "mixing_beta",
-    "diagonalization",
-    "electron_maxstep",
-    "nstep",
-    "hubbard_u",
-    "hubbard_v",
-    "spin_type",
-    "tot_charge",
-    "tot_magnetization",
-    "press_conv_thr",
-    "forc_conv_thr",
+    "protocol",
     *_KNOWN_PARALLEL_KEYS,
 }
+_PROFILE_DISCOVERY_KEY = "aiida_profile_discovery"
+_PROFILE_SWITCH_HISTORY_KEY = "aiida_profile_switch_history"
+_RECOVERY_ACTION_TOOL_HINTS: dict[str, tuple[str, ...]] = {
+    "inspect_spec": ("check_workflow_spec",),
+    "inspect_available_workchains": ("list_remote_plugins",),
+    "inspect_resources": ("inspect_lab_infrastructure",),
+    "inspect_database_inputs": ("list_groups", "inspect_group", "inspect_node"),
+}
+
+
+def _extract_profile_names(payload: Any) -> list[str]:
+    if isinstance(payload, dict):
+        profiles = payload.get("profiles")
+        if isinstance(profiles, list):
+            names: list[str] = []
+            for entry in profiles:
+                if isinstance(entry, dict):
+                    raw = entry.get("name") or entry.get("profile") or entry.get("label")
+                else:
+                    raw = entry
+                cleaned = str(raw or "").strip()
+                if cleaned and cleaned not in names:
+                    names.append(cleaned)
+            return names
+        return []
+
+    if isinstance(payload, list):
+        names = []
+        for entry in payload:
+            if isinstance(entry, dict):
+                raw = entry.get("name") or entry.get("profile") or entry.get("label")
+            else:
+                raw = entry
+            cleaned = str(raw or "").strip()
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+        return names
+
+    return []
+
+
+def _extract_current_profile(payload: Any) -> str | None:
+    if isinstance(payload, dict):
+        current = str(payload.get("current_profile") or payload.get("profile") or "").strip()
+        return current or None
+    return None
 
 
 def _load_specialized_skills_snapshot() -> list[dict[str, Any]]:
@@ -255,47 +280,203 @@ def _build_validation_summary(validation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _flatten_text_payload(payload: Any) -> str:
-    if payload is None:
-        return ""
-    if isinstance(payload, str):
-        return payload
-    if isinstance(payload, dict):
-        pieces: list[str] = []
-        for key, value in payload.items():
-            pieces.append(str(key))
-            nested = _flatten_text_payload(value)
-            if nested:
-                pieces.append(nested)
-        return " ".join(pieces)
-    if isinstance(payload, (list, tuple, set)):
-        return " ".join(_flatten_text_payload(item) for item in payload)
-    return str(payload)
+def _extract_recovery_plan_candidate(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    direct_plan = payload.get("recovery_plan")
+    if isinstance(direct_plan, dict) and direct_plan:
+        return direct_plan
+
+    details = payload.get("details")
+    if isinstance(details, dict):
+        nested_plan = details.get("recovery_plan")
+        if isinstance(nested_plan, dict) and nested_plan:
+            return nested_plan
+
+    return None
 
 
-def _looks_like_missing_pseudopotential_error(payload: Any) -> bool:
-    text = _flatten_text_payload(payload).strip().lower()
-    if not text:
-        return False
-    if "pseudo" not in text and "pseudopotential" not in text:
-        return False
-    if not any(token in text for token in ("missing", "not found", "failed", "cannot", "unable", "unknown")):
-        return False
-    return any(token in text for token in ("sssp", "pseudo family", "pseudo_family", "pseudopotential family"))
+def _build_fallback_recovery_plan(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
 
+    details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+    error_items = payload.get("errors")
+    if not isinstance(error_items, list):
+        error_items = details.get("errors")
+    missing_ports = payload.get("missing_ports")
+    if not isinstance(missing_ports, list):
+        missing_ports = details.get("missing_ports")
 
-def _build_pseudodojo_overrides() -> dict[str, Any]:
-    return _build_pseudo_family_overrides("PseudoDojo")
+    if not isinstance(error_items, list):
+        error_items = []
+    if not isinstance(missing_ports, list):
+        missing_ports = []
 
+    issues: list[dict[str, Any]] = []
+    resource_domains: set[str] = set()
 
-def _build_pseudo_family_overrides(pseudo_family_label: str) -> dict[str, Any]:
-    value = str(pseudo_family_label or "").strip() or "PseudoDojo"
+    def infer_domain(text: str) -> str | None:
+        lowered = text.lower()
+        if "entry point" in lowered:
+            return "entry_point"
+        if "computer" in lowered:
+            return "computer"
+        if "code" in lowered:
+            return "code"
+        if "group" in lowered:
+            return "group"
+        if "pseudo" in lowered or "upf" in lowered:
+            return "pseudo"
+        if "structure" in lowered:
+            return "structure"
+        if "node" in lowered or "pk=" in lowered or "uuid" in lowered:
+            return "node"
+        return None
+
+    if missing_ports:
+        issues.append(
+            {
+                "type": "missing_required_inputs",
+                "message": f"Missing required inputs: {', '.join(str(port) for port in missing_ports[:6])}",
+            }
+        )
+
+    for item in error_items:
+        if isinstance(item, dict):
+            message = str(item.get("message") or item.get("error") or item.get("reason") or item).strip()
+            issue_type = str(item.get("type") or item.get("stage") or "validation_error").strip() or "validation_error"
+        else:
+            message = str(item).strip()
+            issue_type = "validation_error"
+        if not message:
+            continue
+        resource_domain = infer_domain(message)
+        if resource_domain:
+            resource_domains.add(resource_domain)
+        issues.append(
+            {
+                "type": issue_type,
+                "message": message,
+                **({"resource_domain": resource_domain} if resource_domain else {}),
+            }
+        )
+
+    if not issues:
+        return None
+
+    recommended_actions = [
+        {
+            "action": "inspect_spec",
+            "reason": "Review the WorkChain spec and builder signature before changing inputs.",
+        },
+    ]
+    if resource_domains:
+        recommended_actions.append(
+            {
+                "action": "inspect_resources",
+                "reason": "Check the active AiiDA profile for matching resources and stored inputs.",
+            }
+        )
+    recommended_actions.extend(
+        [
+            {
+                "action": "ask_user",
+                "reason": "Do not substitute missing inputs or resources silently; confirm the user's preferred fix.",
+            },
+            {
+                "action": "stop_if_unresolved",
+                "reason": "If the required input or resource cannot be found, stop the submission path and report the blocker.",
+            },
+        ]
+    )
+    summary = str(issues[0].get("message") or "Review builder diagnostics before retrying.")
     return {
-        "pseudo_family": value,
-        "pseudo_family_label": value,
-        "pseudopotential_family": value,
-        "pseudo_family_name": value,
+        "status": "blocked",
+        "summary": summary,
+        "issues": issues,
+        "missing_ports": missing_ports,
+        "resource_domains": sorted(resource_domains),
+        "recommended_actions": recommended_actions,
+        "user_decision_required": True,
     }
+
+
+def _normalize_recovery_plan_for_agent(payload: Any) -> dict[str, Any] | None:
+    plan = _extract_recovery_plan_candidate(payload) or _build_fallback_recovery_plan(payload)
+    if not isinstance(plan, dict) or not plan:
+        return None
+
+    resource_domains_raw = plan.get("resource_domains")
+    resource_domains = {
+        str(item).strip().lower()
+        for item in (resource_domains_raw if isinstance(resource_domains_raw, list) else [])
+        if str(item).strip()
+    }
+
+    normalized_actions: list[dict[str, Any]] = []
+    for raw_action in plan.get("recommended_actions", []):
+        if not isinstance(raw_action, dict):
+            continue
+        action_name = str(raw_action.get("action") or "").strip()
+        if not action_name:
+            continue
+        tool_hints = list(_RECOVERY_ACTION_TOOL_HINTS.get(action_name, ()))
+        if action_name == "inspect_resources" and resource_domains & {"group", "pseudo", "structure", "node"}:
+            for tool_name in ("list_groups", "inspect_group", "inspect_node"):
+                if tool_name not in tool_hints:
+                    tool_hints.append(tool_name)
+        normalized_actions.append(
+            {
+                "action": action_name,
+                "reason": str(raw_action.get("reason") or "").strip(),
+                "tool_hints": tool_hints,
+            }
+        )
+
+    return {
+        "status": str(plan.get("status") or "blocked"),
+        "summary": str(plan.get("summary") or "").strip(),
+        "issues": plan.get("issues") if isinstance(plan.get("issues"), list) else [],
+        "missing_ports": plan.get("missing_ports") if isinstance(plan.get("missing_ports"), list) else [],
+        "resource_domains": sorted(resource_domains),
+        "recommended_actions": normalized_actions,
+        "user_decision_required": bool(plan.get("user_decision_required", True)),
+    }
+
+
+def _render_recovery_next_step(recovery_plan: dict[str, Any] | None) -> str:
+    if not isinstance(recovery_plan, dict):
+        return (
+            "Inspect the reported validation or builder errors, verify the WorkChain spec and available resources, "
+            "and ask the user before substituting any alternative inputs."
+        )
+
+    phrases: list[str] = []
+    summary = str(recovery_plan.get("summary") or "").strip()
+    if summary:
+        phrases.append(summary)
+
+    action_descriptions: list[str] = []
+    for item in recovery_plan.get("recommended_actions", []):
+        if not isinstance(item, dict):
+            continue
+        action_name = str(item.get("action") or "").strip()
+        if not action_name:
+            continue
+        tool_hints = item.get("tool_hints")
+        if isinstance(tool_hints, list) and tool_hints:
+            action_descriptions.append(f"{action_name} via {', '.join(str(tool) for tool in tool_hints)}")
+        else:
+            action_descriptions.append(action_name)
+
+    if action_descriptions:
+        phrases.append("Follow this order: " + " -> ".join(action_descriptions[:4]) + ".")
+    return " ".join(phrases) or (
+        "Inspect the reported validation or builder errors, verify the WorkChain spec and available resources, "
+        "and ask the user before substituting any alternative inputs."
+    )
 
 
 def _coerce_positive_int(value: Any) -> int | None:
@@ -311,75 +492,71 @@ def _coerce_positive_int(value: Any) -> int | None:
     return None
 
 
-def _extract_group_labels(payload: Any) -> list[str]:
-    if isinstance(payload, str):
-        return []
+def _normalize_leaf_key(value: Any) -> str:
+    return str(value).strip().lower()
+
+
+def _looks_like_code_key(key: Any) -> bool:
+    lowered = _normalize_leaf_key(key)
+    return lowered in {"code", "code_label", "codes"} or lowered.endswith("_code")
+
+
+def _find_first_matching_value(payload: Any, predicate: Any) -> Any:
     if isinstance(payload, dict):
-        candidates = payload.get("items")
-        if isinstance(candidates, list):
-            payload = candidates
-        else:
-            payload = [payload]
-    if not isinstance(payload, list):
-        return []
-
-    labels: list[str] = []
-    seen: set[str] = set()
-    for item in payload:
-        if isinstance(item, str):
-            label = item.strip()
-        elif isinstance(item, dict):
-            label = str(item.get("label") or item.get("name") or "").strip()
-        else:
-            label = ""
-        lowered = label.lower()
-        if not label or lowered in seen:
-            continue
-        seen.add(lowered)
-        labels.append(label)
-    return labels
+        for key, value in payload.items():
+            if predicate(str(key), value) and value not in (None, "", [], {}):
+                return value
+            nested = _find_first_matching_value(value, predicate)
+            if nested is not None:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = _find_first_matching_value(item, predicate)
+            if nested is not None:
+                return nested
+    return None
 
 
-def _select_best_pseudo_family_label(labels: list[str]) -> str | None:
-    if not labels:
-        return None
-
-    def _score(label: str) -> tuple[int, int, int]:
-        text = label.lower()
-        score = 0
-        if "pseudodojo" in text:
-            score += 50
-        elif "sssp" in text:
-            score += 30
-        elif "sg15" in text:
-            score += 20
-        if "pbe" in text:
-            score += 6
-        if "standard" in text:
-            score += 4
-        if "efficiency" in text:
-            score += 3
-        return (score, -len(text), text.count("/"))
-
-    ranked = sorted(labels, key=_score, reverse=True)
-    return ranked[0]
+def _flatten_input_values(payload: Any, *, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
+    flattened = out if isinstance(out, dict) else {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_text = str(key).strip()
+            if not key_text:
+                continue
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if isinstance(value, dict):
+                _flatten_input_values(value, prefix=path, out=flattened)
+                continue
+            flattened[path] = value
+        return flattened
+    if prefix:
+        flattened[prefix] = payload
+    return flattened
 
 
-async def _resolve_worker_pseudo_family_label() -> str | None:
-    discovered: list[str] = []
-    for keyword in ("PseudoDojo", "SSSP", "SG15"):
-        payload = await list_group_labels(keyword)
-        discovered.extend(_extract_group_labels(payload))
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for label in discovered:
-        lowered = label.lower()
-        if lowered in seen:
-            continue
-        seen.add(lowered)
-        deduped.append(label)
-    return _select_best_pseudo_family_label(deduped)
+def _should_include_advanced_setting(path: str, value: Any) -> bool:
+    if _is_empty_submission_value(value):
+        return False
+    lowered_path = str(path).strip().lower()
+    if not lowered_path or lowered_path.startswith("metadata."):
+        return False
+    segments = [segment for segment in lowered_path.split(".") if segment]
+    if not segments:
+        return False
+    leaf = segments[-1]
+    if leaf in {"pk", "uuid"}:
+        return False
+    if any(_looks_like_code_key(segment) for segment in segments):
+        return False
+    if any(
+        segment in {"structure", "structure_pk", "structure_id", "computer", "computer_label", "computer_name"}
+        for segment in segments
+    ):
+        return False
+    if leaf in {"process_label", "workchain", "workchain_label", "entry_point", "workflow", "workflow_label"}:
+        return False
+    return not _is_default_advanced_setting(leaf, value)
 
 
 def _find_first_named_value(payload: Any, candidate_keys: set[str]) -> Any:
@@ -409,8 +586,6 @@ def _extract_submission_inputs(draft: dict[str, Any]) -> dict[str, Any]:
         "code",
         "protocol",
         "overrides",
-        "pseudo_family",
-        "pseudo_family_label",
     }
     visited: set[int] = set()
 
@@ -597,9 +772,9 @@ def _normalize_primary_input_field(label: str, value: Any) -> dict[str, Any] | N
 def _extract_primary_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     primary_inputs: dict[str, Any] = {}
 
-    code_value = _find_first_named_value(
+    code_value = _find_first_matching_value(
         inputs,
-        {"code", "code_label", "pw_code", "qe_code", "codes"},
+        lambda key, _value: _looks_like_code_key(key),
     )
     code_field = _normalize_primary_input_field("Code", code_value)
     if isinstance(code_field, dict):
@@ -648,25 +823,13 @@ def _is_default_advanced_setting(key: str, value: Any) -> bool:
 
 def _collect_advanced_settings(payload: Any) -> dict[str, Any]:
     settings: dict[str, Any] = {}
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            for key, value in node.items():
-                lowered = str(key).strip().lower()
-                if (
-                    lowered in _CRITICAL_ADVANCED_KEYS
-                    and lowered not in settings
-                    and not _is_empty_submission_value(value)
-                    and not _is_default_advanced_setting(lowered, value)
-                ):
-                    settings[lowered] = value
-                if isinstance(value, (dict, list)):
-                    walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(payload)
+    for path, value in _flatten_input_values(payload).items():
+        lowered_path = str(path).strip().lower()
+        if lowered_path in settings:
+            continue
+        if not _should_include_advanced_setting(lowered_path, value):
+            continue
+        settings[lowered_path] = value
     return settings
 
 
@@ -820,10 +983,26 @@ async def list_profiles(ctx: RunContext[AiiDADeps]):
         return {"error": payload}
 
     if isinstance(payload, dict):
+        ctx.deps.set_registry_value(
+            _PROFILE_DISCOVERY_KEY,
+            {
+                "current_profile": _extract_current_profile(payload),
+                "profiles": _extract_profile_names(payload),
+            },
+        )
         profiles = payload.get("profiles")
         if isinstance(profiles, list):
             return profiles
         return payload
+
+    if isinstance(payload, list):
+        ctx.deps.set_registry_value(
+            _PROFILE_DISCOVERY_KEY,
+            {
+                "current_profile": None,
+                "profiles": _extract_profile_names(payload),
+            },
+        )
 
     return payload
 
@@ -837,8 +1016,66 @@ async def list_archives(ctx: RunContext[AiiDADeps]):
 @aiida_researcher.tool
 async def switch_aiida_profile(ctx: RunContext[AiiDADeps], profile_name: str):
     """Switch active worker profile."""
-    ctx.deps.log_step(f"Switching to profile: {profile_name}")
-    return await switch_profile(profile_name)
+    target_profile = str(profile_name or "").strip()
+    if not target_profile:
+        return {"error": "Profile name is required"}
+
+    discovery = ctx.deps.get_registry_value(_PROFILE_DISCOVERY_KEY)
+    if not isinstance(discovery, dict):
+        return {
+            "error": (
+                "Automatic profile switching is restricted. Call list_profiles first and only switch when a "
+                "specific target profile is required."
+            ),
+            "target_profile": target_profile,
+        }
+
+    current_profile = str(discovery.get("current_profile") or "").strip() or None
+    known_profiles = {
+        str(name).strip()
+        for name in discovery.get("profiles", [])
+        if str(name).strip()
+    }
+    if known_profiles and target_profile not in known_profiles:
+        return {
+            "error": "Target profile is not in the discovered worker profile list.",
+            "target_profile": target_profile,
+            "known_profiles": sorted(known_profiles),
+            "current_profile": current_profile,
+        }
+
+    if current_profile and target_profile == current_profile:
+        return {
+            "status": "skipped",
+            "current_profile": current_profile,
+            "reason": "Target profile is already active.",
+        }
+
+    switch_history = ctx.deps.get_registry_value(_PROFILE_SWITCH_HISTORY_KEY, [])
+    if isinstance(switch_history, list) and switch_history:
+        return {
+            "error": (
+                "Automatic profile switching is limited to one switch per turn. Stay on the current profile unless "
+                "the user explicitly requests another switch."
+            ),
+            "current_profile": current_profile,
+            "target_profile": target_profile,
+            "switch_history": switch_history,
+        }
+
+    ctx.deps.log_step(f"Switching to profile: {target_profile}")
+    result = await switch_profile(target_profile)
+    if isinstance(result, dict) and not result.get("error"):
+        new_current = str(result.get("current_profile") or target_profile).strip() or target_profile
+        ctx.deps.set_registry_value(
+            _PROFILE_DISCOVERY_KEY,
+            {
+                "current_profile": new_current,
+                "profiles": sorted(known_profiles | {new_current}),
+            },
+        )
+        ctx.deps.set_registry_value(_PROFILE_SWITCH_HISTORY_KEY, [target_profile])
+    return result
 
 
 @aiida_researcher.tool
@@ -854,7 +1091,7 @@ async def get_db_summary(ctx: RunContext[AiiDADeps]):
 
 
 @aiida_researcher.tool
-async def get_source_map(ctx: RunContext[AiiDADeps], target: str):
+async def get_source_map(ctx: RunContext[AiiDADeps], target: str | None = None):
     """Get unified profile/archive group map from worker."""
     return await get_unified_source_map(target)
 
@@ -929,24 +1166,6 @@ async def submit_new_workflow(
     """Draft and validate a new WorkChain; do not submit until user confirmation."""
     ctx.deps.log_step(f"Preparing workflow for validation: {workchain}")
     draft = await draft_workchain_builder(workchain, structure_pk, code, protocol)
-    if not (isinstance(draft, dict) and draft.get("status") == "DRAFT_READY"):
-        if _looks_like_missing_pseudopotential_error(draft):
-            resolved_pseudo_family = await _resolve_worker_pseudo_family_label()
-            if resolved_pseudo_family:
-                ctx.deps.log_step(
-                    f"Protocol builder missing pseudo family; retrying with {resolved_pseudo_family}"
-                )
-                pseudo_protocol_kwargs = _build_pseudo_family_overrides(resolved_pseudo_family)
-            else:
-                ctx.deps.log_step("Protocol builder missing pseudo family; retrying with PseudoDojo override")
-                pseudo_protocol_kwargs = _build_pseudodojo_overrides()
-            draft = await draft_workchain_builder(
-                workchain,
-                structure_pk,
-                code,
-                protocol,
-                protocol_kwargs=pseudo_protocol_kwargs,
-            )
     if isinstance(draft, dict) and draft.get("status") == "DRAFT_READY":
         validation = await validate_job(draft)
         if isinstance(validation, str):
@@ -962,13 +1181,28 @@ async def submit_new_workflow(
                 "draft": draft,
             }
         if validation.get("error"):
+            recovery_plan = _normalize_recovery_plan_for_agent(validation) or _normalize_recovery_plan_for_agent(draft)
             return {
                 "error": "Failed to validate workflow draft",
                 "details": validation,
                 "draft": draft,
+                "recovery_plan": recovery_plan,
+                "next_step": _render_recovery_next_step(recovery_plan),
             }
 
         validation_summary = _build_validation_summary(validation)
+        recovery_plan = _normalize_recovery_plan_for_agent(validation) or _normalize_recovery_plan_for_agent(draft)
+        if isinstance(validation_summary, dict) and not validation_summary.get("is_valid", False):
+            return {
+                "status": "SUBMISSION_BLOCKED",
+                "workchain": workchain,
+                "draft": draft,
+                "validation": validation,
+                "validation_summary": validation_summary,
+                "recovery_plan": recovery_plan,
+                "next_step": _render_recovery_next_step(recovery_plan),
+            }
+
         submission_draft = _build_submission_draft_payload(
             draft,
             fallback_process_label=workchain,
@@ -978,6 +1212,8 @@ async def submit_new_workflow(
             submission_draft_meta["validation"] = validation
             submission_draft_meta["validation_summary"] = validation_summary
             submission_draft_meta["draft"] = draft
+            if isinstance(recovery_plan, dict):
+                submission_draft_meta["recovery_plan"] = recovery_plan
         _cache_pending_submission(
             ctx,
             draft,
@@ -995,7 +1231,13 @@ async def submit_new_workflow(
             "next_step": SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE,
         }
 
-    return {"error": "Failed to draft workflow", "details": draft}
+    recovery_plan = _normalize_recovery_plan_for_agent(draft)
+    return {
+        "error": "Failed to draft workflow",
+        "details": draft,
+        "recovery_plan": recovery_plan,
+        "next_step": _render_recovery_next_step(recovery_plan),
+    }
 
 
 @aiida_researcher.tool
@@ -1027,9 +1269,12 @@ async def submit_validated_workflow(ctx: RunContext[AiiDADeps]):
             "details": submission,
         }
     if isinstance(submission, dict) and submission.get("error"):
+        recovery_plan = _normalize_recovery_plan_for_agent(submission)
         return {
             "error": "Workflow submission failed",
             "details": submission,
+            "recovery_plan": recovery_plan,
+            "next_step": _render_recovery_next_step(recovery_plan),
         }
 
     _clear_pending_submission(ctx)

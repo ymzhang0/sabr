@@ -52,7 +52,7 @@ function formatComputerDetail(item: { label: string; hostname: string }): string
 }
 
 function formatCodeDetail(item: { label: string; default_plugin: string | null; computer_label: string | null }): string {
-  const plugin = item.default_plugin ? ` • ${item.default_plugin}` : "";
+  const plugin = item.default_plugin ? ` \u2022 ${item.default_plugin}` : "";
   const computer = item.computer_label ? ` @ ${item.computer_label}` : "";
   return `${item.label}${plugin}${computer}`;
 }
@@ -238,7 +238,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
               AiiDA Worker
             </p>
             <div className="flex items-center gap-2 truncate text-sm font-medium text-zinc-800 dark:text-zinc-100">
-              {portLabel} · {status === "online" ? "Online" : "Offline"}
+              {portLabel}  {status === "online" ? "Online" : "Offline"}
               {isOnline && (
                 <button
                   onClick={onInfrastructureClick}

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+from pprint import pformat
 import tempfile
 import time
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Any
 
 import httpx
 import yaml
-from fastapi import APIRouter, File, HTTPException, Path as ApiPath, Query, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Path as ApiPath, Query, Request, UploadFile
 from google import genai
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
@@ -20,11 +21,22 @@ from src.sab_core.config import settings
 from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event
 
 from .chat import (
+    activate_chat_session,
     cancel_chat_turn,
+    create_chat_project,
+    create_chat_session,
+    get_active_chat_project_id,
+    get_active_chat_session_id,
     get_chat_history,
+    get_chat_session_detail,
+    get_chat_snapshot,
+    list_chat_projects,
+    list_chat_session_workspace_files,
+    list_chat_sessions,
     normalize_context_node_ids,
     serialize_chat_history,
     start_chat_turn,
+    update_chat_session,
 )
 from .bridge_client import bridge_endpoint
 from .client import BridgeAPIError, BridgeOfflineError, bridge_service, request_json
@@ -39,6 +51,7 @@ from .presenters.node_view import (
 )
 from .presenters.workflow_view import (
     extract_submitted_pk as _extract_submitted_pk,
+    enrich_submission_draft_payload,
     format_batch_submission_response,
     format_single_submission_response,
 )
@@ -55,10 +68,14 @@ from .service import (
     hub,
     parse_infrastructure_via_ai as _parse_infrastructure_via_ai,
 )
+from .specializations import build_active_specializations_payload
 from .infrastructure_manager import infrastructure_manager
 from .schemas import (
     FrontendChatRequest,
     FrontendStopChatRequest,
+    FrontendChatProjectCreateRequest,
+    FrontendChatSessionCreateRequest,
+    FrontendChatSessionUpdateRequest,
     SubmissionDraftRequest,
     SystemCountsResponse,
     BridgeStatusResponse,
@@ -72,6 +89,7 @@ from .schemas import (
     FrontendGroupAssignNodesRequest,
     FrontendNodeSoftDeleteRequest,
     NodeHoverMetadataResponse,
+    NodeScriptResponse,
     InfrastructureComputer,
     ParseInfrastructureRequest,
     UserInfoResponse,
@@ -104,6 +122,35 @@ def _get_quick_prompts() -> list[dict[str, str]]:
         return []
 
 
+def _normalize_text_query_values(values: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw_value in values or []:
+        text = str(raw_value or "").strip()
+        if not text:
+            continue
+        for part in text.split(","):
+            candidate = part.strip()
+            if not candidate:
+                continue
+            lowered = candidate.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            normalized.append(candidate)
+    return normalized
+
+
+def _chat_sessions_payload(state: Any) -> dict[str, Any]:
+    return {
+        "version": int(getattr(state, "chat_sessions_version", 0)),
+        "active_session_id": get_active_chat_session_id(state),
+        "active_project_id": get_active_chat_project_id(state),
+        "projects": list_chat_projects(state),
+        "items": list_chat_sessions(state),
+    }
+
+
 def _get_node_hover_metadata(pk: int) -> NodeHoverMetadataResponse:
     if not hub.current_profile:
         hub.start()
@@ -132,6 +179,119 @@ def _get_node_hover_metadata(pk: int) -> NodeHoverMetadataResponse:
         return NodeHoverMetadataResponse(pk=pk)
 
     return _extract_node_hover_metadata(matched, pk)
+
+
+def _format_python_literal(value: Any) -> str:
+    return pformat(value, width=100, sort_dicts=False)
+
+
+def _build_dict_script_from_summary(payload: dict[str, Any]) -> NodeScriptResponse:
+    pk = int(payload.get("pk") or 0)
+    attributes = payload.get("attributes")
+    data = attributes if isinstance(attributes, dict) else {}
+    script = "\n".join(
+        [
+            f"# Dict PK {pk}",
+            f"data = {_format_python_literal(data)}",
+            "",
+            "# Optional: wrap back into AiiDA",
+            "# from aiida.orm import Dict",
+            "# data_node = Dict(dict=data)",
+        ]
+    )
+    return NodeScriptResponse(pk=pk, node_type="Dict", language="python", script=script)
+
+
+def _build_structure_script_from_summary(payload: dict[str, Any]) -> NodeScriptResponse:
+    pk = int(payload.get("pk") or 0)
+    attributes = payload.get("attributes")
+    attrs = attributes if isinstance(attributes, dict) else {}
+    preview = payload.get("preview_info") if isinstance(payload.get("preview_info"), dict) else {}
+    formula = str(preview.get("formula") or payload.get("label") or f"StructureData #{pk}").strip()
+
+    kind_symbol_map: dict[str, str] = {}
+    raw_kinds = attrs.get("kinds")
+    if isinstance(raw_kinds, list):
+        for item in raw_kinds:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            raw_symbols = item.get("symbols")
+            if isinstance(raw_symbols, list) and len(raw_symbols) == 1:
+                kind_symbol_map[name] = str(raw_symbols[0])
+                continue
+            raw_symbol = item.get("symbol")
+            if isinstance(raw_symbol, str) and raw_symbol.strip():
+                kind_symbol_map[name] = raw_symbol.strip()
+                continue
+            kind_symbol_map[name] = name
+
+    symbols: list[str] = []
+    positions: list[list[float]] = []
+    raw_sites = attrs.get("sites")
+    if isinstance(raw_sites, list):
+        for item in raw_sites:
+            if not isinstance(item, dict):
+                continue
+            kind_name = str(item.get("kind_name") or item.get("kind") or "").strip()
+            if not kind_name:
+                continue
+            raw_position = item.get("position")
+            if not isinstance(raw_position, list):
+                continue
+            symbols.append(kind_symbol_map.get(kind_name, kind_name))
+            positions.append([float(coord) for coord in raw_position[:3]])
+
+    cell: list[list[float]] = []
+    raw_cell = attrs.get("cell")
+    if isinstance(raw_cell, list):
+        for row in raw_cell[:3]:
+            if isinstance(row, list):
+                cell.append([float(coord) for coord in row[:3]])
+
+    pbc = [
+        bool(attrs.get("pbc1", True)),
+        bool(attrs.get("pbc2", True)),
+        bool(attrs.get("pbc3", True)),
+    ]
+
+    script = "\n".join(
+        [
+            f"# StructureData PK {pk}: {formula}",
+            "from ase import Atoms",
+            "",
+            f"symbols = {_format_python_literal(symbols)}",
+            f"positions = {_format_python_literal(positions)}",
+            f"cell = {_format_python_literal(cell)}",
+            f"pbc = {_format_python_literal(pbc)}",
+            "",
+            "atoms = Atoms(",
+            "    symbols=symbols,",
+            "    positions=positions,",
+            "    cell=cell,",
+            "    pbc=pbc,",
+            ")",
+            "",
+            "# Optional: wrap back into AiiDA",
+            "# from aiida.orm import StructureData",
+            "# structure = StructureData(ase=atoms)",
+        ]
+    )
+    return NodeScriptResponse(pk=pk, node_type="StructureData", language="python", script=script)
+
+
+def _build_node_script_from_summary(payload: dict[str, Any]) -> NodeScriptResponse:
+    node_type = str(payload.get("node_type") or payload.get("type") or "").strip()
+    if node_type == "Dict":
+        return _build_dict_script_from_summary(payload)
+    if node_type == "StructureData":
+        return _build_structure_script_from_summary(payload)
+    raise HTTPException(
+        status_code=422,
+        detail={"error": "Copy as Script is only supported for StructureData and Dict nodes", "node_type": node_type or "Unknown"},
+    )
 
 
 def _fetch_context_nodes(context_node_ids: list[int]) -> list[dict[str, Any]]:
@@ -529,6 +689,41 @@ async def worker_process_logs(identifier: str):
         raise HTTPException(status_code=max(400, int(exc.status_code or 502)), detail=detail) from exc
 
 
+@router.post("/data/import/{data_type}", tags=[WORKER_PROXY_TAG])
+async def proxy_import_data(
+    data_type: str,
+    source_type: str = Form(...),
+    label: str | None = Form(None),
+    description: str | None = Form(None),
+    raw_text: str | None = Form(None),
+    file: UploadFile | None = File(None),
+):
+    """Proxy data import to aiida-worker."""
+    files = {}
+    if file:
+        file_content = await file.read()
+        files = {"file": (file.filename, file_content, file.content_type)}
+
+    data = {
+        "source_type": source_type,
+        "label": label,
+        "description": description,
+        "raw_text": raw_text,
+    }
+    # Filter out None values
+    data = {k: v for k, v in data.items() if v is not None}
+
+    try:
+        return await bridge_service.request_multipart(
+            "POST",
+            f"/data/import/{data_type}",
+            files=files,
+            data=data,
+        )
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+
 @router.get("/frontend/bootstrap", tags=[FRONTEND_TAG])
 async def frontend_bootstrap(request: Request):
     state = request.app.state
@@ -547,15 +742,12 @@ async def frontend_bootstrap(request: Request):
     available_models = _get_available_models(state)
     selected_model = _get_selected_model(state, available_models)
     log_version, log_lines = get_log_buffer_snapshot(limit=240)
-    chat_history = serialize_chat_history(get_chat_history(state))
+    chat_snapshot = get_chat_snapshot(state)
 
     return {
         "processes": _serialize_processes(processes),
         "groups": _serialize_groups(groups),
-        "chat": {
-            "messages": chat_history,
-            "version": int(getattr(state, "chat_version", 0)),
-        },
+        "chat": chat_snapshot,
         "logs": {
             "version": log_version,
             "lines": log_lines[-160:],
@@ -564,6 +756,23 @@ async def frontend_bootstrap(request: Request):
         "selected_model": selected_model,
         "quick_prompts": _get_quick_prompts(),
     }
+
+
+@router.get("/frontend/specializations/active", tags=[FRONTEND_TAG])
+async def frontend_active_specializations(
+    context_node_ids: list[int] | None = Query(default=None),
+    project_tags: list[str] | None = Query(default=None),
+    resource_plugins: list[str] | None = Query(default=None),
+    selected_environment: str | None = Query(default=None),
+    auto_switch: bool = Query(default=True),
+):
+    return await build_active_specializations_payload(
+        context_node_ids=context_node_ids,
+        project_tags=_normalize_text_query_values(project_tags),
+        resource_plugins=_normalize_text_query_values(resource_plugins),
+        selected_environment=selected_environment,
+        auto_switch=auto_switch,
+    )
 
 
 @router.get("/frontend/groups", tags=[FRONTEND_TAG])
@@ -682,6 +891,29 @@ async def frontend_processes(
     return {"items": _serialize_processes(processes)}
 
 
+@router.get("/frontend/processes/{identifier}/clone-draft", tags=[FRONTEND_TAG])
+async def frontend_clone_process_draft(identifier: str):
+    try:
+        payload = await request_json("GET", f"/process/{identifier}/clone-draft")
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail={"error": "Worker returned an invalid clone draft payload"})
+
+    try:
+        return enrich_submission_draft_payload(payload)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            log_event(
+                "aiida.frontend.clone_draft.enrich_failed",
+                identifier=str(identifier),
+                error=str(exc),
+            )
+        )
+        raise HTTPException(status_code=500, detail={"error": "Failed to prepare clone draft", "reason": str(exc)}) from exc
+
+
 @router.get("/frontend/ssh-hosts", tags=[FRONTEND_TAG])
 async def frontend_ssh_hosts():
     try:
@@ -733,6 +965,31 @@ async def parse_infrastructure_via_ai(payload: ParseInfrastructureRequest):
 )
 async def frontend_node_hover_metadata(pk: int = ApiPath(..., ge=1)) -> NodeHoverMetadataResponse:
     return _get_node_hover_metadata(pk)
+
+
+@router.get(
+    "/frontend/nodes/{pk}/script",
+    response_model=NodeScriptResponse,
+    tags=[FRONTEND_TAG],
+)
+async def frontend_node_script(pk: int = ApiPath(..., ge=1)) -> NodeScriptResponse:
+    try:
+        payload = await request_json("GET", f"/management/nodes/{pk}/script")
+    except BridgeAPIError as exc:
+        if int(exc.status_code or 0) != 404:
+            _raise_worker_http_error(exc)
+        try:
+            summary_payload = await request_json("GET", f"/management/nodes/{pk}")
+        except Exception as fallback_exc:  # noqa: BLE001
+            _raise_worker_http_error(fallback_exc)
+        if not isinstance(summary_payload, dict):
+            raise HTTPException(status_code=502, detail={"error": "Worker returned an invalid node summary payload"})
+        return _build_node_script_from_summary(summary_payload)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail={"error": "Worker returned an invalid node script payload"})
+    return NodeScriptResponse(**payload)
 
 
 @router.post("/frontend/nodes/{pk}/soft-delete", tags=[FRONTEND_TAG])
@@ -840,11 +1097,121 @@ async def frontend_cancel_pending_submission(request: Request):
 @router.get("/frontend/chat/messages", tags=[FRONTEND_TAG])
 async def frontend_chat_messages(request: Request):
     state = request.app.state
-    history = serialize_chat_history(get_chat_history(state))
+    return get_chat_snapshot(state)
+
+
+@router.get("/frontend/chat/sessions", tags=[FRONTEND_TAG])
+async def frontend_chat_sessions(request: Request):
+    state = request.app.state
+    return _chat_sessions_payload(state)
+
+
+@router.get("/frontend/chat/projects", tags=[FRONTEND_TAG])
+async def frontend_chat_projects(request: Request):
+    state = request.app.state
     return {
-        "version": int(getattr(state, "chat_version", 0)),
-        "messages": history,
+        "active_project_id": get_active_chat_project_id(state),
+        "items": list_chat_projects(state),
     }
+
+
+@router.post("/frontend/chat/projects", tags=[FRONTEND_TAG])
+async def frontend_create_chat_project(request: Request, payload: FrontendChatProjectCreateRequest):
+    state = request.app.state
+    try:
+        project = create_chat_project(
+            state,
+            name=payload.name,
+            root_path=payload.root_path,
+            activate=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    return {
+        "project": project,
+        "active_project_id": get_active_chat_project_id(state),
+        "projects": list_chat_projects(state),
+    }
+
+
+@router.post("/frontend/chat/sessions", tags=[FRONTEND_TAG])
+async def frontend_create_chat_session(request: Request, payload: FrontendChatSessionCreateRequest):
+    state = request.app.state
+    session = create_chat_session(
+        state,
+        title=payload.title,
+        snapshot=payload.snapshot if isinstance(payload.snapshot, dict) else None,
+        activate=True,
+        archive_session_id=payload.archive_session_id,
+        project_id=payload.project_id,
+    )
+    return {
+        "session": session,
+        "chat": get_chat_snapshot(state),
+        "active_session_id": get_active_chat_session_id(state),
+        "active_project_id": get_active_chat_project_id(state),
+        "projects": list_chat_projects(state),
+        "version": int(getattr(state, "chat_sessions_version", 0)),
+    }
+
+
+@router.post("/frontend/chat/sessions/{session_id}/activate", tags=[FRONTEND_TAG])
+async def frontend_activate_chat_session(request: Request, session_id: str):
+    state = request.app.state
+    session = activate_chat_session(state, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {
+        "session": session,
+        "chat": get_chat_snapshot(state),
+        "active_session_id": get_active_chat_session_id(state),
+        "active_project_id": get_active_chat_project_id(state),
+        "projects": list_chat_projects(state),
+        "version": int(getattr(state, "chat_sessions_version", 0)),
+    }
+
+
+@router.patch("/frontend/chat/sessions/{session_id}", tags=[FRONTEND_TAG])
+async def frontend_update_chat_session(
+    request: Request,
+    session_id: str,
+    payload: FrontendChatSessionUpdateRequest,
+):
+    state = request.app.state
+    update_kwargs: dict[str, Any] = {}
+    if "title" in payload.model_fields_set:
+        update_kwargs["title"] = payload.title
+    if "tags" in payload.model_fields_set:
+        update_kwargs["tags"] = payload.tags
+    if "snapshot" in payload.model_fields_set:
+        update_kwargs["snapshot"] = payload.snapshot
+    session = update_chat_session(state, session_id, **update_kwargs)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {
+        "session": session,
+        "chat": get_chat_snapshot(state),
+        "active_session_id": get_active_chat_session_id(state),
+        "active_project_id": get_active_chat_project_id(state),
+        "projects": list_chat_projects(state),
+        "version": int(getattr(state, "chat_sessions_version", 0)),
+    }
+
+
+@router.get("/frontend/chat/sessions/{session_id}/workspace", tags=[FRONTEND_TAG])
+async def frontend_chat_session_workspace(
+    request: Request,
+    session_id: str,
+    relative_path: str | None = Query(default=None),
+):
+    state = request.app.state
+    try:
+        payload = list_chat_session_workspace_files(state, session_id, relative_path=relative_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return payload
 
 
 @router.get("/frontend/chat/stream", tags=[FRONTEND_TAG])
@@ -863,13 +1230,13 @@ async def frontend_chat_stream(request: Request):
 
             try:
                 version = int(getattr(state, "chat_version", 0))
-                history = serialize_chat_history(get_chat_history(state))
+                snapshot = get_chat_snapshot(state)
                 now = time.monotonic()
                 should_push = (version != last_version) or ((now - heartbeat_ts) >= 10)
                 if should_push:
                     yield {
                         "event": "chat",
-                        "data": json.dumps({"version": version, "messages": history}),
+                        "data": json.dumps(snapshot),
                     }
                     last_version = version
                     heartbeat_ts = now
@@ -877,7 +1244,10 @@ async def frontend_chat_stream(request: Request):
                 logger.exception(
                     log_event("aiida.frontend.chat_stream.failed", stream_id=stream_id, error=str(error))
                 )
-                yield {"event": "chat", "data": json.dumps({"version": -1, "messages": []})}
+                yield {
+                    "event": "chat",
+                    "data": json.dumps({"version": -1, "session_id": None, "messages": [], "snapshot": {}}),
+                }
 
             await asyncio.sleep(0.4)
 

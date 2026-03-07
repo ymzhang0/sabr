@@ -134,6 +134,11 @@ def _find_first_named_value(payload: Any, candidate_keys: set[str]) -> Any:
     return None
 
 
+def _looks_like_code_key(key: Any) -> bool:
+    lowered = _normalize_key(key)
+    return lowered in {"code", "code_label", "codes"} or lowered.endswith("_code")
+
+
 def _flatten_input_ports(payload: Any, *, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
     flattened = out if isinstance(out, dict) else {}
     if isinstance(payload, dict):
@@ -245,7 +250,7 @@ def _classify_port_group(path: str) -> str:
         )
     ):
         return "physics_protocol"
-    if ".parameters" in lowered or lowered.startswith("parameters") or "pw.parameters" in lowered:
+    if ".parameters" in lowered or lowered.startswith("parameters"):
         return "computational_details"
     return "computational_details"
 
@@ -662,25 +667,6 @@ def _extract_candidate_entry_points(payload: dict[str, Any]) -> list[str]:
     return entry_points
 
 
-_ENTRY_POINT_PLUGIN_HINTS: tuple[tuple[str, str], ...] = (
-    ("quantumespresso.pw", "quantumespresso.pw"),
-    ("quantumespresso.cp", "quantumespresso.cp"),
-    ("quantumespresso.ph", "quantumespresso.ph"),
-    ("quantumespresso.epw", "quantumespresso.epw"),
-    ("quantumespresso.projwfc", "quantumespresso.projwfc"),
-    ("quantumespresso.pdos", "quantumespresso.pdos"),
-    ("quantumespresso.dos", "quantumespresso.dos"),
-    ("quantumespresso.bands", "quantumespresso.bands"),
-)
-
-_ENTRY_POINT_ALIASES: dict[str, str] = {
-    "pwrelaxworkchain": "quantumespresso.pw.relax",
-    "pwbaseworkchain": "quantumespresso.pw.base",
-    "phbaseworkchain": "quantumespresso.ph.base",
-    "cppwworkchain": "quantumespresso.cp.base",
-}
-
-
 def _expand_entry_point_candidates(entry_points: list[str]) -> list[str]:
     expanded: list[str] = []
 
@@ -697,30 +683,23 @@ def _expand_entry_point_candidates(entry_points: list[str]) -> list[str]:
         normalized = entry_point.strip()
         if ":" in normalized:
             append(normalized.split(":", 1)[1])
-
-        lowered = _normalize_key(normalized.replace("aiida.workflows:", ""))
-        alias = _ENTRY_POINT_ALIASES.get(lowered.replace(".", ""))
-        if alias:
-            append(alias)
-        if lowered.startswith("quantumespresso.") and lowered.count(".") >= 2:
-            append(lowered)
-        elif lowered in _ENTRY_POINT_ALIASES:
-            append(_ENTRY_POINT_ALIASES[lowered])
+        stripped = normalized.replace("aiida.workflows:", "").strip()
+        if stripped and stripped != normalized:
+            append(stripped)
 
     return expanded
 
 
-def _required_plugin_from_entry_point(entry_point: str) -> str | None:
-    lowered = _normalize_key(entry_point)
-    for token, plugin in _ENTRY_POINT_PLUGIN_HINTS:
-        if token in lowered:
-            return plugin
-    if lowered.startswith("quantumespresso.") and "." in lowered:
-        parts = lowered.split(".")
-        if len(parts) >= 2:
-            return ".".join(parts[:2])
-    if ".pw." in lowered or lowered.endswith(".pw") or "pw.base" in lowered or "pw.relax" in lowered:
-        return "quantumespresso.pw"
+def _extract_declared_code_plugin(value: Any) -> str | None:
+    if isinstance(value, dict):
+        for key in ("plugin", "default_plugin", "default_calc_job_plugin", "input_plugin"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
+    plugin = getattr(value, "default_calc_job_plugin", None)
+    if isinstance(plugin, str) and plugin.strip():
+        return plugin.strip()
     return None
 
 
@@ -729,23 +708,33 @@ def _resolve_required_code_plugin(
     inputs: dict[str, Any],
     port_spec: dict[str, Any] | None,
 ) -> str | None:
-    for entry_point in entry_points:
-        plugin = _required_plugin_from_entry_point(entry_point)
-        if plugin:
-            return plugin
-
+    del entry_points
+    candidates: list[str] = []
+    seen: set[str] = set()
+    flattened = _flatten_input_ports(inputs)
     if isinstance(port_spec, dict):
         code_paths = port_spec.get("code_paths")
         if isinstance(code_paths, list):
             for path in code_paths:
-                lowered = _normalize_key(path)
-                if ".pw." in lowered or lowered.endswith(".pw.code") or lowered.startswith("pw."):
-                    return "quantumespresso.pw"
+                if not isinstance(path, str):
+                    continue
+                plugin = _extract_declared_code_plugin(flattened.get(path))
+                normalized = _normalize_key(plugin)
+                if plugin and normalized not in seen:
+                    seen.add(normalized)
+                    candidates.append(plugin)
 
-    for path in _flatten_input_ports(inputs).keys():
-        lowered = _normalize_key(path)
-        if ".pw." in lowered and lowered.endswith(".code"):
-            return "quantumespresso.pw"
+    for path, value in flattened.items():
+        leaf = _normalize_key(path.rsplit(".", 1)[-1])
+        if not _looks_like_code_key(leaf):
+            continue
+        plugin = _extract_declared_code_plugin(value)
+        normalized = _normalize_key(plugin)
+        if plugin and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(plugin)
+    if candidates:
+        return candidates[0]
     return None
 
 
@@ -1200,7 +1189,7 @@ def _collect_available_codes_from_inputs(
     for path, raw_value in flattened.items():
         lowered_path = _normalize_key(path)
         leaf = lowered_path.rsplit(".", 1)[-1]
-        if leaf not in {"code", "code_label", "pw_code", "qe_code"} and not leaf.endswith("_code"):
+        if not _looks_like_code_key(leaf):
             continue
 
         value_text = ""
@@ -1238,7 +1227,7 @@ def _collect_available_codes_from_inputs(
         if not value_text:
             continue
 
-        if required_plugin and plugin and plugin != required_plugin:
+        if required_plugin and plugin and not _is_plugin_compatible(plugin, required_plugin):
             continue
         if value_text in seen_values:
             continue

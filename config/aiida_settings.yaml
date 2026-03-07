@@ -1,11 +1,13 @@
-# config/aiida_settings.yaml
+# Base quick prompts should stay plugin-agnostic.
+# Put plugin-specific prompt bundles in a separate file and point
+# SABR_AIIDA_SETTINGS_FILE to it when you explicitly want that specialization.
 
 quick_prompts:
-  - label: "structure relaxation"
-    prompt: "perform vc-relax using PseudoDojo"
-  - label: "band structure"
-    prompt: "calculate the electron band structure using PseudoDojo"
-  - label: "relax+band"
-    prompt: "perform vc-relax and then use the optimized structure to calculate the electron band structure"
-  - label: "check pseudopotential"
-    prompt: "check the PseudoDojo library in the database"
+  - label: "prepare workflow"
+    prompt: "prepare a workflow submission draft for the selected structure or inputs"
+  - label: "inspect spec"
+    prompt: "inspect a WorkChain spec and summarize the required inputs before drafting a builder"
+  - label: "check resources"
+    prompt: "inspect the current AiiDA profile resources including computers, codes, and relevant groups"
+  - label: "debug process"
+    prompt: "inspect a failed or running process, read the logs, and summarize the next debugging steps"

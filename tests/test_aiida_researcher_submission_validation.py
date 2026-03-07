@@ -94,40 +94,55 @@ async def test_submit_new_workflow_validates_before_submission(monkeypatch: pyte
 
 
 @pytest.mark.anyio
-async def test_submit_new_workflow_retries_with_pseudodojo_when_sssp_missing(
+async def test_submit_new_workflow_returns_blocked_recovery_plan_for_invalid_draft(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    draft_calls: list[dict | None] = []
-    validate_calls = 0
-
     async def _fake_draft(
         workchain: str,
         structure_pk: int,
         code: str,
         protocol: str,
-        overrides: dict | None = None,
     ):
-        draft_calls.append(overrides)
         assert workchain == "quantumespresso.pw.base"
         assert structure_pk == 19
         assert code == "pw@localhost"
         assert protocol == "moderate"
-        if overrides is None:
-            return {"status": "ERROR", "error": "SSSP pseudo family not found"}
-        assert str(overrides.get("pseudo_family", "")).startswith("PseudoDojo")
         return {
-            "status": "DRAFT_READY",
-            "builder": {"workchain": workchain, "pseudo_family": "PseudoDojo"},
+            "status": "DRAFT_INVALID",
+            "errors": [
+                {
+                    "stage": "resolve_protocol_argument",
+                    "port": "structure",
+                    "message": "Could not load node for 'structure' with pk=19",
+                }
+            ],
+            "missing_ports": ["structure"],
+            "recovery_plan": {
+                "status": "blocked",
+                "summary": "Missing required inputs: structure",
+                "missing_ports": ["structure"],
+                "issues": [
+                    {
+                        "type": "resource_reference_unresolved",
+                        "message": "Could not load node for 'structure' with pk=19",
+                        "resource_domain": "structure",
+                    }
+                ],
+                "recommended_actions": [
+                    {
+                        "action": "inspect_spec",
+                        "reason": "Review the WorkChain spec first.",
+                    },
+                    {
+                        "action": "ask_user",
+                        "reason": "Confirm the user's preferred fix before changing inputs.",
+                    },
+                ],
+                "user_decision_required": True,
+            },
         }
 
-    async def _fake_validate(draft_data: dict):
-        nonlocal validate_calls
-        validate_calls += 1
-        assert draft_data.get("status") == "DRAFT_READY"
-        return {"status": "VALIDATION_OK", "errors": [], "warnings": []}
-
     monkeypatch.setattr(researcher, "draft_workchain_builder", _fake_draft)
-    monkeypatch.setattr(researcher, "validate_job", _fake_validate)
 
     result = await researcher.submit_new_workflow(
         _ctx(),
@@ -136,12 +151,10 @@ async def test_submit_new_workflow_retries_with_pseudodojo_when_sssp_missing(
         code="pw@localhost",
     )
 
-    assert result["status"] == "SUBMISSION_DRAFT"
-    assert validate_calls == 1
-    assert len(draft_calls) == 2
-    assert draft_calls[0] is None
-    assert isinstance(draft_calls[1], dict)
-    assert str(draft_calls[1]["pseudo_family"]).startswith("PseudoDojo")
+    assert result["error"] == "Failed to draft workflow"
+    assert result["recovery_plan"]["summary"] == "Missing required inputs: structure"
+    assert result["recovery_plan"]["issues"][0]["resource_domain"] == "structure"
+    assert "inspect_spec" in result["next_step"]
 
 
 @pytest.mark.anyio
@@ -160,7 +173,7 @@ async def test_submit_validated_workflow_blocks_invalid_validation(monkeypatch: 
     monkeypatch.setattr(researcher, "submit_job", _fake_submit)
 
     ctx = _ctx()
-    await researcher.submit_new_workflow(
+    drafted = await researcher.submit_new_workflow(
         ctx,
         workchain="quantumespresso.pw.base",
         structure_pk=11,
@@ -168,9 +181,11 @@ async def test_submit_validated_workflow_blocks_invalid_validation(monkeypatch: 
     )
     result = await researcher.submit_validated_workflow(ctx)
 
+    assert drafted["status"] == "SUBMISSION_BLOCKED"
+    assert drafted["validation_summary"]["is_valid"] is False
+    assert isinstance(drafted["recovery_plan"], dict)
     assert "error" in result
-    assert "blocking issues" in result["error"]
-    assert result["validation_summary"]["is_valid"] is False
+    assert "No validated workflow" in result["error"]
 
 
 @pytest.mark.anyio
@@ -283,3 +298,51 @@ async def test_persist_current_script_forwards_to_registry(monkeypatch: pytest.M
 
     assert payload["status"] == "registered"
     assert payload["skill_name"] == "relax_helper"
+
+
+@pytest.mark.anyio
+async def test_switch_aiida_profile_requires_prior_profile_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_switch_profile(profile_name: str):  # noqa: ARG001
+        raise AssertionError("switch_profile should not be called without prior discovery")
+
+    monkeypatch.setattr(researcher, "switch_profile", _fake_switch_profile)
+
+    result = await researcher.switch_aiida_profile(_ctx(), "dev")
+
+    assert result["target_profile"] == "dev"
+    assert "Call list_profiles first" in result["error"]
+
+
+@pytest.mark.anyio
+async def test_switch_aiida_profile_allows_one_switch_per_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_list_system_profiles():
+        return {
+            "current_profile": "sandbox",
+            "profiles": [
+                {"name": "sandbox"},
+                {"name": "dev"},
+                {"name": "agent"},
+            ],
+        }
+
+    async def _fake_switch_profile(profile_name: str):
+        return {"status": "switched", "current_profile": profile_name}
+
+    monkeypatch.setattr(researcher, "list_system_profiles", _fake_list_system_profiles)
+    monkeypatch.setattr(researcher, "switch_profile", _fake_switch_profile)
+
+    ctx = _ctx()
+    profiles = await researcher.list_profiles(ctx)
+    assert isinstance(profiles, list)
+
+    first = await researcher.switch_aiida_profile(ctx, "dev")
+    second = await researcher.switch_aiida_profile(ctx, "agent")
+
+    assert first["status"] == "switched"
+    assert first["current_profile"] == "dev"
+    assert second["target_profile"] == "agent"
+    assert "one switch per turn" in second["error"]

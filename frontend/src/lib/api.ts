@@ -7,14 +7,20 @@ import type {
   BridgeSwitchProfileResponse,
   BootstrapResponse,
   ChatResponse,
+  ChatProjectMutationResponse,
+  ChatSessionMutationResponse,
+  ChatSessionWorkspaceResponse,
+  ChatSessionsResponse,
   GroupAssignNodesResponse,
   GroupDeleteResponse,
   GroupExportResponse,
   GroupMutationResponse,
   GroupsResponse,
+  ActiveSpecializationsResponse,
   InfrastructureComputer,
   LogsResponse,
   NodeHoverMetadataResponse,
+  NodeScriptResponse,
   ParseInfrastructureResponse,
   ProcessDetailResponse,
   ProcessLogsResponse,
@@ -25,6 +31,7 @@ import type {
   UploadArchiveResponse,
   UserInfoResponse,
   ProfileSetupRequest,
+  ImportDataResponse,
 } from "@/types/aiida";
 
 export const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
@@ -32,6 +39,7 @@ export const FRONTEND_API_PREFIX = "/api/aiida/frontend";
 export const AIIDA_API_PREFIX = "/api/aiida";
 const frontendBaseURL = `${API_BASE_URL}${FRONTEND_API_PREFIX}`;
 const aiidaBaseURL = `${API_BASE_URL}${AIIDA_API_PREFIX}`;
+const specializationsBaseURL = `${API_BASE_URL}/api/specializations`;
 
 function resolveHttpOrigin(): string {
   if (import.meta.env.DEV) {
@@ -79,12 +87,47 @@ const aiidaApi = axios.create({
   timeout: 5000,
 });
 
+const specializationsApi = axios.create({
+  baseURL: specializationsBaseURL,
+  timeout: 8000,
+});
+
 export type SubmissionSubmitDraftPayload =
   | Record<string, unknown>
   | Array<Record<string, unknown>>;
 
 export async function getBootstrap(): Promise<BootstrapResponse> {
   const { data } = await frontendApi.get<BootstrapResponse>("/bootstrap");
+  return data;
+}
+
+export async function getActiveSpecializations(params: {
+  contextNodeIds?: number[];
+  projectTags?: string[];
+  resourcePlugins?: string[];
+  selectedEnvironment?: string | null;
+  autoSwitch?: boolean;
+}): Promise<ActiveSpecializationsResponse> {
+  const searchParams = new URLSearchParams();
+  (params.contextNodeIds ?? []).forEach((value) => {
+    searchParams.append("context_node_ids", String(value));
+  });
+  (params.projectTags ?? []).forEach((value) => {
+    searchParams.append("project_tags", value);
+  });
+  (params.resourcePlugins ?? []).forEach((value) => {
+    searchParams.append("resource_plugins", value);
+  });
+  if (params.selectedEnvironment?.trim()) {
+    searchParams.append("selected_environment", params.selectedEnvironment.trim());
+  }
+  if (typeof params.autoSwitch === "boolean") {
+    searchParams.append("auto_switch", String(params.autoSwitch));
+  }
+
+  const { data } = await specializationsApi.get<ActiveSpecializationsResponse>("/active", {
+    params: searchParams,
+  });
   return data;
 }
 
@@ -115,6 +158,16 @@ export async function getProcesses(
 
 export async function getNodeHoverMetadata(pk: number): Promise<NodeHoverMetadataResponse> {
   const { data } = await frontendApi.get<NodeHoverMetadataResponse>(`/nodes/${pk}/metadata`);
+  return data;
+}
+
+export async function getNodeScript(pk: number): Promise<NodeScriptResponse> {
+  const { data } = await frontendApi.get<NodeScriptResponse>(`/nodes/${pk}/script`);
+  return data;
+}
+
+export async function getProcessCloneDraft(identifier: number | string): Promise<Record<string, unknown>> {
+  const { data } = await frontendApi.get<Record<string, unknown>>(`/processes/${identifier}/clone-draft`);
   return data;
 }
 
@@ -171,6 +224,52 @@ export async function getLogs(limit = 240): Promise<LogsResponse> {
 
 export async function getChatMessages(): Promise<ChatResponse> {
   const { data } = await frontendApi.get<ChatResponse>("/chat/messages");
+  return data;
+}
+
+export async function getChatSessions(): Promise<ChatSessionsResponse> {
+  const { data } = await frontendApi.get<ChatSessionsResponse>("/chat/sessions");
+  return data;
+}
+
+export async function createChatProject(payload: {
+  name: string;
+  root_path?: string;
+}): Promise<ChatProjectMutationResponse> {
+  const { data } = await frontendApi.post<ChatProjectMutationResponse>("/chat/projects", payload);
+  return data;
+}
+
+export async function createChatSession(payload?: {
+  title?: string;
+  snapshot?: Record<string, unknown>;
+  archive_session_id?: string;
+  project_id?: string;
+}): Promise<ChatSessionMutationResponse> {
+  const { data } = await frontendApi.post<ChatSessionMutationResponse>("/chat/sessions", payload ?? {});
+  return data;
+}
+
+export async function activateChatSession(sessionId: string): Promise<ChatSessionMutationResponse> {
+  const { data } = await frontendApi.post<ChatSessionMutationResponse>(`/chat/sessions/${sessionId}/activate`);
+  return data;
+}
+
+export async function updateChatSession(
+  sessionId: string,
+  payload: { title?: string | null; tags?: string[] | null; snapshot?: Record<string, unknown> | null },
+): Promise<ChatSessionMutationResponse> {
+  const { data } = await frontendApi.patch<ChatSessionMutationResponse>(`/chat/sessions/${sessionId}`, payload);
+  return data;
+}
+
+export async function getChatSessionWorkspace(
+  sessionId: string,
+  relativePath?: string,
+): Promise<ChatSessionWorkspaceResponse> {
+  const { data } = await frontendApi.get<ChatSessionWorkspaceResponse>(`/chat/sessions/${sessionId}/workspace`, {
+    params: relativePath ? { relative_path: relativePath } : undefined,
+  });
   return data;
 }
 
@@ -308,5 +407,32 @@ export async function parseInfrastructure(text: string, sshHostDetails?: SSHHost
     text,
     ssh_host_details: sshHostDetails || null
   });
+  return data;
+}
+
+export async function importData(
+  dataType: string,
+  file?: File | null,
+  label?: string,
+  description?: string,
+  sourceType: "file" | "raw_text" = "file",
+  rawText?: string
+): Promise<ImportDataResponse> {
+  const formData = new FormData();
+  if (file) formData.append("file", file);
+  if (label) formData.append("label", label);
+  if (description) formData.append("description", description);
+  formData.append("source_type", sourceType);
+  if (rawText) formData.append("raw_text", rawText);
+
+  const { data } = await aiidaApi.post<ImportDataResponse>(
+    `/data/import/${dataType}`,
+    formData,
+    {
+      headers: {
+        "Content-Type": "multipart/form-data",
+      },
+    }
+  );
   return data;
 }

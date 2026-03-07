@@ -25,6 +25,11 @@ export type FocusNode = {
   node_type: string;
 };
 
+export type SessionParameter = {
+  key: string;
+  value: string;
+};
+
 export type ResourceAttachmentKind = "computer" | "code" | "plugin";
 
 export type ResourceAttachment = {
@@ -46,7 +51,94 @@ export type ChatMessage = {
 
 export type ChatSnapshot = {
   version: number;
+  session_id: string | null;
   messages: ChatMessage[];
+  snapshot: ChatSessionSnapshot;
+};
+
+export type ChatSessionSnapshot = {
+  context_nodes: FocusNode[];
+  pinned_nodes: FocusNode[];
+  selected_group: string | null;
+  selected_model: string | null;
+  session_environment: string | null;
+  session_environment_auto: boolean;
+  prompt_override: string | null;
+  session_parameters: SessionParameter[];
+};
+
+export type ChatSessionSummary = {
+  id: string;
+  project_id: string;
+  title: string;
+  auto_title: boolean;
+  is_archived: boolean;
+  created_at: string;
+  updated_at: string;
+  tags: string[];
+  project_label: string | null;
+  workspace_path: string;
+  node_count: number;
+  preview: string;
+  message_count: number;
+  snapshot: ChatSessionSnapshot;
+};
+
+export type ChatSessionDetail = ChatSessionSummary & {
+  version: number;
+  messages: ChatMessage[];
+};
+
+export type ChatSessionsResponse = {
+  version: number;
+  active_session_id: string | null;
+  active_project_id: string | null;
+  projects: ChatProject[];
+  items: ChatSessionSummary[];
+};
+
+export type ChatSessionMutationResponse = {
+  version: number;
+  active_session_id: string | null;
+  active_project_id: string | null;
+  projects: ChatProject[];
+  session: ChatSessionDetail;
+  chat: ChatSnapshot;
+};
+
+export type ChatProject = {
+  id: string;
+  name: string;
+  root_path: string;
+  sessions_path: string;
+  created_at: string;
+  updated_at: string;
+  session_count: number;
+  active: boolean;
+};
+
+export type ChatProjectMutationResponse = {
+  project: ChatProject;
+  active_project_id: string | null;
+  projects: ChatProject[];
+};
+
+export type WorkspaceEntry = {
+  name: string;
+  path: string;
+  relative_path: string;
+  is_dir: boolean;
+  size: number | null;
+  updated_at: string;
+};
+
+export type ChatSessionWorkspaceResponse = {
+  session_id: string;
+  project_id: string;
+  project_name: string;
+  workspace_path: string;
+  relative_path: string;
+  entries: WorkspaceEntry[];
 };
 
 export type LogsSnapshot = {
@@ -62,6 +154,59 @@ export type BootstrapResponse = {
   models: string[];
   selected_model: string;
   quick_prompts: Array<{ label: string; prompt: string }>;
+};
+
+export type SpecializationAction = {
+  id: string;
+  label: string;
+  prompt: string;
+  description: string | null;
+  icon: string | null;
+  command: string | null;
+  section: string;
+  placements: string[];
+  specialization: string;
+  specialization_label: string;
+  accent: string;
+  variant: "general" | "specialized";
+  enabled: boolean;
+  disabled_reason: string | null;
+};
+
+export type SpecializationMenuSection = {
+  id: string;
+  label: string;
+  items: SpecializationAction[];
+};
+
+export type SpecializationSummary = {
+  name: string;
+  label: string;
+  description: string | null;
+  accent: string;
+  variant: "general" | "specialized";
+  active: boolean;
+  reasons: string[];
+};
+
+export type ActiveSpecializationsResponse = {
+  chips: SpecializationAction[];
+  slash_menu: SpecializationMenuSection[];
+  active_specializations: SpecializationSummary[];
+  inactive_specializations: SpecializationSummary[];
+  environment: {
+    selected: string | null;
+    resolved: string;
+    auto_switch: boolean;
+  };
+  context: {
+    context_node_ids: number[];
+    context_node_types: string[];
+    project_tags: string[];
+    resource_plugins: string[];
+    worker_plugins: string[];
+    worker_plugins_available: boolean;
+  };
 };
 
 export type ProcessesResponse = {
@@ -98,6 +243,13 @@ export type NodeHoverMetadataResponse = {
   formula: string | null;
   spacegroup: string | null;
   node_type: string;
+};
+
+export type NodeScriptResponse = {
+  pk: number;
+  node_type: string;
+  language: string;
+  script: string;
 };
 
 export type GroupMutationResponse = {
@@ -303,4 +455,11 @@ export type ProfileSetupRequest = {
   filepath: string;
   backend: string;
   set_as_default: boolean;
+};
+
+export type ImportDataResponse = {
+  status: string;
+  pk: number;
+  uuid: string;
+  type: string;
 };

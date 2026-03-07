@@ -23,16 +23,18 @@ import {
   Code2
 } from "lucide-react";
 import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
 import { cn } from "@/lib/utils";
-import { getInfrastructure } from "@/lib/api";
+import { getInfrastructure, getNodeScript } from "@/lib/api";
 import { QuickAddModal } from "@/components/dashboard/quick-add-modal";
 import { CodeSetupModal } from "@/components/dashboard/code-setup-modal";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GroupItem, ProcessItem, InfrastructureComputer } from "@/types/aiida";
+import { DataImportModal } from "@/components/dashboard/data-import-modal";
 
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 
@@ -46,6 +48,16 @@ const PROCESS_LIKE_NODE_TYPES = new Set([
   "WorkflowNode",
   "CalcJobNode",
   "CalcFunctionNode",
+]);
+const DATA_NODE_TYPES = new Set([
+  "StructureData",
+  "Dict",
+  "ArrayData",
+  "XyData",
+  "BandsData",
+  "RemoteData",
+  "FolderData",
+  "KpointsData",
 ]);
 const RUNNING_PROCESS_STATES = new Set(["running", "created", "waiting"]);
 const FINISHED_PROCESS_STATES = new Set(["finished", "completed", "success"]);
@@ -66,6 +78,17 @@ type NodeMetadata = {
   processStatus: ProcessStatusTone | null;
 };
 
+type ManualCopyState = {
+  title: string;
+  description: string;
+  text: string;
+};
+
+type ContextMenuPosition = {
+  x: number;
+  y: number;
+};
+
 function normalizeState(state: string | null): string {
   return String(state || "unknown").trim().replace(/_/g, " ").toLowerCase();
 }
@@ -74,11 +97,77 @@ function isStructureNode(process: ProcessItem): boolean {
   return process.node_type === "StructureData" || Boolean(process.formula);
 }
 
-function isProcessLikeNode(process: ProcessItem): boolean {
+function canInspectNode(process: ProcessItem): boolean {
   if (process.process_state !== null) {
     return true;
   }
-  return PROCESS_LIKE_NODE_TYPES.has(process.node_type);
+  return PROCESS_LIKE_NODE_TYPES.has(process.node_type) || DATA_NODE_TYPES.has(process.node_type);
+}
+
+function canCloneNode(process: ProcessItem): boolean {
+  const nodeType = String(process.node_type || "").trim();
+  if (!nodeType) {
+    return process.process_state !== null;
+  }
+  return nodeType === "ProcessNode" || nodeType === "WorkChainNode" || nodeType === "WorkflowNode";
+}
+
+function canCopyNodeAsScript(process: ProcessItem): boolean {
+  const nodeType = String(process.node_type || "").trim();
+  return nodeType === "StructureData" || nodeType === "Dict";
+}
+
+async function copyTextWithFallback(text: string): Promise<boolean> {
+  const normalized = String(text ?? "");
+  if (!normalized) {
+    return false;
+  }
+
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(normalized);
+      return true;
+    } catch {
+      // Fall through to legacy copy path.
+    }
+  }
+
+  if (typeof document !== "undefined") {
+    const textarea = document.createElement("textarea");
+    textarea.value = normalized;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.left = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, normalized.length);
+    try {
+      if (document.execCommand("copy")) {
+        document.body.removeChild(textarea);
+        return true;
+      }
+    } catch {
+      // Ignore and continue to manual fallback.
+    }
+    document.body.removeChild(textarea);
+  }
+  return false;
+}
+
+function clampMenuPosition(x: number, y: number): ContextMenuPosition {
+  if (typeof window === "undefined") {
+    return { x, y };
+  }
+  const menuWidth = 196;
+  const menuHeight = 240;
+  const margin = 12;
+  return {
+    x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
+    y: Math.max(margin, Math.min(y, window.innerHeight - menuHeight - margin)),
+  };
 }
 
 function getPreviewObject(process: ProcessItem): Record<string, unknown> | null {
@@ -185,25 +274,28 @@ function getXyArrayNames(preview: Record<string, unknown> | null): string[] {
 }
 
 function getNodeTypeIndicator(process: ProcessItem): NodeTypeIndicator {
-  if (process.node_type === "StructureData") {
-    return { icon: "💎", iconLabel: "Crystal" };
+  const nodeType = process.node_type || "";
+  const loType = nodeType.toLowerCase();
+
+  if (loType.includes("structure")) {
+    return { icon: "\uD83D\uDC8E", iconLabel: "Crystal" };
   }
-  if (process.node_type === "ProcessNode" || process.node_type === "WorkChainNode") {
-    return { icon: "⚡", iconLabel: "Activity" };
+  if (loType.includes("base") || loType.includes("log") || loType.includes("report")) {
+    return { icon: "\u26A1", iconLabel: "Activity" };
   }
-  if (process.node_type === "BandsData" || process.node_type === "XyData") {
-    return { icon: "📈", iconLabel: "Chart" };
+  if (loType.includes("bands") || loType.includes("xy") || loType.includes("trajectory")) {
+    return { icon: "\uD83D\uDCC8", iconLabel: "Chart" };
   }
-  if (process.node_type === "Dict" || process.node_type === "ArrayData") {
-    return { icon: "📑", iconLabel: "Data" };
+  if (loType.includes("dict") || loType.includes("array") || loType.includes("parameter")) {
+    return { icon: "\uD83D\uDCD1", iconLabel: "Data" };
   }
-  if (process.node_type === "RemoteData" || process.node_type === "FolderData") {
-    return { icon: "📁", iconLabel: "Folder" };
+  if (loType.includes("folder") || loType.includes("retrieved")) {
+    return { icon: "\uD83D\uDCC1", iconLabel: "Folder" };
   }
-  if (isProcessLikeNode(process)) {
-    return { icon: "⚡", iconLabel: "Activity" };
+  if (canInspectNode(process)) {
+    return { icon: "\u26A1", iconLabel: "Activity" };
   }
-  return { icon: "📦", iconLabel: "Node" };
+  return { icon: "\uD83D\uDCE6", iconLabel: "Node" };
 }
 
 function compactLabel(value: string): string {
@@ -246,14 +338,14 @@ function getNodeTitleText(process: ProcessItem): string {
   if (process.node_type === "ProcessNode") {
     return getProcessSpecificLabel(process) || defaultTitle;
   }
-  if (isProcessLikeNode(process)) {
+  if (canInspectNode(process)) {
     return getProcessSpecificLabel(process) || defaultTitle;
   }
   return defaultTitle;
 }
 
 function getProcessStatusTone(process: ProcessItem): ProcessStatusTone | null {
-  if (!isProcessLikeNode(process)) {
+  if (!canInspectNode(process)) {
     return null;
   }
   const status = toDisplayStatus(process.process_state || process.state);
@@ -330,8 +422,9 @@ function getNodeMetadata(process: ProcessItem): NodeMetadata {
   const preview = getPreviewObject(process);
   const lines: string[] = [];
   const processStatus = getProcessStatusTone(process);
+  const isStructure = isStructureNode(process);
 
-  if (isStructureNode(process)) {
+  if (isStructure) {
     const formula = String(preview?.formula || process.formula || "").trim();
     const atomCount = asInteger(preview?.atom_count);
     if (formula) {
@@ -385,7 +478,7 @@ function getNodeMetadata(process: ProcessItem): NodeMetadata {
     }
   }
 
-  if (isProcessLikeNode(process) && process.label.trim()) {
+  if (!isStructure && canInspectNode(process) && process.label.trim()) {
     const titleText = getNodeTitleText(process);
     if (process.label.trim() !== titleText) {
       lines.unshift(process.label.trim());
@@ -413,7 +506,6 @@ type SidebarProps = {
   onNodeTypeFilterChange: (type: "all" | "structures" | "tasks" | "failed") => void;
   onProcessLimitChange: (limit: number) => void;
   onAddContextNode: (process: ProcessItem) => void;
-  onAddContextNodes: (processes: ProcessItem[]) => void;
   onOpenProcessDetail: (process: ProcessItem) => void;
   onCreateGroup: (label: string) => void;
   onRenameGroup: (pk: number, label: string) => void;
@@ -422,6 +514,7 @@ type SidebarProps = {
   onSoftDeleteNode: (pk: number) => void;
   onExportGroup: (group: GroupItem) => void;
   onConsultFailedProcess: (process: ProcessItem) => void;
+  onCloneProcess: (process: ProcessItem) => void;
 };
 
 export function Sidebar({
@@ -438,7 +531,6 @@ export function Sidebar({
   onNodeTypeFilterChange,
   onProcessLimitChange,
   onAddContextNode,
-  onAddContextNodes,
   onOpenProcessDetail,
   onCreateGroup,
   onRenameGroup,
@@ -447,6 +539,7 @@ export function Sidebar({
   onSoftDeleteNode,
   onExportGroup,
   onConsultFailedProcess,
+  onCloneProcess,
 }: SidebarProps) {
   const [limitInput, setLimitInput] = useState(String(processLimit));
   const [searchQuery, setSearchQuery] = useState("");
@@ -480,6 +573,15 @@ export function Sidebar({
   const [selectedComputerLabel, setSelectedComputerLabel] = useState("");
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [expandedComputers, setExpandedComputers] = useState<Set<number>>(new Set());
+  const [copyingScriptPk, setCopyingScriptPk] = useState<number | null>(null);
+  const [manualCopyState, setManualCopyState] = useState<ManualCopyState | null>(null);
+  const nodeMenuRef = useRef<HTMLDivElement | null>(null);
+  const groupMenuRef = useRef<HTMLDivElement | null>(null);
+  const manualCopyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const [isDataImportOpen, setIsDataImportOpen] = useState(false);
+  const [importGroupPk, setImportGroupPk] = useState<number | undefined>();
+  const [importGroupLabel, setImportGroupLabel] = useState<string | undefined>();
 
   const queryClient = useQueryClient();
   const infraQuery = useQuery({
@@ -546,7 +648,7 @@ export function Sidebar({
       }
       // Type Toggle
       if (nodeTypeFilter === "structures" && !isStructureNode(proc)) return false;
-      if (nodeTypeFilter === "tasks" && !isProcessLikeNode(proc)) return false;
+      if (nodeTypeFilter === "tasks" && !canInspectNode(proc)) return false;
       if (nodeTypeFilter === "failed") {
         const normalized = normalizeState(proc.process_state || proc.state);
         if (!FAILED_PROCESS_STATES.has(normalized)) return false;
@@ -565,14 +667,6 @@ export function Sidebar({
     });
   };
 
-  const handleBulkAddToContext = () => {
-    const selectedProcs = processes.filter((p) => selectedNodePks.has(p.pk));
-    if (selectedProcs.length > 0) {
-      onAddContextNodes(selectedProcs);
-    }
-    setSelectedNodePks(new Set());
-  };
-
   const handleBulkCreateGroup = () => {
     const label = window.prompt("Enter new group name:");
     if (!label) return;
@@ -584,30 +678,113 @@ export function Sidebar({
     setSelectedNodePks(new Set());
   };
 
+  const openNodeContextMenuAt = useCallback((pk: number, x: number, y: number) => {
+    const position = clampMenuPosition(x, y);
+    setContextMenuNode({ pk, x: position.x, y: position.y });
+  }, []);
+
+  const openNodeContextMenu = useCallback((event: React.MouseEvent, pk: number) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openNodeContextMenuAt(pk, event.clientX, event.clientY);
+  }, [openNodeContextMenuAt]);
+
+  const openManualCopyDialog = useCallback((title: string, description: string, text: string) => {
+    setManualCopyState({ title, description, text });
+  }, []);
+
+  const handleCopyPk = useCallback(async (pk: number) => {
+    const copied = await copyTextWithFallback(String(pk));
+    if (!copied) {
+      openManualCopyDialog(
+        `Copy node #${pk} PK`,
+        "Clipboard access is blocked in this browser context. Copy the PK manually below.",
+        String(pk),
+      );
+    }
+  }, [openManualCopyDialog]);
+
+  const handleCopyNodeScript = useCallback(async (process: ProcessItem) => {
+    setCopyingScriptPk(process.pk);
+    try {
+      const payload = await getNodeScript(process.pk);
+      const copied = await copyTextWithFallback(payload.script);
+      if (!copied) {
+        openManualCopyDialog(
+          `Copy script for node #${process.pk}`,
+          "Clipboard access is blocked in this browser context. Copy the script manually below.",
+          payload.script,
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Failed to copy script for node #${process.pk}.`;
+      window.alert(message);
+    } finally {
+      setCopyingScriptPk(null);
+    }
+  }, [openManualCopyDialog]);
+
+  useEffect(() => {
+    if (!manualCopyState || !manualCopyTextareaRef.current) {
+      return;
+    }
+    manualCopyTextareaRef.current.focus();
+    manualCopyTextareaRef.current.select();
+    manualCopyTextareaRef.current.setSelectionRange(0, manualCopyState.text.length);
+  }, [manualCopyState]);
+
   // Close context menus on click outside
   useEffect(() => {
-    const handleClick = () => {
+    const handlePointerDown = (event: MouseEvent) => {
+      if (event.button !== 0) {
+        return;
+      }
+      const target = event.target;
+      if (
+        (nodeMenuRef.current && target instanceof Node && nodeMenuRef.current.contains(target)) ||
+        (groupMenuRef.current && target instanceof Node && groupMenuRef.current.contains(target))
+      ) {
+        return;
+      }
       setContextMenuNode(null);
       setContextMenuGroup(null);
       setContextMenuComputer(null);
     };
-    window.addEventListener("click", handleClick);
-    return () => window.removeEventListener("click", handleClick);
+    window.addEventListener("mousedown", handlePointerDown);
+    return () => window.removeEventListener("mousedown", handlePointerDown);
+  }, []);
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      setContextMenuNode(null);
+      setContextMenuGroup(null);
+      setContextMenuComputer(null);
+      setManualCopyState(null);
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
   }, []);
 
   const groupTree = useMemo(() => {
-    const root: Record<string, any> = { children: {}, items: [] };
+    const root: Record<string, any> = { children: {}, group: null, path: "" };
     for (const group of groups) {
       const parts = group.label.split("/");
       let current = root;
-      for (let i = 0; i < parts.length - 1; i++) {
+      let pathSoFar = "";
+      for (let i = 0; i < parts.length; i++) {
         const part = parts[i];
+        pathSoFar = pathSoFar ? `${pathSoFar}/${part}` : part;
         if (!current.children[part]) {
-          current.children[part] = { children: {}, items: [], path: parts.slice(0, i + 1).join("/") };
+          current.children[part] = { children: {}, group: null, path: pathSoFar };
         }
         current = current.children[part];
+        if (i === parts.length - 1) {
+          current.group = group;
+        }
       }
-      current.items.push(group);
     }
     return root;
   }, [groups]);
@@ -625,59 +802,85 @@ export function Sidebar({
   const renderGroupTree = (node: any, level = 0) => {
     return (
       <div className="flex flex-col gap-1">
-        {/* Render Subfolders */}
-        {Object.entries(node.children).sort(([a], [b]) => a.localeCompare(b)).map(([name, child]: [string, any]) => {
-          const isExpanded = expandedFolders.has(child.path);
-          return (
-            <div key={child.path} className="flex flex-col">
-              <div
-                role="button"
-                tabIndex={0}
-                onClick={(e) => toggleFolder(child.path, e)}
-                style={{ paddingLeft: `${level * 12 + 8}px` }}
-                className="flex items-center gap-2 rounded-md py-1.5 text-sm transition-colors hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
-              >
-                <ChevronRight className={cn("h-3.5 w-3.5 transition-transform shrink-0", isExpanded && "rotate-90")} />
-                <span className="truncate font-medium">{name}</span>
+        {Object.entries(node.children)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, child]: [string, any]) => {
+            const isExpanded = expandedFolders.has(child.path);
+            const hasChildren = Object.keys(child.children).length > 0;
+            const group = child.group;
+            const isSelected = group && selectedGroup === group.label;
+
+            return (
+              <div key={child.path} className="flex flex-col">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    if (group) onGroupChange(group.label);
+                    if (hasChildren) toggleFolder(child.path, { stopPropagation: () => { } } as any);
+                  }}
+                  onDragOver={(e) => {
+                    if (group) {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "copy";
+                    }
+                  }}
+                  onDrop={(e) => {
+                    if (group) handleGroupDrop(e, group.pk);
+                  }}
+                  onContextMenu={(e) => {
+                    if (group) {
+                      e.preventDefault();
+                      setContextMenuGroup({ pk: group.pk, x: e.pageX, y: e.pageY });
+                    }
+                  }}
+                  style={{ paddingLeft: `${level * 12 + 8}px` }}
+                  className={cn(
+                    "group flex items-center justify-between rounded-md py-1.5 pr-2 text-sm transition-colors",
+                    isSelected
+                      ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium"
+                      : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
+                  )}
+                >
+                  <div className="flex items-center gap-1.5 overflow-hidden">
+                    {hasChildren ? (
+                      <ChevronRight className={cn("h-3.5 w-3.5 transition-transform shrink-0", isExpanded && "rotate-90")} />
+                    ) : (
+                      <div className="h-3.5 w-3.5 shrink-0" />
+                    )}
+                    <FolderOpen
+                      className={cn(
+                        "h-4 w-4 shrink-0 transition-opacity",
+                        group ? "text-zinc-400 dark:text-zinc-500" : "text-zinc-400/40 dark:text-zinc-500/30"
+                      )}
+                    />
+                    <span className="truncate">{name}</span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setImportGroupPk(group?.pk);
+                        setImportGroupLabel(child.path);
+                        setIsDataImportOpen(true);
+                      }}
+                      className="p-0.5 hover:bg-zinc-200 dark:hover:bg-zinc-700 rounded transition-colors"
+                      title="Import Data"
+                    >
+                      <Plus className="h-3 w-3 text-zinc-500" />
+                    </button>
+                    {group && (
+                      <span className="text-[10px] text-zinc-400 shrink-0">
+                        {group.count}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {hasChildren && isExpanded && renderGroupTree(child, level + 1)}
               </div>
-              {isExpanded && renderGroupTree(child, level + 1)}
-            </div>
-          );
-        })}
-        {/* Render Groups in this folder */}
-        {node.items.sort((a: GroupItem, b: GroupItem) => a.label.localeCompare(b.label)).map((group: GroupItem) => {
-          const displayLabel = group.label.split("/").pop();
-          return (
-            <div
-              key={group.pk}
-              role="button"
-              tabIndex={0}
-              onClick={() => onGroupChange(group.label)}
-              onDragOver={(e) => {
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "copy";
-              }}
-              onDrop={(e) => handleGroupDrop(e, group.pk)}
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setContextMenuGroup({ pk: group.pk, x: e.pageX, y: e.pageY });
-              }}
-              style={{ paddingLeft: `${level * 12 + 24}px` }}
-              className={cn(
-                "group flex items-center justify-between rounded-md py-1.5 pr-2 text-sm transition-colors",
-                selectedGroup === group.label ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
-              )}
-            >
-              <div className="flex items-center gap-2 overflow-hidden">
-                <FolderOpen className="h-4 w-4 shrink-0 text-zinc-400 dark:text-zinc-500" />
-                <span className="truncate">{displayLabel}</span>
-              </div>
-              <span className="text-[10px] text-zinc-400 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                {group.count}
-              </span>
-            </div>
-          );
-        })}
+            );
+          })}
       </div>
     );
   };
@@ -751,7 +954,7 @@ export function Sidebar({
   };
 
   return (
-    <aside className="flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight lg:w-[360px] relative">
+    <aside className="relative flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight">
       <header className="flex items-center justify-between">
         <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
           AiiDA Explorer
@@ -896,7 +1099,7 @@ export function Sidebar({
               filteredProcesses.map((process) => {
                 const isSelected = contextNodeIds.includes(process.pk);
                 const isChecked = selectedNodePks.has(process.pk);
-                const canOpenDetail = isProcessLikeNode(process);
+                const canOpenDetail = canInspectNode(process);
                 const typeIndicator = getNodeTypeIndicator(process);
                 const titleText = getNodeTitleText(process);
                 const metadata = getNodeMetadata(process);
@@ -909,10 +1112,9 @@ export function Sidebar({
                     key={`${process.pk}-${process.state}`}
                     draggable
                     onDragStart={(event) => handleProcessDragStart(event, process)}
-                    onClick={() => onAddContextNode(process)}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setContextMenuNode({ pk: process.pk, x: e.pageX, y: e.pageY });
+                    onClick={() => onOpenProcessDetail(process)}
+                    onContextMenuCapture={(e) => {
+                      openNodeContextMenu(e, process.pk);
                     }}
                     className={cn(
                       "group/card flex items-start gap-2 rounded-xl border px-3 py-2.5 transition-all duration-200 cursor-pointer",
@@ -929,52 +1131,49 @@ export function Sidebar({
                     </button>
 
                     <div className="flex min-w-0 flex-1 flex-col gap-1">
-                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center justify-between gap-3">
                         <p className="flex items-center gap-1.5 truncate font-sans text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
                           <span role="img" aria-label={typeIndicator.iconLabel} className="shrink-0">{typeIndicator.icon}</span>
                           <span className="truncate">
                             {titleText} <span className="font-mono text-[11px] font-normal text-zinc-500 dark:text-zinc-400">({process.pk})</span>
                           </span>
                         </p>
-                        {metadata.processStatus && (
-                          <div className="flex items-center gap-1 shrink-0">
+                        <div className="flex items-center gap-1 shrink-0">
+                          {metadata.processStatus && (
                             <p className={cn("text-[11px] font-semibold tracking-tight", metadata.processStatus.className)}>
                               {metadata.processStatus.label}
                             </p>
-                            {isFailed && (
-                              <button
-                                onClick={(e) => { e.stopPropagation(); onConsultFailedProcess(process); }}
-                                className="text-rose-500 hover:text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 rounded p-0.5"
-                                title="AI Diagnose"
-                              >
-                                <Wand2 className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        )}
+                          )}
+                          <button
+                            type="button"
+                            draggable={false}
+                            data-node-menu-trigger="true"
+                            className="rounded-md p-1 text-zinc-400 opacity-0 transition-opacity hover:bg-zinc-100 hover:text-zinc-700 group-hover/card:opacity-100 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                            }}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              openNodeContextMenuAt(process.pk, rect.right - 188, rect.bottom + 6);
+                            }}
+                            title="Node actions"
+                            aria-label={`Open menu for node ${process.pk}`}
+                          >
+                            <MoreVertical className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
 
-                      <div className="min-w-0 flex justify-between">
+                      <div className="min-w-0">
                         <div className="flex flex-col">
                           {metadata.lines.map((line, idx) => (
                             <p key={idx} className={cn("truncate text-[11px] tracking-tight", idx === 0 ? "text-zinc-700 dark:text-zinc-300" : "text-zinc-500 dark:text-zinc-400")}>
                               {line}
                             </p>
                           ))}
-                        </div>
-                        <div className="mt-0.5 flex items-end justify-end gap-2">
-                          {canOpenDetail && (
-                            <button
-                              type="button"
-                              className="text-[10px] uppercase tracking-[0.08em] text-zinc-500 underline decoration-zinc-300 underline-offset-2 transition-colors hover:text-zinc-800 dark:text-zinc-400 dark:decoration-zinc-700 dark:hover:text-zinc-200"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onOpenProcessDetail(process);
-                              }}
-                            >
-                              Inspect
-                            </button>
-                          )}
                         </div>
                       </div>
                     </div>
@@ -992,9 +1191,6 @@ export function Sidebar({
               </span>
               <button onClick={handleBulkCreateGroup} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
                 <FolderPlus className="h-3.5 w-3.5" /> Group
-              </button>
-              <button onClick={handleBulkAddToContext} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/30">
-                <ListPlus className="h-3.5 w-3.5" /> Context
               </button>
             </div>
           )}
@@ -1031,46 +1227,87 @@ export function Sidebar({
       </Panel>
 
       {/* Context Menus */}
-      {contextMenuNode && (
-        <div
-          className="fixed z-50 min-w-40 rounded-md border border-zinc-200 bg-white p-1 shadow-md dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
-          style={{ top: contextMenuNode.y, left: contextMenuNode.x }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-            onClick={() => {
-              navigator.clipboard.writeText(String(contextMenuNode.pk));
-              setContextMenuNode(null);
-            }}
+      {contextMenuNode && typeof document !== "undefined" && createPortal((() => {
+        const process = processes.find((item) => item.pk === contextMenuNode.pk);
+        const isFailed = process ? FAILED_PROCESS_STATES.has(normalizeState(process.process_state || process.state)) : false;
+        return (
+          <div
+            ref={nodeMenuRef}
+            className="fixed z-[110] min-w-44 rounded-md border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
+            style={{ top: contextMenuNode.y, left: contextMenuNode.x }}
+            onClick={(e) => e.stopPropagation()}
           >
-            <Copy className="h-3.5 w-3.5" /> Copy PK
-          </button>
-          <button
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
-            onClick={() => {
-              const proc = processes.find(p => p.pk === contextMenuNode.pk);
-              if (proc) onAddContextNode(proc);
-              setContextMenuNode(null);
-            }}
-          >
-            <ListPlus className="h-3.5 w-3.5" /> Add to Context
-          </button>
-          <hr className="my-1 border-zinc-200 dark:border-zinc-800" />
-          <button
-            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
-            onClick={() => {
-              onSoftDeleteNode(contextMenuNode.pk);
-              setContextMenuNode(null);
-            }}
-          >
-            <Trash2 className="h-3.5 w-3.5" /> Delete Node
-          </button>
-        </div>
-      )}
+            {process && canCopyNodeAsScript(process) && (
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                disabled={copyingScriptPk === process.pk}
+                onClick={() => {
+                  void handleCopyNodeScript(process);
+                  setContextMenuNode(null);
+                }}
+              >
+                <Code2 className="h-3.5 w-3.5" /> {copyingScriptPk === process.pk ? "Copying..." : "Copy as Script"}
+              </button>
+            )}
+            {process && canCloneNode(process) && (
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                onClick={() => {
+                  onCloneProcess(process);
+                  setContextMenuNode(null);
+                }}
+              >
+                <Copy className="h-3.5 w-3.5" /> Clone & Edit
+              </button>
+            )}
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              onClick={() => {
+                void handleCopyPk(contextMenuNode.pk);
+                setContextMenuNode(null);
+              }}
+            >
+              <Copy className="h-3.5 w-3.5" /> Copy PK
+            </button>
+            {process && (
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                onClick={() => {
+                  onAddContextNode(process);
+                  setContextMenuNode(null);
+                }}
+              >
+                <ListPlus className="h-3.5 w-3.5" /> Add to Context
+              </button>
+            )}
+            {process && isFailed && (
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
+                onClick={() => {
+                  onConsultFailedProcess(process);
+                  setContextMenuNode(null);
+                }}
+              >
+                <Wand2 className="h-3.5 w-3.5" /> AI Diagnose
+              </button>
+            )}
+            <hr className="my-1 border-zinc-200 dark:border-zinc-800" />
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
+              onClick={() => {
+                onSoftDeleteNode(contextMenuNode.pk);
+                setContextMenuNode(null);
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Delete Node
+            </button>
+          </div>
+        );
+      })(), document.body)}
 
       {contextMenuGroup && (
         <div
+          ref={groupMenuRef}
           className="fixed z-50 min-w-40 rounded-md border border-zinc-200 bg-white p-1 shadow-md dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
           style={{ top: contextMenuGroup.y, left: contextMenuGroup.x }}
           onClick={(e) => e.stopPropagation()}
@@ -1108,6 +1345,67 @@ export function Sidebar({
         </div>
       )}
 
+      {manualCopyState && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-zinc-950/45 px-4"
+          onClick={() => setManualCopyState(null)}
+        >
+          <div
+            className="w-full max-w-3xl rounded-2xl border border-zinc-200 bg-white p-4 shadow-2xl dark:border-zinc-800 dark:bg-zinc-900"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{manualCopyState.title}</h3>
+                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{manualCopyState.description}</p>
+              </div>
+              <button
+                type="button"
+                className="rounded-md px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                onClick={() => setManualCopyState(null)}
+              >
+                Close
+              </button>
+            </div>
+            <textarea
+              ref={manualCopyTextareaRef}
+              readOnly
+              value={manualCopyState.text}
+              className="h-72 w-full rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 font-mono text-xs text-zinc-700 outline-none focus:ring-2 focus:ring-blue-200 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200 dark:focus:ring-blue-900"
+            />
+            <div className="mt-3 flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (!manualCopyTextareaRef.current) {
+                    return;
+                  }
+                  manualCopyTextareaRef.current.focus();
+                  manualCopyTextareaRef.current.select();
+                  manualCopyTextareaRef.current.setSelectionRange(0, manualCopyState.text.length);
+                }}
+              >
+                Select All
+              </Button>
+              <Button
+                size="sm"
+                onClick={() => {
+                  void (async () => {
+                    const copied = await copyTextWithFallback(manualCopyState.text);
+                    if (copied) {
+                      setManualCopyState(null);
+                    }
+                  })();
+                }}
+              >
+                Try Copy Again
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <QuickAddModal
         isOpen={isQuickAddOpen}
         onClose={() => setIsQuickAddOpen(false)}
@@ -1123,6 +1421,16 @@ export function Sidebar({
         onSuccess={() => {
           void queryClient.invalidateQueries({ queryKey: ["aiida-infrastructure"] });
         }}
+      />
+      <DataImportModal
+        isOpen={isDataImportOpen}
+        onClose={() => setIsDataImportOpen(false)}
+        onSuccess={() => {
+          queryClient.invalidateQueries({ queryKey: ["processes"] });
+          queryClient.invalidateQueries({ queryKey: ["groups"] });
+        }}
+        groupPk={importGroupPk}
+        groupLabel={importGroupLabel}
       />
     </aside>
   );

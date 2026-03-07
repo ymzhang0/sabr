@@ -140,6 +140,42 @@ function findFirstNamedValue(payload: unknown, candidateKeys: Set<string>): unkn
   return null;
 }
 
+function looksLikeCodeKey(key: string): boolean {
+  const lowered = key.trim().toLowerCase();
+  return lowered === "code" || lowered === "code_label" || lowered === "codes" || lowered.endsWith("_code");
+}
+
+function findFirstMatchingValue(
+  payload: unknown,
+  predicate: (key: string, value: unknown) => boolean,
+): unknown {
+  if (Array.isArray(payload)) {
+    for (const item of payload) {
+      const nested = findFirstMatchingValue(item, predicate);
+      if (nested !== undefined && nested !== null) {
+        return nested;
+      }
+    }
+    return null;
+  }
+
+  const record = asRecord(payload);
+  if (!record) {
+    return null;
+  }
+
+  for (const [key, value] of Object.entries(record)) {
+    if (predicate(key, value) && value !== undefined && value !== null && value !== "") {
+      return value;
+    }
+    const nested = findFirstMatchingValue(value, predicate);
+    if (nested !== undefined && nested !== null) {
+      return nested;
+    }
+  }
+  return null;
+}
+
 function normalizePkMapEntries(value: unknown): SubmissionDraftPkMapEntry[] {
   if (!Array.isArray(value)) {
     return [];
@@ -200,7 +236,7 @@ export function SubmissionCard({
   const parallelEntries = buildParallelEntries(submissionDraft.meta.parallel_settings);
 
   const codeSummary = stringifyCompact(
-    findFirstNamedValue(submissionDraft.inputs, new Set(["code", "code_label", "pw_code", "qe_code", "codes"])),
+    findFirstMatchingValue(submissionDraft.inputs, (key) => looksLikeCodeKey(key)),
   );
   const kPointsSummary = stringifyCompact(
     findFirstNamedValue(

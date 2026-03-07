@@ -10,7 +10,7 @@ SUBMISSION_DRAFT_REQUIRED_RULE = (
 )
 SUBMISSION_DRAFT_FORMAT_EXAMPLE = (
     '{"process_label":"...","primary_inputs":{"code":{...},"structure":{...},"pseudos":{...}},'
-    '"recommended_inputs":{...},"advanced_settings":{...},"all_inputs":{"pw.parameters.SYSTEM.ecutwfc":{"value":60,"is_recommended":true}},'
+    '"recommended_inputs":{...},"advanced_settings":{...},"all_inputs":{"settings.convergence_tolerance":{"value":1e-08,"is_recommended":true}},'
     '"inputs":{...},"meta":{"pk_map":[...],"structure_metadata":[{"pk":123,"symmetry":"Fm-3m","num_atoms":4,"estimated_runtime":"2h"}]}}'
 )
 SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE = (
@@ -38,8 +38,8 @@ _BASE_OPERATIONAL_RULES: tuple[str, ...] = (
         "'[SUBMISSION_DRAFT] { ...JSON... }'. This is the ONLY way the user can see the launch button."
     ),
     (
-        "Do not force cutoff values into narrative summaries. Mention ecutwfc/ecutrho only when these values are "
-        "explicitly present in the prepared builder/draft payload."
+        "Do not force low-level solver parameters into narrative summaries. Mention detailed numerical settings only "
+        "when they are explicitly present in the prepared builder/draft payload."
     ),
     "Do not wrap this block in markdown code fences unless the frontend parser explicitly handles it.",
     "Do not skip this block. Do not summarize it away. Do not wrap it in markdown fences.",
@@ -49,8 +49,21 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
     "DB Analysis: Use 'get_database_statistics' and 'list_groups' to navigate.",
     "Deep Dive: Use 'inspect_group' to see attributes of many nodes, or 'inspect_node' for one.",
     (
+        "PROFILE DISCIPLINE: Treat the current worker profile as sticky. For normal calculation, validation, and "
+        "inspection flows, stay on the active profile and do not switch profiles just because a group, node, code, "
+        "or plugin was not found."
+    ),
+    (
         "Available WorkChains: When asked about plugins/workchains, call 'list_remote_plugins' first; "
         "this is the source of truth from the active worker bridge."
+    ),
+    (
+        "Profile switching is a last resort. Only call 'switch_aiida_profile' after inspecting "
+        "'list_profiles' and identifying one specific target profile that is required for the task."
+    ),
+    (
+        "Do not iterate across profiles to hunt for data. At most one automatic profile switch is allowed in a turn "
+        "unless the user explicitly asks to switch again."
     ),
     "WorkChain Spec: Use 'get_remote_workchain_spec' (or 'check_workflow_spec') before drafting a builder.",
     "Submission readiness: call 'inspect_lab_infrastructure' before submission to confirm required computers/codes exist.",
@@ -60,22 +73,22 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
         "'submit_validated_workflow'."
     ),
     (
-        "For standard vc-relax / band-structure / relax+band requests, do not start with custom scripts. "
+        "For standard workflow preparation requests, do not start with custom scripts. "
         "Use submit_new_workflow first, and only use run_aiida_code_script after explicit builder/tool failure."
     ),
     (
-        "Builder fallback rule: if protocol-based builder creation (e.g. get_builder_from_protocol / draft-builder) "
-        "fails because pseudopotentials are missing, manually construct a submission input dictionary, "
-        "override to an available pseudo family, and still emit a valid [SUBMISSION_DRAFT] JSON block."
+        "Builder failure rule: if protocol-based builder creation (e.g. get_builder_from_protocol / draft-builder) "
+        "fails because required resources or inputs are missing, do not invent overrides or swap in alternatives "
+        "silently. Inspect the reported error, verify the WorkChain spec and available resources, and ask the user "
+        "before substituting any alternative input."
     ),
     (
-        "Pseudopotential fallback priority: if SSSP is unavailable but PseudoDojo exists, automatically treat "
-        "PseudoDojo as the valid source for the [SUBMISSION_DRAFT] payload."
+        "If a worker response includes a 'recovery_plan', follow that plan in order. Treat it as the canonical "
+        "diagnostic path and do not bypass it with plugin-specific shortcuts."
     ),
     (
-        "Quick research actions: when the user asks for structure relaxation, band structure, or relax+band "
-        "workflows (including quick-prompt shortcuts), prioritize the PseudoDojo pseudo family. "
-        "If PseudoDojo is unavailable, state that clearly and propose the closest available alternative."
+        "If required resources are unavailable in the current AiiDA profile or database, state that clearly and stop "
+        "the submission path until the user chooses how to proceed."
     ),
     (
         "Specialized skill registry: use 'call_specialized_skill' to execute worker-side reusable scripts "
@@ -92,6 +105,20 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
     (
         "Custom script import safety: avoid hard dependency on aiida_pseudo.* modules unless confirmed installed "
         "in worker; discover pseudo families via worker bridge/group labels when possible."
+    ),
+    (
+        "Worker Python environments may not provide 'pip' or 'pkg_resources'. In custom scripts, do not shell out "
+        "to pip or import pkg_resources for diagnostics; prefer stdlib checks such as importlib.metadata and direct "
+        "module imports."
+    ),
+    (
+        "Artifact persistence rule: whenever custom Python generates a plot, table, HTML report, JSON payload, or "
+        "other file artifact, call 'save_artifact(filename, data)' inside the worker script so the result is written "
+        "into the active session workspace. Do not rely on frontend-only display or plt.show() alone."
+    ),
+    (
+        "For matplotlib, prefer 'save_artifact(\"figure-name.png\", fig)'. For Plotly, prefer "
+        "'save_artifact(\"figure-name.html\", fig)'."
     ),
     "Custom Logic: If standard tools fail, use 'run_aiida_code_script' to execute targeted worker-side scripts.",
 )

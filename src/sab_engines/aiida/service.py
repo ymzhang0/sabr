@@ -54,8 +54,8 @@ async def parse_infrastructure_via_ai(text: str, ssh_host_details: dict[str, Any
         http_options={"api_version": settings.GEMINI_API_VERSION},
     )
 
-    # Fetch available plugins to make the prompt more dynamic if possible
-    # For now, we use a generic placeholder instead of hardcoded quantumespresso.pw
+    # Fetch available plugins to make the prompt more dynamic if possible.
+    # Keep examples generic so the parser does not bias toward any single plugin family.
     prompt = f"""
     You are an AiiDA infrastructure expert. Parse the following text into a structured JSON for configuring an AiiDA Computer or Code.
 
@@ -79,7 +79,7 @@ async def parse_infrastructure_via_ai(text: str, ssh_host_details: dict[str, Any
       "code": {{
         "label": "string",
         "description": "string",
-        "default_calc_job_plugin": "string (the AiiDA plugin name, e.g. quantumespresso.pw or vasp.vasp)",
+        "default_calc_job_plugin": "string (the AiiDA plugin name, e.g. plugin.calcjob)",
         "remote_abspath": "string"
       }}
     }}

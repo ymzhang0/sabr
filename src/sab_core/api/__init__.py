@@ -1,2 +1,0 @@
-"""SABR core API routers."""
-

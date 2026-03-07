@@ -32,6 +32,6 @@ User -> Next.js Frontend -> FastAPI SABR Routers -> SABR Auto-Agent -> Tool Call
 ## 3. Frontend Architecture Insights
 ### Submission Review & Draft Builders
 **Location:** `sabr/frontend/src/components/dashboard/submission-modal.tsx`, `process-detail-drawer.tsx`
-**Implementation:** The submission UI dynamically reads AiiDA Builder outputs. To support WorkChains (like `pwrelaxworkchain`), specific port parameters like `metadata.options` (e.g., `workdir`, `account`, `resources`) must be mapped deeply into nested calculation namespaces (e.g., `base.pw.metadata.options`) instead of the root directory. 
+**Implementation:** The submission UI dynamically reads AiiDA Builder outputs. For WorkChains that wrap one or more child calculations, specific port parameters like `metadata.options` (e.g., `workdir`, `account`, `resources`) may need to be mapped into nested child namespaces instead of the root directory. The mapping should always come from the actual builder/spec shape returned by the worker rather than plugin-specific assumptions.
 - **Process Detail Dual-View:** `ProcessDetailDrawer` and `ProcessTreeNodeView` implement a "Verbose Mode" toggle. By default, they display `direct_inputs` (clean port names) and fallback to the full provenance `inputs` graph when toggled.
 - **State management:** Form state hooks relying on `metadata` or `inputs` (like global code inheritance) require stable references, avoiding immediate resets upon edits.
