@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -31,12 +32,28 @@ _CHAT_SESSIONS_KV_KEY = "frontend_chat_sessions_v2"
 _LEGACY_CHAT_SESSIONS_KV_KEY = "frontend_chat_sessions_v1"
 _SUBMISSION_DRAFT_PREFIX = "[SUBMISSION_DRAFT]"
 _DEFAULT_PROJECT_NAME = "Default Project"
-_DEFAULT_SESSION_TITLE = "New conversation"
+_DEFAULT_SESSION_TITLE = "New Conversation"
 _PROJECT_SESSIONS_DIRNAME = "sessions"
 _MAX_CHAT_SESSION_MESSAGES = 200
 _MAX_CHAT_SESSIONS = 120
 _MAX_CHAT_SESSION_TAGS = 12
 _MAX_CHAT_SESSION_TAG_LENGTH = 32
+_TITLE_MAX_LENGTH = 24
+_TITLE_RESEARCH_CHARS_LIMIT = 12
+_TITLE_STATE_IDLE = "idle"
+_TITLE_STATE_PENDING = "pending"
+_TITLE_STATE_READY = "ready"
+_TITLE_STATE_FAILED = "failed"
+_TITLE_STAGE_INITIAL = "initial"
+_TITLE_STAGE_DEEP_SUMMARY = "deep_summary"
+_TITLE_STAGE_CONTEXT_SWITCH = "context_switch"
+_TITLE_GENERATOR_SYSTEM_PROMPT = (
+    "作为科研助手，请根据给定会话信息生成一个极其简短的中文标题。"
+    "优先输出 4-6 个汉字；如果必须保留材料缩写或节点编号，可使用紧凑科研写法，如 Si、GaAs、#101。"
+    "标题必须体现科研对象或任务，不要空泛。"
+    "优先参考 Context Bar 中的 pinned node / context node / 研究对象。"
+    "只输出标题本身，不要输出“标题：”、引号、句号、解释或 Markdown。"
+)
 _KNOWN_PARALLEL_KEYS = {
     "num_machines",
     "num_mpiprocs_per_machine",
@@ -110,6 +127,45 @@ def _trim_text(value: Any, *, limit: int = 120) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
+def _normalize_title_state(value: Any) -> str:
+    cleaned = str(value or "").strip().lower()
+    if cleaned in {_TITLE_STATE_PENDING, _TITLE_STATE_READY, _TITLE_STATE_FAILED}:
+        return cleaned
+    return _TITLE_STATE_IDLE
+
+
+def _looks_like_session_identifier_title(title: Any, session_id: Any) -> bool:
+    cleaned_title = str(title or "").strip()
+    cleaned_session_id = str(session_id or "").strip()
+    if not cleaned_title:
+        return False
+    if cleaned_session_id and cleaned_title == cleaned_session_id:
+        return True
+    return bool(
+        re.fullmatch(r"[0-9a-f]{32}", cleaned_title, flags=re.IGNORECASE)
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            cleaned_title,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _normalize_group_label_segment(value: Any, *, fallback: str) -> str:
+    text = " ".join(str(value or "").split()).replace("/", "_").strip()
+    return text or fallback
+
+
+def _build_project_group_label(project_name: Any) -> str:
+    return _normalize_group_label_segment(project_name, fallback=_DEFAULT_PROJECT_NAME)
+
+
+def _build_session_group_label(project_name: Any, session_id: Any) -> str:
+    project_group_label = _build_project_group_label(project_name)
+    session_segment = _normalize_group_label_segment(session_id, fallback="session")
+    return f"{project_group_label}/{session_segment}"
+
+
 def _resolve_filesystem_path(path_value: Any) -> Path | None:
     cleaned = str(path_value or "").strip()
     if not cleaned:
@@ -171,12 +227,213 @@ def _build_default_chat_project(project_id: str | None = None) -> dict[str, Any]
     }
 
 
-def _derive_chat_session_title(intent: str) -> str:
+def _summarize_focus_node_for_title(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ""
+
+    formula = _trim_text(node.get("formula") or "", limit=24)
+    label = _trim_text(node.get("label") or "", limit=24)
+    subject = formula or label
+    if not subject:
+        return ""
+
+    try:
+        pk = int(node.get("pk") or 0)
+    except (TypeError, ValueError):
+        pk = 0
+    if pk > 0:
+        return f"{subject} #{pk}"
+    return subject
+
+
+def _pick_title_focus_node(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    normalized_snapshot = _normalize_chat_session_snapshot(snapshot)
+    pinned_nodes = normalized_snapshot.get("pinned_nodes") or []
+    if pinned_nodes:
+        return pinned_nodes[0]
+    context_nodes = normalized_snapshot.get("context_nodes") or []
+    if context_nodes:
+        return context_nodes[0]
+    return None
+
+
+def _derive_chat_session_title(intent: str, snapshot: dict[str, Any] | None = None) -> str:
     cleaned = " ".join(str(intent or "").split())
     if not cleaned:
         return _DEFAULT_SESSION_TITLE
+
+    focus_subject = _summarize_focus_node_for_title(_pick_title_focus_node(snapshot))
+    if focus_subject:
+        lowered = cleaned.lower()
+        if any(keyword in cleaned for keyword in ("结构", "structure")):
+            return _trim_text(f"查看 {focus_subject}", limit=_TITLE_MAX_LENGTH) or _DEFAULT_SESSION_TITLE
+        if any(keyword in lowered for keyword in ("band", "bands")) or "能带" in cleaned:
+            return _trim_text(f"{focus_subject} 能带", limit=_TITLE_MAX_LENGTH) or _DEFAULT_SESSION_TITLE
+        return _trim_text(focus_subject, limit=_TITLE_MAX_LENGTH) or _DEFAULT_SESSION_TITLE
+
     first_line = cleaned.splitlines()[0].strip(" -:;,.")
     return _trim_text(first_line or cleaned, limit=48) or _DEFAULT_SESSION_TITLE
+
+
+def _count_session_user_turns(session: dict[str, Any] | None) -> int:
+    if not isinstance(session, dict):
+        return 0
+    messages = _normalize_chat_messages(session.get("messages"))
+    return sum(1 for message in messages if message.get("role") == "user")
+
+
+def _extract_first_session_message_text(session: dict[str, Any] | None, role: str) -> str:
+    if not isinstance(session, dict):
+        return ""
+    for message in _normalize_chat_messages(session.get("messages")):
+        if str(message.get("role") or "") == role:
+            return str(message.get("text") or "").strip()
+    return ""
+
+
+def _extract_latest_session_message_text(session: dict[str, Any] | None, role: str) -> str:
+    if not isinstance(session, dict):
+        return ""
+    for message in reversed(_normalize_chat_messages(session.get("messages"))):
+        if str(message.get("role") or "") == role:
+            return str(message.get("text") or "").strip()
+    return ""
+
+
+def _serialize_title_context_nodes(nodes: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for node in nodes[:4]:
+        if not isinstance(node, dict):
+            continue
+        pk = node.get("pk")
+        formula = str(node.get("formula") or "").strip()
+        label = str(node.get("label") or "").strip()
+        node_type = str(node.get("node_type") or "").strip()
+        summary = formula or label or node_type or "Unknown node"
+        if pk:
+            summary = f"{summary} (#{pk})"
+        if node_type and node_type not in summary:
+            summary = f"{summary}, type={node_type}"
+        lines.append(summary)
+    return lines
+
+
+def _build_title_context_key(snapshot: dict[str, Any] | None) -> str:
+    normalized_snapshot = _normalize_chat_session_snapshot(snapshot)
+    parts: list[str] = []
+    pinned_nodes = normalized_snapshot.get("pinned_nodes") or []
+    context_nodes = normalized_snapshot.get("context_nodes") or []
+    for node in [*pinned_nodes[:2], *context_nodes[:2]]:
+        if not isinstance(node, dict):
+            continue
+        parts.append(
+            "|".join(
+                [
+                    str(node.get("pk") or ""),
+                    str(node.get("formula") or ""),
+                    str(node.get("label") or ""),
+                    str(node.get("node_type") or ""),
+                ]
+            )
+        )
+    selected_group = str(normalized_snapshot.get("selected_group") or "").strip()
+    if selected_group:
+        parts.append(f"group:{selected_group}")
+    session_environment = str(normalized_snapshot.get("session_environment") or "").strip()
+    if session_environment:
+        parts.append(f"env:{session_environment}")
+    return hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest() if parts else ""
+
+
+def _sanitize_generated_title(raw_title: Any, fallback: str) -> str:
+    text = str(raw_title or "").strip()
+    if not text:
+        return fallback
+
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"^标题[:：\s-]*", "", text, flags=re.IGNORECASE).strip()
+    text = text.strip("`'\"“”‘’[](){}")
+    text = " ".join(text.split())
+    if not text:
+        return fallback
+
+    text = text[:_TITLE_MAX_LENGTH].strip()
+    if len(text) > _TITLE_RESEARCH_CHARS_LIMIT and "#" not in text and "(" not in text:
+        text = text[:_TITLE_RESEARCH_CHARS_LIMIT].strip()
+
+    return text or fallback
+
+
+def _build_title_generation_prompt(
+    session: dict[str, Any],
+    *,
+    stage: str,
+    completed_turn_id: int,
+) -> str:
+    snapshot = _normalize_chat_session_snapshot(session.get("snapshot"))
+    first_user_intent = str(session.get("title_first_intent") or "").strip() or _extract_first_session_message_text(session, "user")
+    latest_user_intent = _extract_latest_session_message_text(session, "user")
+    latest_assistant_reply = _trim_text(_extract_latest_session_message_text(session, "assistant"), limit=180)
+    pinned_lines = _serialize_title_context_nodes(snapshot.get("pinned_nodes") or [])
+    context_lines = _serialize_title_context_nodes(snapshot.get("context_nodes") or [])
+    selected_group = str(snapshot.get("selected_group") or "").strip()
+    session_environment = str(snapshot.get("session_environment") or "").strip()
+    current_title = str(session.get("title") or _DEFAULT_SESSION_TITLE)
+    stage_label = {
+        _TITLE_STAGE_INITIAL: "初始命名",
+        _TITLE_STAGE_DEEP_SUMMARY: "深度摘要",
+        _TITLE_STAGE_CONTEXT_SWITCH: "上下文切换",
+    }.get(stage, "会话总结")
+
+    prompt_lines = [
+        _TITLE_GENERATOR_SYSTEM_PROMPT,
+        "",
+        f"触发阶段：{stage_label}",
+        f"当前轮次：{completed_turn_id}",
+        f"当前标题：{current_title}",
+        f"首条用户指令：{first_user_intent or '无'}",
+        f"最新用户指令：{latest_user_intent or first_user_intent or '无'}",
+    ]
+    if latest_assistant_reply:
+        prompt_lines.append(f"最新助理回复摘要：{latest_assistant_reply}")
+    if selected_group:
+        prompt_lines.append(f"当前分组：{selected_group}")
+    if session_environment:
+        prompt_lines.append(f"当前环境：{session_environment}")
+    if pinned_lines:
+        prompt_lines.append("Pinned Context:")
+        prompt_lines.extend(f"- {line}" for line in pinned_lines)
+    if context_lines:
+        prompt_lines.append("Attached Context:")
+        prompt_lines.extend(f"- {line}" for line in context_lines)
+    prompt_lines.extend(
+        [
+            "",
+            "请直接输出最终标题。",
+        ]
+    )
+    return "\n".join(prompt_lines)
+
+
+def _should_schedule_title_generation(session: dict[str, Any], completed_turn_id: int) -> str | None:
+    if not bool(session.get("auto_title", False)):
+        return None
+    if _normalize_title_state(session.get("title_state")) == _TITLE_STATE_PENDING:
+        return None
+
+    user_turn_count = _count_session_user_turns(session)
+    last_generated_turn = int(session.get("title_last_generated_turn") or 0)
+    generation_count = max(0, int(session.get("title_generation_count") or 0))
+    context_key = _build_title_context_key(session.get("snapshot"))
+    last_context_key = str(session.get("title_last_context_key") or "").strip()
+
+    if user_turn_count <= 1 and generation_count == 0 and completed_turn_id > last_generated_turn:
+        return _TITLE_STAGE_INITIAL
+    if context_key and last_context_key and context_key != last_context_key and completed_turn_id > last_generated_turn:
+        return _TITLE_STAGE_CONTEXT_SWITCH
+    if user_turn_count > 5 and generation_count < 2 and completed_turn_id > last_generated_turn:
+        return _TITLE_STAGE_DEEP_SUMMARY
+    return None
 
 
 def _normalize_chat_session_tags(raw_tags: Any) -> list[str]:
@@ -300,17 +557,38 @@ def _normalize_chat_session_record(
 
     created_at = str(raw_session.get("created_at") or _now_iso())
     updated_at = str(raw_session.get("updated_at") or created_at)
-    title = _trim_text(raw_session.get("title") or _DEFAULT_SESSION_TITLE, limit=80) or _DEFAULT_SESSION_TITLE
-    auto_title = bool(raw_session.get("auto_title", title == _DEFAULT_SESSION_TITLE))
+    raw_title = _trim_text(raw_session.get("title") or _DEFAULT_SESSION_TITLE, limit=80) or _DEFAULT_SESSION_TITLE
+    is_legacy_identifier_title = _looks_like_session_identifier_title(raw_title, session_id)
+    title = _DEFAULT_SESSION_TITLE if is_legacy_identifier_title else raw_title
+    auto_title = True if is_legacy_identifier_title else bool(
+        raw_session.get("auto_title", title == _DEFAULT_SESSION_TITLE)
+    )
     project_id = str(raw_session.get("project_id") or "").strip()
     if project_id not in known_project_ids:
         project_id = default_project_id
+
+    try:
+        title_last_generated_turn = max(0, int(raw_session.get("title_last_generated_turn") or 0))
+    except (TypeError, ValueError):
+        title_last_generated_turn = 0
+    try:
+        title_generation_count = max(0, int(raw_session.get("title_generation_count") or 0))
+    except (TypeError, ValueError):
+        title_generation_count = 0
+    if is_legacy_identifier_title:
+        title_last_generated_turn = 0
+        title_generation_count = 0
 
     return {
         "id": session_id,
         "project_id": project_id,
         "title": title,
         "auto_title": auto_title,
+        "title_state": _TITLE_STATE_IDLE if is_legacy_identifier_title else _normalize_title_state(raw_session.get("title_state")),
+        "title_first_intent": str(raw_session.get("title_first_intent") or "").strip() or None,
+        "title_last_generated_turn": title_last_generated_turn,
+        "title_generation_count": title_generation_count,
+        "title_last_context_key": None if is_legacy_identifier_title else (str(raw_session.get("title_last_context_key") or "").strip() or None),
         "is_archived": bool(raw_session.get("is_archived", False)),
         "created_at": created_at,
         "updated_at": updated_at,
@@ -580,6 +858,7 @@ def _build_chat_session_preview(messages: list[dict[str, Any]]) -> str:
 
 def _serialize_chat_project_summary(project: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
     project_id = str(project.get("id") or "")
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
     project_sessions = [
         session
         for session in store.get("sessions", [])
@@ -596,7 +875,8 @@ def _serialize_chat_project_summary(project: dict[str, Any], store: dict[str, An
     sessions_root = _project_sessions_root_path(project)
     return {
         "id": project_id,
-        "name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "name": project_name,
+        "group_label": _build_project_group_label(project_name),
         "root_path": str(project.get("root_path") or ""),
         "sessions_path": str(sessions_root),
         "created_at": str(project.get("created_at") or _now_iso()),
@@ -611,16 +891,21 @@ def _serialize_chat_session_summary(session: dict[str, Any], store: dict[str, An
     messages = _normalize_chat_messages(session.get("messages"))
     project = _get_store_project(store, str(session.get("project_id") or ""))
     workspace_path = _ensure_session_workspace_dir(store, session)
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
+    project_group_label = _build_project_group_label(project_name)
     return {
         "id": session["id"],
         "project_id": str(session.get("project_id") or project.get("id") or ""),
         "title": str(session.get("title") or _DEFAULT_SESSION_TITLE),
         "auto_title": bool(session.get("auto_title", False)),
+        "title_state": _normalize_title_state(session.get("title_state")),
         "is_archived": bool(session.get("is_archived", False)),
         "created_at": str(session.get("created_at") or _now_iso()),
         "updated_at": str(session.get("updated_at") or _now_iso()),
         "tags": _normalize_chat_session_tags(session.get("tags")),
-        "project_label": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "project_label": project_name,
+        "project_group_label": project_group_label,
+        "session_group_label": _build_session_group_label(project_name, session.get("id")),
         "workspace_path": workspace_path,
         "node_count": len(snapshot.get("context_nodes") or []),
         "preview": _build_chat_session_preview(messages),
@@ -839,6 +1124,11 @@ def create_chat_session(
         "project_id": resolved_project_id,
         "title": cleaned_title or _DEFAULT_SESSION_TITLE,
         "auto_title": not bool(cleaned_title),
+        "title_state": _TITLE_STATE_READY if cleaned_title else _TITLE_STATE_IDLE,
+        "title_first_intent": None,
+        "title_last_generated_turn": 0,
+        "title_generation_count": 0,
+        "title_last_context_key": None,
         "is_archived": False,
         "created_at": now,
         "updated_at": now,
@@ -900,6 +1190,11 @@ def update_chat_session(
         cleaned_title = _trim_text(title or "", limit=80)
         session["title"] = cleaned_title or _DEFAULT_SESSION_TITLE
         session["auto_title"] = not bool(cleaned_title)
+        session["title_state"] = _TITLE_STATE_READY if cleaned_title else _TITLE_STATE_IDLE
+        if not cleaned_title:
+            session["title_generation_count"] = 0
+            session["title_last_generated_turn"] = 0
+            session["title_last_context_key"] = None
         changed = True
     if tags is not _UNSET:
         session["tags"] = _normalize_chat_session_tags(tags)
@@ -1176,6 +1471,11 @@ def _extract_submission_inputs(draft: dict[str, Any]) -> dict[str, Any]:
             nested_inputs = unwrap(direct_inputs, depth + 1)
             return nested_inputs if isinstance(nested_inputs, dict) else direct_inputs
 
+        builder_inputs = node.get("builder_inputs")
+        if isinstance(builder_inputs, dict):
+            nested_builder_inputs = unwrap(builder_inputs, depth + 1)
+            return nested_builder_inputs if isinstance(nested_builder_inputs, dict) else builder_inputs
+
         for key in ("builder", "draft", "submission", "payload", "result"):
             nested = node.get(key)
             if not isinstance(nested, dict):
@@ -1237,6 +1537,32 @@ def _find_first_matching_value(payload: Any, predicate: Any) -> Any:
     return None
 
 
+def _is_node_metadata_envelope(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    lowered_keys = {str(key).strip().lower() for key in value.keys() if str(key).strip()}
+    if not lowered_keys:
+        return False
+    if {"pk", "uuid"} & lowered_keys:
+        return True
+    if "type" in lowered_keys and "value" in lowered_keys:
+        return True
+    return bool({"node_type", "full_type"} & lowered_keys)
+
+
+def _coerce_node_envelope_value(value: dict[str, Any]) -> Any:
+    for candidate_key in ("value", "payload", "label", "name", "full_label", "code", "family"):
+        if candidate_key not in value:
+            continue
+        candidate = value.get(candidate_key)
+        if candidate is None:
+            continue
+        if isinstance(candidate, str) and not candidate.strip():
+            continue
+        return candidate
+    return value
+
+
 def _flatten_input_values(payload: Any, *, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
     flattened = out if isinstance(out, dict) else {}
     if isinstance(payload, dict):
@@ -1245,6 +1571,9 @@ def _flatten_input_values(payload: Any, *, prefix: str = "", out: dict[str, Any]
             if not key_text:
                 continue
             path = f"{prefix}.{key_text}" if prefix else key_text
+            if _is_node_metadata_envelope(value):
+                flattened[path] = _coerce_node_envelope_value(value)
+                continue
             if isinstance(value, dict):
                 _flatten_input_values(value, prefix=path, out=flattened)
                 continue
@@ -1337,7 +1666,7 @@ def _normalize_primary_input_field(label: str, value: Any) -> dict[str, Any] | N
         if display is None and pk is not None:
             display = f"PK #{pk}"
         if display is None:
-            display = json.dumps(value, ensure_ascii=True)
+            display = json.dumps(value, ensure_ascii=False)
         field["value"] = display
         if pk is not None:
             field["pk"] = pk
@@ -1414,6 +1743,8 @@ def _is_default_advanced_setting(key: str, value: Any) -> bool:
 def _should_include_advanced_setting(path: str, value: Any) -> bool:
     if _is_empty_submission_value(value):
         return False
+    if _is_node_metadata_envelope(value):
+        return _coerce_node_envelope_value(value) is not value and not _is_empty_submission_value(_coerce_node_envelope_value(value))
     lowered_path = str(path).strip().lower()
     if not lowered_path or lowered_path.startswith("metadata."):
         return False
@@ -1935,7 +2266,7 @@ def _build_submission_draft_text_block(payload: dict[str, Any] | None) -> str | 
         return None
 
     try:
-        serialized = json.dumps(draft, ensure_ascii=True, indent=2)
+        serialized = json.dumps(draft, ensure_ascii=False, indent=2)
     except Exception:  # noqa: BLE001
         return None
     return f"{_SUBMISSION_DRAFT_PREFIX}\n{serialized}"
@@ -2021,6 +2352,162 @@ def _build_model_settings() -> ModelSettings | None:
     if max_tokens <= 0:
         return None
     return ModelSettings(max_tokens=max_tokens)
+
+
+def _generate_session_title_sync(prompt: str, model_name: str) -> str:
+    api_key = str(getattr(settings, "GEMINI_API_KEY", "") or "").strip()
+    if not api_key or api_key == "your-key-here":
+        raise RuntimeError("Gemini API key not configured for title generation.")
+
+    resolved_model_name = str(model_name or "").strip() or str(getattr(settings, "DEFAULT_MODEL", "") or "").strip()
+    if ":" in resolved_model_name:
+        resolved_model_name = resolved_model_name.split(":", 1)[1].strip()
+    if not resolved_model_name:
+        raise RuntimeError("No model available for title generation.")
+
+    from google import genai
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"api_version": settings.GEMINI_API_VERSION},
+    )
+    response = client.models.generate_content(
+        model=resolved_model_name,
+        contents=prompt,
+    )
+    return str(getattr(response, "text", "") or "").strip()
+
+
+def _ensure_chat_title_task_registry(state: Any) -> dict[str, asyncio.Task]:
+    tasks = getattr(state, "chat_title_tasks", None)
+    if tasks is None:
+        tasks = {}
+        state.chat_title_tasks = tasks
+    return tasks
+
+
+def _finalize_auto_title_update(
+    state: Any,
+    session: dict[str, Any],
+    *,
+    title: str,
+    completed_turn_id: int,
+    context_key: str,
+    title_state: str,
+) -> None:
+    session["title"] = title or _DEFAULT_SESSION_TITLE
+    session["title_state"] = _normalize_title_state(title_state)
+    session["title_last_generated_turn"] = max(0, int(completed_turn_id))
+    session["title_generation_count"] = max(0, int(session.get("title_generation_count") or 0)) + 1
+    session["title_last_context_key"] = context_key or None
+    session["updated_at"] = _now_iso()
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+
+
+async def _run_session_title_generation(
+    state: Any,
+    *,
+    session_id: str,
+    selected_model: str,
+    completed_turn_id: int,
+    stage: str,
+    prompt: str,
+    fallback_title: str,
+    context_key: str,
+) -> None:
+    try:
+        generated_title = await asyncio.to_thread(_generate_session_title_sync, prompt, selected_model)
+        resolved_title = _sanitize_generated_title(generated_title, fallback_title)
+        title_state = _TITLE_STATE_READY if resolved_title else _TITLE_STATE_FAILED
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            log_event(
+                "aiida.chat_title_generation.failed",
+                session_id=session_id,
+                turn_id=completed_turn_id,
+                stage=stage,
+                model=selected_model,
+                error=str(error),
+            )
+        )
+        resolved_title = fallback_title
+        title_state = _TITLE_STATE_READY if resolved_title != _DEFAULT_SESSION_TITLE else _TITLE_STATE_FAILED
+
+    lock = _ensure_chat_lock(state)
+    async with lock:
+        session, _store = _find_chat_session(state, session_id)
+        if session is None:
+            return
+        if not bool(session.get("auto_title", False)):
+            return
+        if _normalize_title_state(session.get("title_state")) != _TITLE_STATE_PENDING:
+            return
+        _finalize_auto_title_update(
+            state,
+            session,
+            title=resolved_title or _DEFAULT_SESSION_TITLE,
+            completed_turn_id=completed_turn_id,
+            context_key=context_key,
+            title_state=title_state,
+        )
+        logger.info(
+            log_event(
+                "aiida.chat_title_generation.done",
+                session_id=session_id,
+                turn_id=completed_turn_id,
+                stage=stage,
+                title=session.get("title"),
+            )
+        )
+
+
+def _schedule_session_title_generation(
+    state: Any,
+    *,
+    session_id: str,
+    selected_model: str,
+    completed_turn_id: int,
+    stage: str,
+) -> None:
+    session, _store = _find_chat_session(state, session_id)
+    if session is None or not bool(session.get("auto_title", False)):
+        return
+
+    existing_task = _ensure_chat_title_task_registry(state).get(session_id)
+    if existing_task is not None and not existing_task.done():
+        return
+
+    prompt = _build_title_generation_prompt(session, stage=stage, completed_turn_id=completed_turn_id)
+    fallback_seed = _extract_latest_session_message_text(session, "user") or str(session.get("title_first_intent") or "")
+    fallback_title = _sanitize_generated_title(
+        _derive_chat_session_title(fallback_seed, session.get("snapshot")),
+        _DEFAULT_SESSION_TITLE,
+    )
+    context_key = _build_title_context_key(session.get("snapshot"))
+    session["title_state"] = _TITLE_STATE_PENDING
+    session["updated_at"] = _now_iso()
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+
+    task = asyncio.create_task(
+        _run_session_title_generation(
+            state,
+            session_id=session_id,
+            selected_model=selected_model,
+            completed_turn_id=completed_turn_id,
+            stage=stage,
+            prompt=prompt,
+            fallback_title=fallback_title,
+            context_key=context_key,
+        )
+    )
+    _ensure_chat_title_task_registry(state)[session_id] = task
+    task.add_done_callback(
+        lambda _task, _state=state, _session_id=session_id: _ensure_chat_title_task_registry(_state).pop(_session_id, None)
+    )
 
 
 def _get_model_unavailable_retry_policy() -> tuple[int, float]:
@@ -2220,9 +2707,8 @@ def start_chat_turn(
         raise RuntimeError("Unable to initialize chat session.")
 
     session["snapshot"] = _build_chat_session_snapshot(normalized_metadata, selected_model=selected_model)
-    if session.get("auto_title", True) and not any(message.get("role") == "user" for message in session["messages"]):
-        session["title"] = _derive_chat_session_title(user_intent)
-        session["auto_title"] = True
+    if not str(session.get("title_first_intent") or "").strip():
+        session["title_first_intent"] = user_intent
     session["updated_at"] = _now_iso()
 
     turn_id = int(store.get("turn_seq", 0)) + 1
@@ -2546,6 +3032,18 @@ async def _execute_chat_turn(
                     steps=len(getattr(current_deps, "step_history", []) or []),
                 )
             )
+
+            session_for_title, _ = _find_chat_session(state, session_id)
+            if session_for_title is not None:
+                title_stage = _should_schedule_title_generation(session_for_title, turn_id)
+                if title_stage:
+                    _schedule_session_title_generation(
+                        state,
+                        session_id=session_id,
+                        selected_model=selected_model,
+                        completed_turn_id=turn_id,
+                        stage=title_stage,
+                    )
 
             if hasattr(state, "memory") and state.memory:
                 try:

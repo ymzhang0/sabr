@@ -28,6 +28,7 @@ import {
   submitPreviewDraft,
   uploadArchive,
   updateChatSession,
+  updateChatSessionTitle,
 } from "@/lib/api";
 import { ChatPanel } from "@/components/dashboard/chat-panel";
 import { HistorySidebar } from "@/components/dashboard/history-sidebar";
@@ -35,7 +36,7 @@ import { ProcessDetailDrawer } from "@/components/dashboard/process-detail-drawe
 import { RuntimeTerminal } from "@/components/dashboard/runtime-terminal";
 import { Sidebar } from "@/components/dashboard/sidebar";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { cn, decodeEscapedUnicode, decodeEscapedUnicodeDeep } from "@/lib/utils";
 import {
   SubmissionModal,
   type SubmissionDraftPayload,
@@ -45,6 +46,7 @@ import {
 import type {
   ChatMessage,
   ChatSessionSnapshot,
+  ChatSessionsResponse,
   ChatSessionSummary,
   ChatSessionWorkspaceResponse,
   ChatSnapshot,
@@ -55,11 +57,13 @@ import type {
   SendChatRequest,
   SessionParameter,
 } from "@/types/aiida";
-import { Database, History, PlusSquare } from "lucide-react";
+import { Database, History } from "lucide-react";
 
 const THEME_STORAGE_KEY = "sabr.dashboard.theme";
 const CURRENT_SESSION_STORAGE_KEY = "current_session_id";
 const CHAT_POLL_INTERVAL_MS = 350;
+const GROUP_SELECTION_ALL = "__all_groups__";
+const GROUP_SELECTION_CURRENT_CONTEXT = "__current_context__";
 
 function initialTheme(): "light" | "dark" {
   const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
@@ -117,6 +121,44 @@ function normalizeSessionId(sessionId: string | null | undefined): string | null
   return cleaned || null;
 }
 
+function normalizeGroupSelection(value: string | null | undefined): string {
+  const cleaned = String(value || "").trim();
+  return cleaned || "";
+}
+
+function resolveCurrentContextGroupLabel(session: ChatSessionSummary | null): string | null {
+  if (!session) {
+    return null;
+  }
+  const label =
+    typeof session.session_group_label === "string" && session.session_group_label.trim()
+      ? session.session_group_label.trim()
+      : "";
+  return label || null;
+}
+
+function resolveSelectedGroupLabel(selection: string, currentContextGroupLabel: string | null): string | null {
+  const normalizedSelection = normalizeGroupSelection(selection);
+  if (!normalizedSelection || normalizedSelection === GROUP_SELECTION_ALL) {
+    return null;
+  }
+  if (normalizedSelection === GROUP_SELECTION_CURRENT_CONTEXT) {
+    return currentContextGroupLabel;
+  }
+  return normalizedSelection;
+}
+
+function resolveSelectedGroupDisplayLabel(selection: string, currentContextGroupLabel: string | null): string | null {
+  const normalizedSelection = normalizeGroupSelection(selection);
+  if (!normalizedSelection || normalizedSelection === GROUP_SELECTION_ALL) {
+    return null;
+  }
+  if (normalizedSelection === GROUP_SELECTION_CURRENT_CONTEXT) {
+    return currentContextGroupLabel ? "Current Context" : null;
+  }
+  return normalizedSelection;
+}
+
 function dedupeFocusNodes(nodes: FocusNode[]): FocusNode[] {
   const seen = new Set<number>();
   return nodes.filter((node) => {
@@ -139,8 +181,8 @@ function normalizeSessionParameters(raw: unknown): SessionParameter[] {
       if (!record) {
         return null;
       }
-      const key = typeof record.key === "string" ? record.key.trim() : "";
-      const value = typeof record.value === "string" ? record.value.trim() : "";
+      const key = typeof record.key === "string" ? decodeEscapedUnicode(record.key).trim() : "";
+      const value = typeof record.value === "string" ? decodeEscapedUnicode(record.value).trim() : "";
       if (!key || !value) {
         return null;
       }
@@ -155,9 +197,10 @@ function normalizeSessionParameters(raw: unknown): SessionParameter[] {
 }
 
 function normalizeChatSessionSnapshot(snapshot: ChatSessionSnapshot | null | undefined): ChatSessionSnapshot {
-  const contextNodes = Array.isArray(snapshot?.context_nodes)
+  const decodedSnapshot = decodeEscapedUnicodeDeep(snapshot);
+  const contextNodes = Array.isArray(decodedSnapshot?.context_nodes)
     ? dedupeFocusNodes(
-        snapshot.context_nodes.map((node) => ({
+        decodedSnapshot.context_nodes.map((node) => ({
           pk: Number(node.pk),
           label: String(node.label || `#${node.pk}`),
           formula: node.formula ?? null,
@@ -165,9 +208,9 @@ function normalizeChatSessionSnapshot(snapshot: ChatSessionSnapshot | null | und
         })),
       )
     : [];
-  const pinnedNodes = Array.isArray(snapshot?.pinned_nodes)
+  const pinnedNodes = Array.isArray(decodedSnapshot?.pinned_nodes)
     ? dedupeFocusNodes(
-        snapshot.pinned_nodes.map((node) => ({
+        decodedSnapshot.pinned_nodes.map((node) => ({
           pk: Number(node.pk),
           label: String(node.label || `#${node.pk}`),
           formula: node.formula ?? null,
@@ -176,20 +219,20 @@ function normalizeChatSessionSnapshot(snapshot: ChatSessionSnapshot | null | und
       )
     : [];
   const selectedGroup =
-    typeof snapshot?.selected_group === "string" && snapshot.selected_group.trim()
-      ? snapshot.selected_group.trim()
+    typeof decodedSnapshot?.selected_group === "string" && decodedSnapshot.selected_group.trim()
+      ? decodedSnapshot.selected_group.trim()
       : null;
   const selectedModel =
-    typeof snapshot?.selected_model === "string" && snapshot.selected_model.trim()
-      ? snapshot.selected_model.trim()
+    typeof decodedSnapshot?.selected_model === "string" && decodedSnapshot.selected_model.trim()
+      ? decodedSnapshot.selected_model.trim()
       : null;
   const sessionEnvironment =
-    typeof snapshot?.session_environment === "string" && snapshot.session_environment.trim()
-      ? snapshot.session_environment.trim().toLowerCase()
+    typeof decodedSnapshot?.session_environment === "string" && decodedSnapshot.session_environment.trim()
+      ? decodedSnapshot.session_environment.trim().toLowerCase()
       : null;
   const promptOverride =
-    typeof snapshot?.prompt_override === "string" && snapshot.prompt_override.trim()
-      ? snapshot.prompt_override.trim()
+    typeof decodedSnapshot?.prompt_override === "string" && decodedSnapshot.prompt_override.trim()
+      ? decodedSnapshot.prompt_override.trim()
       : null;
   return {
     context_nodes: contextNodes,
@@ -197,10 +240,20 @@ function normalizeChatSessionSnapshot(snapshot: ChatSessionSnapshot | null | und
     selected_group: selectedGroup,
     selected_model: selectedModel,
     session_environment: sessionEnvironment,
-    session_environment_auto: snapshot?.session_environment_auto !== false,
+    session_environment_auto: decodedSnapshot?.session_environment_auto !== false,
     prompt_override: promptOverride,
-    session_parameters: normalizeSessionParameters(snapshot?.session_parameters),
+    session_parameters: normalizeSessionParameters(decodedSnapshot?.session_parameters),
   };
+}
+
+function normalizeChatMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    role: String(message.role ?? "assistant"),
+    text: decodeEscapedUnicode(String(message.text ?? "")),
+    status: String(message.status ?? "done"),
+    payload: decodeEscapedUnicodeDeep(message.payload ?? null),
+  }));
 }
 
 function buildChatSessionSnapshotPayload(params: {
@@ -545,13 +598,29 @@ export default function App() {
     refetchOnWindowFocus: false,
   });
 
+  const chatSessionsQuery = useQuery({
+    queryKey: ["chat-sessions"],
+    queryFn: getChatSessions,
+    enabled: bootstrapQuery.isSuccess,
+    refetchOnWindowFocus: false,
+    refetchInterval: isChatLoading ? 1_500 : 5_000,
+  });
+
+  const chatSessions = chatSessionsQuery.data?.items ?? [];
+  const chatProjects = chatSessionsQuery.data?.projects ?? [];
+  const activeProjectId = chatSessionsQuery.data?.active_project_id ?? null;
+  const resolvedActiveChatSessionId = activeChatSessionId ?? chatSessionsQuery.data?.active_session_id ?? null;
+  const activeChatSession = chatSessions.find((session) => session.id === resolvedActiveChatSessionId) ?? null;
+  const currentContextGroupLabel = resolveCurrentContextGroupLabel(activeChatSession);
+  const selectedGroupLabel = resolveSelectedGroupLabel(selectedGroup, currentContextGroupLabel);
+
   const processesQuery = useQuery({
-    queryKey: ["processes", selectedGroup, processLimit, nodeTypeFilter],
+    queryKey: ["processes", selectedGroup, selectedGroupLabel, processLimit, nodeTypeFilter],
     queryFn: () => {
       let nodeType: string | undefined;
       if (nodeTypeFilter === "tasks" || nodeTypeFilter === "failed") nodeType = "ProcessNode";
       if (nodeTypeFilter === "structures") nodeType = "StructureData";
-      return getProcesses(processLimit, selectedGroup || undefined, nodeType);
+      return getProcesses(processLimit, selectedGroupLabel ?? undefined, nodeType);
     },
     enabled: bootstrapQuery.isSuccess,
     refetchInterval: 3_000,
@@ -578,21 +647,31 @@ export default function App() {
     refetchInterval: isChatLoading ? CHAT_POLL_INTERVAL_MS : 900,
   });
 
-  const chatSessionsQuery = useQuery({
-    queryKey: ["chat-sessions"],
-    queryFn: getChatSessions,
-    enabled: bootstrapQuery.isSuccess,
-    refetchOnWindowFocus: false,
-    refetchInterval: isChatLoading ? 1_500 : 5_000,
-  });
-
   const defaultSelectedModel = bootstrapQuery.data?.selected_model ?? bootstrapQuery.data?.models?.[0] ?? "";
+  const applyChatSessionsSnapshot = useCallback((snapshot: ChatSessionsResponse | null | undefined) => {
+    if (!snapshot || !Array.isArray(snapshot.items) || !Array.isArray(snapshot.projects)) {
+      return;
+    }
+
+    queryClient.setQueryData<ChatSessionsResponse>(["chat-sessions"], (current) => {
+      const incomingVersion = Number.isFinite(snapshot.version) ? Number(snapshot.version) : -1;
+      const currentVersion = current?.version ?? -1;
+      if (current && incomingVersion >= 0 && incomingVersion < currentVersion) {
+        return current;
+      }
+      return snapshot;
+    });
+
+    const incomingActiveSessionId = normalizeSessionId(snapshot.active_session_id);
+    setActiveChatSessionId((current) => incomingActiveSessionId ?? current);
+  }, [queryClient]);
 
   const applyChatSnapshot = useCallback((snapshot: ChatSnapshot | null | undefined) => {
     if (!snapshot || !Array.isArray(snapshot.messages)) {
       return;
     }
 
+    const normalizedMessages = normalizeChatMessages(snapshot.messages);
     const incomingSessionId = normalizeSessionId(snapshot.session_id);
     const isSessionChanged = incomingSessionId !== activeChatSessionRef.current;
     const incomingVersion = Number.isFinite(snapshot.version) ? snapshot.version : -1;
@@ -602,7 +681,7 @@ export default function App() {
     if (isSessionChanged) {
       activeChatSessionRef.current = incomingSessionId;
       chatVersionRef.current = incomingVersion;
-      setMessages(snapshot.messages);
+      setMessages(normalizedMessages);
       setContextNodes(normalizedSnapshot.context_nodes);
       setPinnedNodes(normalizedSnapshot.pinned_nodes);
       setSelectedGroup(normalizedSnapshot.selected_group ?? "");
@@ -620,7 +699,7 @@ export default function App() {
       if (incomingVersion < currentVersion) {
         return previous;
       }
-      const mergedMessages = mergeChatMessages(previous, snapshot.messages);
+      const mergedMessages = mergeChatMessages(previous, normalizedMessages);
       if (incomingVersion === currentVersion) {
         const nextScore = scoreChatMessages(mergedMessages);
         const prevScore = scoreChatMessages(previous);
@@ -699,6 +778,14 @@ export default function App() {
     source.addEventListener("chat", (event) => {
       applySnapshot((event as MessageEvent<string>).data);
     });
+    source.addEventListener("sessions", (event) => {
+      try {
+        const parsed = JSON.parse((event as MessageEvent<string>).data) as ChatSessionsResponse;
+        applyChatSessionsSnapshot(parsed);
+      } catch (error) {
+        console.error("Failed to parse chat sessions stream payload", error);
+      }
+    });
     source.onmessage = (event) => {
       applySnapshot(event.data);
     };
@@ -706,7 +793,7 @@ export default function App() {
     return () => {
       source.close();
     };
-  }, [applyChatSnapshot, bootstrapQuery.isSuccess]);
+  }, [applyChatSessionsSnapshot, applyChatSnapshot, bootstrapQuery.isSuccess]);
 
   // \u2500\u2500 SSE: Real-time process state changes \u2500\u2500
   useEffect(() => {
@@ -894,13 +981,6 @@ export default function App() {
     () => hasActiveAiidaAgentStep(chatMessages, activeTurnId, isChatBusy),
     [activeTurnId, chatMessages, isChatBusy],
   );
-  const chatSessions = chatSessionsQuery.data?.items ?? [];
-  const chatProjects = chatSessionsQuery.data?.projects ?? [];
-  const activeProjectId = chatSessionsQuery.data?.active_project_id ?? null;
-  const activeChatSession = useMemo(
-    () => chatSessions.find((session) => session.id === activeChatSessionId) ?? null,
-    [activeChatSessionId, chatSessions],
-  );
 
   useEffect(() => {
     setActiveWorkspace((current) => (current?.session_id === activeChatSessionId ? current : null));
@@ -1063,6 +1143,18 @@ export default function App() {
     [applyChatSnapshot, queryClient],
   );
 
+  const handleRenameChatSession = useCallback(
+    async (sessionId: string, title: string) => {
+      if (!sessionId) {
+        return;
+      }
+      const response = await updateChatSessionTitle(sessionId, { title });
+      applyChatSnapshot(response.chat);
+      await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+    },
+    [applyChatSnapshot, queryClient],
+  );
+
   const handleCreateProject = useCallback(
     async ({ name, rootPath }: { name: string; rootPath: string }) => {
       const response = await createProjectMutation.mutateAsync({ name, rootPath });
@@ -1099,13 +1191,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedGroup) {
+    if (!currentContextGroupLabel) {
+      if (selectedGroup === GROUP_SELECTION_CURRENT_CONTEXT) {
+        setSelectedGroup(GROUP_SELECTION_ALL);
+      }
       return;
     }
-    if (!groups.some((group) => group.label === selectedGroup)) {
-      setSelectedGroup("");
+
+    if (!selectedGroup) {
+      setSelectedGroup(GROUP_SELECTION_CURRENT_CONTEXT);
+      return;
     }
-  }, [groups, selectedGroup]);
+
+    if (selectedGroup === GROUP_SELECTION_ALL || selectedGroup === GROUP_SELECTION_CURRENT_CONTEXT) {
+      return;
+    }
+
+    if (!groups.some((group) => group.label === selectedGroup)) {
+      setSelectedGroup(GROUP_SELECTION_CURRENT_CONTEXT);
+    }
+  }, [currentContextGroupLabel, groups, selectedGroup]);
 
   useEffect(() => {
     if (pendingProcessLimit === null) {
@@ -1197,7 +1302,7 @@ export default function App() {
           context_node_ids: mergedContextPks,
           context_pks: mergedContextPks,
           metadata: {
-            selected_group: selectedGroup || null,
+            selected_group: selectedGroupLabel,
             session_environment: sessionEnvironment,
             session_environment_auto: sessionEnvironmentAuto,
             prompt_override: promptOverride.trim() || null,
@@ -1249,7 +1354,7 @@ export default function App() {
       pinnedNodes,
       promptOverride,
       queryClient,
-      selectedGroup,
+      selectedGroupLabel,
       selectedModel,
       sessionEnvironment,
       sessionEnvironmentAuto,
@@ -1260,6 +1365,18 @@ export default function App() {
   const handleStopResponse = useCallback(() => {
     void stopActiveChatTurn();
   }, [stopActiveChatTurn]);
+
+  const handleSelectAllGroups = useCallback(() => {
+    setSelectedGroup(GROUP_SELECTION_ALL);
+  }, []);
+
+  const handleSelectCurrentContext = useCallback(() => {
+    setSelectedGroup(GROUP_SELECTION_CURRENT_CONTEXT);
+  }, []);
+
+  const handleSelectArchiveGroup = useCallback((groupLabel: string) => {
+    setSelectedGroup(groupLabel);
+  }, []);
 
   const handleCreateGroup = useCallback(async (label: string) => {
     await createGroupMutation.mutateAsync(label);
@@ -1273,9 +1390,9 @@ export default function App() {
     const deletedGroup = groups.find((group) => group.pk === pk) ?? null;
     await deleteGroupMutation.mutateAsync(pk);
     if (deletedGroup && selectedGroup === deletedGroup.label) {
-      setSelectedGroup("");
+      setSelectedGroup(currentContextGroupLabel ? GROUP_SELECTION_CURRENT_CONTEXT : GROUP_SELECTION_ALL);
     }
-  }, [deleteGroupMutation, groups, selectedGroup]);
+  }, [currentContextGroupLabel, deleteGroupMutation, groups, selectedGroup]);
 
   const handleAssignNodesToGroup = useCallback(async (groupPk: number, nodePks: number[]) => {
     await addNodesToGroupMutation.mutateAsync({ groupPk, nodePks });
@@ -1351,6 +1468,7 @@ export default function App() {
           errorText: null,
         });
         void queryClient.invalidateQueries({ queryKey: ["processes"] });
+        void queryClient.invalidateQueries({ queryKey: ["groups"] });
       } catch (error) {
         const errorText = error instanceof Error ? error.message : "Failed to submit cloned workflow.";
         setCloneModalState({ status: "error", processPk: null, processPks: [], errorText });
@@ -1404,29 +1522,23 @@ export default function App() {
             <div className="h-9 w-9" />
           </div>
 
-          <div className="flex min-w-0 flex-1 flex-col bg-transparent">
-            <div className="border-b border-zinc-200/70 px-3 py-3 dark:border-zinc-800/70">
-              <Button
-                className="h-10 w-full justify-start gap-2 rounded-xl"
-                onClick={() => {
-                  void handleCreateChatSession();
-                }}
-              >
-                <PlusSquare className="h-4 w-4" />
-                New Conversation
-              </Button>
-            </div>
+          <div className="flex min-w-0 flex-1 flex-col bg-transparent px-2.5 py-0">
             {sidebarView === "explorer" ? (
               <Sidebar
                 processes={processes}
                 groups={groups}
-                selectedGroup={selectedGroup}
+                selectedGroupLabel={selectedGroupLabel}
+                isAllGroupsSelected={selectedGroup === GROUP_SELECTION_ALL || (!selectedGroup && !currentContextGroupLabel)}
+                isCurrentContextSelected={selectedGroup === GROUP_SELECTION_CURRENT_CONTEXT}
+                currentContextGroupLabel={currentContextGroupLabel}
                 processLimit={processLimit}
                 contextNodeIds={contextNodeIds}
                 isUpdatingProcessLimit={pendingProcessLimit !== null}
                 isDarkMode={theme === "dark"}
                 onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
-                onGroupChange={setSelectedGroup}
+                onSelectAllGroups={handleSelectAllGroups}
+                onSelectCurrentContext={handleSelectCurrentContext}
+                onGroupChange={handleSelectArchiveGroup}
                 nodeTypeFilter={nodeTypeFilter}
                 onNodeTypeFilterChange={setNodeTypeFilter}
                 onProcessLimitChange={(nextLimit) => {
@@ -1465,6 +1577,9 @@ export default function App() {
                 onUpdateSessionTags={(sessionId, tags) => {
                   void handleUpdateChatSessionTags(sessionId, tags);
                 }}
+                onRenameSession={(sessionId, title) => {
+                  void handleRenameChatSession(sessionId, title);
+                }}
                 onCreateProject={({ name, rootPath }) => {
                   void handleCreateProject({ name, rootPath });
                 }}
@@ -1485,13 +1600,16 @@ export default function App() {
               composerResetVersion={composerResetVersion}
               isLoading={isChatBusy}
               activeTurnId={activeTurnId}
+              onNewConversation={() => {
+                void handleCreateChatSession();
+              }}
               contextNodes={contextNodes}
               pinnedNodes={pinnedNodes}
               sessionEnvironment={sessionEnvironment}
               sessionEnvironmentAuto={sessionEnvironmentAuto}
               promptOverride={promptOverride}
               sessionParameters={sessionParameters}
-              selectedGroup={selectedGroup}
+              selectedGroup={resolveSelectedGroupDisplayLabel(selectedGroup, currentContextGroupLabel) ?? selectedGroupLabel ?? undefined}
               onSendMessage={handleSendMessage}
               onStopResponse={handleStopResponse}
               onModelChange={setSelectedModel}

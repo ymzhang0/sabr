@@ -8,6 +8,7 @@ import {
   getBridgeStatus,
   switchBridgeProfile,
 } from "@/lib/api";
+import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { cn } from "@/lib/utils";
 import type { BridgeCodeResource, BridgeComputerResource, ResourceAttachment } from "@/types/aiida";
 import { NewProfileDrawer } from "./new-profile-drawer";
@@ -15,7 +16,6 @@ import { NewProfileDrawer } from "./new-profile-drawer";
 const STATUS_POLL_INTERVAL_MS = 10_000;
 const DETAILS_POLL_INTERVAL_MS = 30_000;
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001";
-const DEFAULT_ENVIRONMENT = "Remote Bridge";
 
 type HoveredDetail = "computers" | "codes" | "plugins" | null;
 const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
@@ -154,7 +154,6 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
 
   const status = statusQuery.data?.status ?? "offline";
   const bridgeUrl = statusQuery.data?.url ?? DEFAULT_BRIDGE_URL;
-  const environment = statusQuery.data?.environment ?? DEFAULT_ENVIRONMENT;
   const profileName = statusQuery.data?.profile ?? profilesQuery.data?.current_profile ?? "unknown";
   const pluginNames = statusQuery.data?.plugins ?? [];
   const resourceCounts = statusQuery.data?.resources ?? { computers: 0, codes: 0, workchains: 0 };
@@ -165,6 +164,21 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
   const computerCount = computers.length || resourceCounts.computers;
   const codeCount = codes.length || resourceCounts.codes;
   const portLabel = useMemo(() => resolvePortLabel(bridgeUrl), [bridgeUrl]);
+  const activeProfileName = profileName === "unknown" ? "" : profileName;
+  const profilePills = useMemo(() => {
+    if (profileOptions.length === 0) {
+      return activeProfileName ? [{ name: activeProfileName }] : [];
+    }
+    if (activeProfileName && !profileOptions.some((profile) => profile.name === activeProfileName)) {
+      return [{ name: activeProfileName }, ...profileOptions];
+    }
+    return profileOptions;
+  }, [activeProfileName, profileOptions]);
+  const profileSelectOptions = useMemo(
+    () => profilePills.map((profile) => ({ value: profile.name, label: profile.name })),
+    [profilePills],
+  );
+  const isProfileSwitchDisabled = !isOnline || switchProfileMutation.isPending || profilePills.length === 0;
 
   const hoveredItems = useMemo(() => {
     if (hoveredDetail === "computers") {
@@ -262,31 +276,28 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
       </div>
 
       <div className="space-y-2 text-xs text-zinc-700 dark:text-zinc-200">
-        <div className="flex items-center gap-2 rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-1.5 dark:border-zinc-700/80 dark:bg-zinc-800/65">
-          <p className="shrink-0 text-zinc-500 dark:text-zinc-400">Profile</p>
-          <select
-            className="h-7 w-full rounded-lg border border-zinc-200/70 bg-zinc-50/80 px-2 text-[12px] text-zinc-800 outline-none transition-colors duration-200 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900/65 dark:text-zinc-100 dark:focus:border-zinc-500"
-            value={profileName === "unknown" ? "" : profileName}
-            disabled={!isOnline || switchProfileMutation.isPending || profileOptions.length === 0}
-            onChange={(event) => {
-              const next = event.target.value.trim();
-              if (!next || next === profileName || switchProfileMutation.isPending) {
+        <div className="flex items-center gap-2 rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-2 dark:border-zinc-700/80 dark:bg-zinc-800/65">
+          <CommandPaletteSelect
+            value={activeProfileName}
+            options={profileSelectOptions}
+            fallbackLabel={activeProfileName || "No profiles"}
+            placeholder="No profiles"
+            emptyLabel="No profiles"
+            disabled={isProfileSwitchDisabled}
+            label="Profile"
+            ariaLabel="Select AiiDA profile"
+            searchable={profileSelectOptions.length > 6}
+            className="min-w-0 flex-1"
+            triggerClassName="w-full justify-between rounded-lg px-1.5 py-1 text-[12px]"
+            onChange={(next) => {
+              const cleanedNext = next.trim();
+              if (!cleanedNext || cleanedNext === activeProfileName || switchProfileMutation.isPending) {
                 return;
               }
               onSwitchProfileStart?.();
-              switchProfileMutation.mutate(next);
+              switchProfileMutation.mutate(cleanedNext);
             }}
-            aria-label="Select AiiDA profile"
-          >
-            {profileOptions.length === 0 ? (
-              <option value="">No profiles</option>
-            ) : null}
-            {profileOptions.map((profile) => (
-              <option key={profile.name} value={profile.name}>
-                {profile.name}
-              </option>
-            ))}
-          </select>
+          />
           <button
             onClick={() => setIsNewProfileDrawerOpen(true)}
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
@@ -307,9 +318,6 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
         </div>
 
       </div>
-
-      <p className="mt-3 truncate text-[10px] text-zinc-500 dark:text-zinc-400">{environment}</p>
-
       {!isOnline ? (
         <p className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-rose-600 dark:text-rose-300">
           <AlertTriangle className="h-3.5 w-3.5" />

@@ -351,29 +351,30 @@ def _links_list_to_dict(links: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 
 def attach_tree_links(
     tree_root: Any,
-    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]],
+    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None, list[dict[str, Any]] | None]],
 ) -> None:
     def walk(node: Any) -> None:
         if not isinstance(node, dict):
             return
         pk = _coerce_int(node.get("pk"))
         if pk is not None:
-            # Only enrich if we actually have linked data, to avoid discarding existing dictionaries from the worker if they are richer
             input_links, output_links, direct_inputs, direct_outputs = links_by_pk.get(pk, (None, None, None, None))
-            if input_links:
+            # The provenance tree should show only direct port mappings for each process node.
+            if direct_inputs is not None:
+                node["inputs"] = _links_list_to_dict(direct_inputs)
+                node["direct_inputs"] = _links_list_to_dict(direct_inputs)
+            elif input_links:
                 node["inputs"] = _links_list_to_dict(input_links)
             elif "inputs" not in node:
                 node["inputs"] = {}
-                
-            if output_links:
+
+            if direct_outputs is not None:
+                node["outputs"] = _links_list_to_dict(direct_outputs)
+                node["direct_outputs"] = _links_list_to_dict(direct_outputs)
+            elif output_links:
                 node["outputs"] = _links_list_to_dict(output_links)
             elif "outputs" not in node:
                 node["outputs"] = {}
-                
-            if direct_inputs:
-                node["direct_inputs"] = _links_list_to_dict(direct_inputs)
-            if direct_outputs:
-                node["direct_outputs"] = _links_list_to_dict(direct_outputs)
         children = node.get("children")
         if isinstance(children, dict):
             for child in children.values():
@@ -481,7 +482,18 @@ def _extract_xy_preview(payload: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _extract_embedded_preview(payload: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("preview_info", "preview"):
+        preview = payload.get(key)
+        if isinstance(preview, dict) and preview:
+            return preview
+    return None
+
+
 def _extract_preview_for_node_type(node_type: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    embedded_preview = _extract_embedded_preview(payload)
+    if embedded_preview:
+        return embedded_preview
     if node_type == "RemoteData":
         return _extract_remote_preview(payload)
     if node_type == "FolderData":
@@ -539,7 +551,8 @@ async def _enrich_link_preview(
     repo_listing_cache: dict[int, list[str]],
 ) -> None:
     node_type = _coerce_text(link.get("node_type")) or "Node"
-    if node_type not in {"RemoteData", "FolderData", "XyData"}:
+    normalized_type = node_type.strip().lower()
+    if "data" not in normalized_type and node_type not in {"Dict", "List", "Int", "Float", "Str", "Bool"}:
         return
     pk = _coerce_int(link.get("pk"))
     if pk is None:
@@ -608,7 +621,7 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
     node_payload_cache: dict[int, dict[str, Any] | None] = {}
     data_payload_cache: dict[int, dict[str, Any] | None] = {}
     repo_listing_cache: dict[int, list[str]] = {}
-    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]] = {}
+    links_by_pk: dict[int, tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None, list[dict[str, Any]] | None]] = {}
 
     if node_ids:
         summaries = await asyncio.gather(*[_fetch_node_payload(pk, node_payload_cache) for pk in node_ids])
@@ -616,17 +629,21 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
             if isinstance(node_payload, dict):
                 input_links = _extract_directional_links(node_payload, "inputs")
                 output_links = _extract_directional_links(node_payload, "outputs")
-                direct_inputs = node_payload.get("direct_inputs", [])
-                direct_outputs = node_payload.get("direct_outputs", [])
+                direct_inputs = node_payload.get("direct_inputs") if "direct_inputs" in node_payload else None
+                direct_outputs = node_payload.get("direct_outputs") if "direct_outputs" in node_payload else None
                 if isinstance(direct_inputs, dict):
                     direct_inputs = _dedupe_links(_normalize_links_payload(direct_inputs, "inputs"))
+                elif direct_inputs is not None:
+                    direct_inputs = _dedupe_links(list(direct_inputs))
                 if isinstance(direct_outputs, dict):
                     direct_outputs = _dedupe_links(_normalize_links_payload(direct_outputs, "outputs"))
+                elif direct_outputs is not None:
+                    direct_outputs = _dedupe_links(list(direct_outputs))
             else:
                 input_links = []
                 output_links = []
-                direct_inputs = []
-                direct_outputs = []
+                direct_inputs = None
+                direct_outputs = None
             links_by_pk[pk] = (input_links, output_links, direct_inputs, direct_outputs)
 
     detail_inputs = _extract_directional_links(detail, "inputs")

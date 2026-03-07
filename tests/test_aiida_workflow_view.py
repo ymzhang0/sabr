@@ -110,6 +110,91 @@ def test_enrich_submission_draft_builds_fallback_port_spec_and_codes(monkeypatch
     assert any(entry["value"] == "pw-7.5@localhost" for entry in meta["available_codes"])
 
 
+def test_enrich_submission_draft_treats_node_envelopes_as_single_editable_inputs() -> None:
+    payload = {
+        "process_label": "ExampleWorkChain",
+        "inputs": {
+            "Nbands_Factor": {
+                "pk": None,
+                "uuid": "draft-node-1",
+                "type": "Float",
+                "value": 1.5,
+            },
+            "kpoints_distance": {
+                "pk": None,
+                "uuid": "draft-node-2",
+                "type": "Float",
+                "value": 0.2,
+            },
+        },
+        "meta": {},
+    }
+
+    normalized = workflow_view.enrich_submission_draft_payload(payload)
+    all_inputs = normalized["all_inputs"]
+
+    assert "Nbands_Factor" in all_inputs
+    assert all_inputs["Nbands_Factor"]["value"] == 1.5
+    assert "Nbands_Factor.pk" not in all_inputs
+    assert "Nbands_Factor.uuid" not in all_inputs
+    assert "Nbands_Factor.type" not in all_inputs
+
+    assert "kpoints_distance" in all_inputs
+    assert all_inputs["kpoints_distance"]["value"] == 0.2
+    assert "kpoints_distance.pk" not in all_inputs
+
+    groups = normalized["input_groups"]
+    computational = next(entry for entry in groups if entry.get("id") == "computational_details")
+    computational_paths = {
+        property_entry["path"]
+        for port in computational["ports"]
+        for property_entry in port["properties"]
+    }
+    assert "Nbands_Factor" in computational_paths
+
+    brillouin_zone = next(entry for entry in groups if entry.get("id") == "brillouin_zone")
+    brillouin_paths = {
+        property_entry["path"]
+        for port in brillouin_zone["ports"]
+        for property_entry in port["properties"]
+    }
+    assert "kpoints_distance" in brillouin_paths
+
+
+def test_enrich_submission_draft_prefers_builder_inputs_over_raw_node_envelopes() -> None:
+    payload = {
+        "process_label": "ExampleWorkChain",
+        "inputs": {
+            "Nbands_Factor": {
+                "pk": None,
+                "uuid": "draft-node-1",
+                "type": "Float",
+            },
+            "settings": {
+                "pk": None,
+                "uuid": "draft-node-2",
+                "type": "Dict",
+            },
+        },
+        "meta": {
+            "validation": {
+                "builder_inputs": {
+                    "Nbands_Factor": 1.5,
+                    "settings": {"SYSTEM": {"ecutwfc": 60}},
+                }
+            }
+        },
+    }
+
+    normalized = workflow_view.enrich_submission_draft_payload(payload)
+    all_inputs = normalized["all_inputs"]
+
+    assert normalized["inputs"]["Nbands_Factor"] == 1.5
+    assert normalized["inputs"]["settings"] == {"SYSTEM": {"ecutwfc": 60}}
+    assert all_inputs["Nbands_Factor"]["value"] == 1.5
+    assert all_inputs["settings.SYSTEM.ecutwfc"]["value"] == 60
+
+
 def test_query_available_codes_uses_bridge_resources_fallback(monkeypatch) -> None:
     from src.sab_engines.aiida import client as aiida_client
 

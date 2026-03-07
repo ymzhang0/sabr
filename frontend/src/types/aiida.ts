@@ -72,11 +72,14 @@ export type ChatSessionSummary = {
   project_id: string;
   title: string;
   auto_title: boolean;
+  title_state: "idle" | "pending" | "ready" | "failed" | string;
   is_archived: boolean;
   created_at: string;
   updated_at: string;
   tags: string[];
   project_label: string | null;
+  project_group_label?: string | null;
+  session_group_label?: string | null;
   workspace_path: string;
   node_count: number;
   preview: string;
@@ -109,6 +112,7 @@ export type ChatSessionMutationResponse = {
 export type ChatProject = {
   id: string;
   name: string;
+  group_label?: string | null;
   root_path: string;
   sessions_path: string;
   created_at: string;
@@ -348,13 +352,26 @@ export type ProcessTreeNode = {
 };
 
 export type ProcessNodeLinkPreview = {
+  formula?: string | null;
+  atom_count?: number | null;
   remote_path?: string | null;
   computer_name?: string | null;
   computer?: string | null;
   path?: string | null;
   filenames?: string[];
+  files?: string[];
+  file_count?: number | null;
+  mesh?: number[];
+  offset?: number[];
+  mode?: string | null;
+  num_points?: number | null;
+  has_labels?: boolean | null;
+  num_kpoints?: number | null;
+  num_bands?: number | null;
+  arrays?: Array<{ name?: string; label?: string; shape?: number[] | null }>;
   x_label?: string | null;
   x_length?: number | null;
+  y_labels?: string[];
   y_arrays?: Array<{ label: string; length: number | null }>;
   summary?: string | null;
   value?: string | number | boolean | null;
@@ -384,8 +401,15 @@ export type ProcessDetailResponse = {
     pk?: number;
     uuid?: string;
     type?: string;
+    node_type?: string;
+    full_type?: string;
+    label?: string;
     state?: string;
+    process_label?: string;
     exit_status?: number | null;
+    ctime?: string | null;
+    preview?: ProcessNodeLinkPreview | null;
+    preview_info?: ProcessNodeLinkPreview | null;
   };
   inputs?: Record<string, ProcessNodeLink>;
   outputs?: Record<string, ProcessNodeLink>;
@@ -396,6 +420,49 @@ export type ProcessDetailResponse = {
   };
   logs?: ProcessLogsResponse;
   calculation?: Record<string, unknown>;
+};
+
+export type NodeFileListResponse = {
+  pk: number;
+  files: string[];
+  source?: string | null;
+};
+
+export type NodeFileContentResponse = {
+  pk: number;
+  filename: string;
+  content: string;
+  source?: string | null;
+};
+
+export type BandsPlotPath = {
+  length?: number | null;
+  from?: string | null;
+  to?: string | null;
+  values?: number[][];
+  x?: number[];
+  two_band_types?: boolean | null;
+};
+
+export type BandsPlotData = {
+  paths?: BandsPlotPath[];
+  band_type_idx?: number[];
+  tick_pos?: number[];
+  tick_labels?: string[];
+  legend_text?: string | null;
+  legend_text2?: string | null;
+  yaxis_label?: string | null;
+  title?: string | null;
+  x_min_lim?: number | null;
+  x_max_lim?: number | null;
+  y_min_lim?: number | null;
+  y_max_lim?: number | null;
+  plot_zero_axis?: boolean | null;
+};
+
+export type BandsPlotResponse = {
+  pk: number;
+  data: BandsPlotData;
 };
 
 export type InfrastructureComputerCode = {
@@ -416,25 +483,49 @@ export type InfrastructureComputer = {
   codes: InfrastructureComputerCode[];
 };
 
+export type InfrastructureExportResponse = {
+  kind: string;
+  label: string;
+  filename: string;
+  format: string;
+  content: string;
+};
+
 export type ParseInfrastructureResponse = {
   status: string;
   data: {
     type: "computer" | "code" | "both";
+    preset_matched?: boolean;
+    preset_domain?: string;
     computer?: {
       label?: string;
       hostname?: string;
+      username?: string;
       description?: string;
       transport_type?: string;
       scheduler_type?: string;
+      shebang?: string;
       work_dir?: string;
       mpiprocs_per_machine?: number;
       mpirun_command?: string;
+      default_memory_per_machine?: number | null;
+      use_double_quotes?: boolean;
+      prepend_text?: string;
+      append_text?: string;
+      key_filename?: string;
+      proxy_command?: string;
+      proxy_jump?: string;
+      safe_interval?: number;
+      use_login_shell?: boolean;
+      connection_timeout?: number;
     };
     code?: {
       label?: string;
       description?: string;
       default_calc_job_plugin?: string;
       remote_abspath?: string;
+      prepend_text?: string;
+      append_text?: string;
     };
   };
 };

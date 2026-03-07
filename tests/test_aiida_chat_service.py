@@ -21,6 +21,114 @@ def _make_chat_state() -> SimpleNamespace:
     return SimpleNamespace(memory=_Memory(), chat_version=0)
 
 
+def test_create_chat_session_defaults_to_new_conversation_title() -> None:
+    state = _make_chat_state()
+
+    session = chat_service.create_chat_session(state)
+
+    assert session["title"] == "New Conversation"
+    assert session["auto_title"] is True
+    assert session["title_state"] == "idle"
+
+
+def test_update_chat_session_manual_title_marks_title_ready() -> None:
+    state = _make_chat_state()
+    session = chat_service.create_chat_session(state)
+
+    updated = chat_service.update_chat_session(state, session["id"], title="Si能带任务")
+
+    assert updated is not None
+    assert updated["title"] == "Si能带任务"
+    assert updated["auto_title"] is False
+    assert updated["title_state"] == "ready"
+
+
+def test_normalize_chat_session_record_converts_legacy_uuid_title_to_default() -> None:
+    session = chat_service._normalize_chat_session_record(
+        {
+            "id": "f193d874cd40464f99291f8b3f1bb657",
+            "project_id": "project-1",
+            "title": "f193d874cd40464f99291f8b3f1bb657",
+            "auto_title": False,
+            "messages": [],
+        },
+        default_project_id="project-1",
+        known_project_ids={"project-1"},
+    )
+
+    assert session is not None
+    assert session["title"] == "New Conversation"
+    assert session["auto_title"] is True
+    assert session["title_state"] == "idle"
+    assert session["title_generation_count"] == 0
+
+
+def test_title_prompt_prefers_pinned_node_context() -> None:
+    session = {
+        "title": "New Conversation",
+        "title_first_intent": "帮我看看这个结构",
+        "snapshot": {
+            "pinned_nodes": [
+                {
+                    "pk": 101,
+                    "label": "Silicon",
+                    "formula": "Si",
+                    "node_type": "StructureData",
+                }
+            ],
+            "context_nodes": [],
+            "selected_group": "semiconductor",
+            "selected_model": "gemini-3-flash-preview",
+            "session_environment": "research",
+            "session_environment_auto": True,
+            "prompt_override": None,
+            "session_parameters": [],
+        },
+        "messages": [
+            {"role": "user", "text": "帮我看看这个结构", "turn_id": 1},
+            {"role": "assistant", "text": "我先检查 Si 节点 #101。", "turn_id": 1, "status": "done"},
+        ],
+    }
+
+    prompt = chat_service._build_title_generation_prompt(
+        session,
+        stage=chat_service._TITLE_STAGE_INITIAL,
+        completed_turn_id=1,
+    )
+
+    assert "Silicon" in prompt or "Si" in prompt
+    assert "#101" in prompt
+    assert "首条用户指令：帮我看看这个结构" in prompt
+
+
+def test_should_schedule_deep_summary_after_sixth_user_turn() -> None:
+    session = {
+        "auto_title": True,
+        "title_state": "ready",
+        "title_generation_count": 1,
+        "title_last_generated_turn": 1,
+        "title_last_context_key": "same-context",
+        "snapshot": {
+            "pinned_nodes": [],
+            "context_nodes": [],
+            "selected_group": None,
+            "selected_model": None,
+            "session_environment": None,
+            "session_environment_auto": True,
+            "prompt_override": None,
+            "session_parameters": [],
+        },
+        "messages": [
+            {"role": "user", "text": f"问题 {index}", "turn_id": index}
+            for index in range(1, 7)
+        ],
+    }
+
+    stage = chat_service._should_schedule_title_generation(session, completed_turn_id=6)
+
+    assert stage == chat_service._TITLE_STAGE_DEEP_SUMMARY
+
+
 def test_merge_context_node_ids_prefers_union_of_fields() -> None:
     metadata = {
         "context_pks": [4, "8", 4],
@@ -490,6 +598,33 @@ def test_normalize_submission_draft_payload_builds_port_grouping_with_ui_types()
 
     mesh_entry = normalized["all_inputs"]["kpoints.mesh"]
     assert mesh_entry["ui_type"] == "mesh"
+
+
+def test_normalize_submission_draft_payload_ignores_node_metadata_envelopes_in_advanced_settings() -> None:
+    normalized = chat_service._normalize_submission_draft_payload(
+        {
+            "process_label": "ExampleWorkChain",
+            "inputs": {
+                "Nbands_Factor": {
+                    "pk": None,
+                    "uuid": "draft-node-1",
+                    "type": "Float",
+                },
+                "clean_workdir": {
+                    "pk": None,
+                    "uuid": "draft-node-2",
+                    "type": "Bool",
+                    "value": True,
+                },
+            },
+        },
+        draft=None,
+        validation=None,
+        validation_summary=None,
+    )
+
+    assert "nbands_factor" not in normalized["advanced_settings"]
+    assert normalized["advanced_settings"]["clean_workdir"] is True
 
 
 def test_update_assistant_message_keeps_existing_text_when_status_payload_arrives() -> None:

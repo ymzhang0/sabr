@@ -72,15 +72,22 @@ async def parse_infrastructure_via_ai(text: str, ssh_host_details: dict[str, Any
         "description": "string",
         "transport_type": "core.ssh",
         "scheduler_type": "core.direct" | "core.slurm" | "core.pbspro" | "core.lsf",
+        "shebang": "#!/bin/bash",
         "work_dir": "string",
         "mpiprocs_per_machine": number,
-        "mpirun_command": "string"
+        "mpirun_command": "string",
+        "default_memory_per_machine": number,
+        "use_double_quotes": boolean,
+        "prepend_text": "string",
+        "append_text": "string"
       }},
       "code": {{
         "label": "string",
         "description": "string",
         "default_calc_job_plugin": "string (the AiiDA plugin name, e.g. plugin.calcjob)",
-        "remote_abspath": "string"
+        "remote_abspath": "string",
+        "prepend_text": "string",
+        "append_text": "string"
       }}
     }}
 

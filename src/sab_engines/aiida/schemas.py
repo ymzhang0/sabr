@@ -30,6 +30,10 @@ class FrontendChatSessionUpdateRequest(BaseModel):
     snapshot: dict[str, Any] | None = None
 
 
+class FrontendChatSessionTitleUpdateRequest(BaseModel):
+    title: str | None = None
+
+
 class FrontendChatProjectCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     root_path: str | None = None
@@ -145,6 +149,14 @@ class InfrastructureComputer(BaseModel):
     transport_type: str
     is_enabled: bool
     codes: list[InfrastructureComputerCode] = Field(default_factory=list)
+
+
+class InfrastructureExportResponse(BaseModel):
+    kind: str
+    label: str
+    filename: str
+    format: str = "yaml"
+    content: str
 
 
 class ParseInfrastructureRequest(BaseModel):

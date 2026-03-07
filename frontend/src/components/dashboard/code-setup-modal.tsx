@@ -14,6 +14,7 @@ import {
     FileCode
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { cn } from "@/lib/utils";
 import { API_BASE_URL, frontendApi } from "@/lib/api";
 
@@ -160,8 +161,10 @@ export function CodeSetupModal({
             applyValue('label', 'label');
             applyValue('description', 'description');
             applyValue('default_calc_job_plugin', 'default_calc_job_plugin');
+            applyValue('input_plugin', 'default_calc_job_plugin');
             applyValue('filepath_executable', 'remote_abspath');
             applyValue('remote_abspath', 'remote_abspath');
+            applyValue('remote_abs_path', 'remote_abspath');
             applyValue('prepend_text', 'prepend_text');
             applyValue('append_text', 'append_text');
             applyValue('with_mpi', 'with_mpi', 'boolean');
@@ -235,19 +238,24 @@ export function CodeSetupModal({
                                     <span className="text-xs font-bold uppercase tracking-wider">Use as Template</span>
                                 </div>
                             </div>
-                            <select
+                            <CommandPaletteSelect
                                 value={selectedTemplatePk}
-                                onChange={(e) => handleTemplateChange(e.target.value)}
+                                options={[
+                                    { value: "none", label: "Copy from existing code" },
+                                    ...templates.map((template) => ({
+                                        value: template.pk.toString(),
+                                        label: template.label,
+                                        description: template.default_calc_job_plugin,
+                                        keywords: [template.default_calc_job_plugin, template.remote_abspath],
+                                    })),
+                                ]}
                                 disabled={templates.length === 0}
-                                className="w-full h-10 bg-white dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded-lg px-3 text-sm focus:ring-2 focus:ring-blue-500/20 outline-none transition-all disabled:opacity-50"
-                            >
-                                <option value="none">-- Copy from existing code --</option>
-                                {templates.map((t) => (
-                                    <option key={t.pk} value={t.pk.toString()}>
-                                        {t.label} ({t.default_calc_job_plugin})
-                                    </option>
-                                ))}
-                            </select>
+                                ariaLabel="Select code template"
+                                searchable={templates.length > 5}
+                                className="w-full"
+                                triggerClassName="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm"
+                                onChange={handleTemplateChange}
+                            />
                         </div>
 
                         <button
@@ -299,6 +307,15 @@ export function CodeSetupModal({
 
                     <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-1.5">
+                            <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">Computer</label>
+                            <input
+                                value={computerLabel}
+                                readOnly
+                                className="w-full bg-zinc-100 dark:bg-zinc-900/70 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-2.5 text-sm text-zinc-500 dark:text-zinc-400"
+                            />
+                        </div>
+
+                        <div className="space-y-1.5">
                             <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">Label *</label>
                             <input
                                 placeholder="e.g. my-code"
@@ -310,7 +327,7 @@ export function CodeSetupModal({
                         </div>
 
                         <div className="space-y-1.5">
-                            <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">AiiDA Plugin *</label>
+                            <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">Input Plugin *</label>
                             <input
                                 placeholder="e.g. plugin.calcjob"
                                 value={formData.default_calc_job_plugin}
@@ -321,7 +338,7 @@ export function CodeSetupModal({
                         </div>
 
                         <div className="col-span-2 space-y-1.5">
-                            <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">Executable Full Path *</label>
+                            <label className="text-[10px] uppercase font-bold text-zinc-400 ml-1">Remote Absolute Path *</label>
                             <div className="relative">
                                 <Terminal className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400" />
                                 <input
@@ -343,6 +360,11 @@ export function CodeSetupModal({
                                 className="w-full bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
                             />
                         </div>
+                    </div>
+
+                    <div className="rounded-xl border border-amber-200/70 bg-amber-50/70 px-4 py-3 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+                        This panel currently creates `InstalledCode` on the selected computer.
+                        `--code-folder` and `--code-rel-path` for `store-in-db` codes are not supported here yet.
                     </div>
 
                     <div className="p-4 bg-zinc-50 dark:bg-zinc-900/30 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-4">

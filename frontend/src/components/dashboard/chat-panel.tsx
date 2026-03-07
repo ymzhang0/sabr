@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, Pin, PlugZap, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, Pin, PlugZap, PlusSquare, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
 import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ActionToolbar } from "@/components/dashboard/action-toolbar";
@@ -11,6 +11,7 @@ import {
 } from "@/components/dashboard/submission-modal";
 import { ThinkingIndicator, type ProcessLogEntry } from "@/components/dashboard/thinking-indicator";
 import { Button } from "@/components/ui/button";
+import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { Panel } from "@/components/ui/panel";
 import { cancelPendingSubmission, getActiveSpecializations, getNodeHoverMetadata, submitPreviewDraft } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -1343,6 +1344,7 @@ type ChatPanelProps = {
   projectTags?: string[];
   isLoading: boolean;
   activeTurnId: number | null;
+  onNewConversation: () => void;
   onSendMessage: (text: string, options?: { resourceAttachments?: ResourceAttachment[] }) => void;
   onStopResponse: () => void;
   onModelChange: (model: string) => void;
@@ -1494,23 +1496,6 @@ function dedupeFocusNodes(nodes: FocusNode[]): FocusNode[] {
   });
 }
 
-function normalizeSessionParameters(parameters: SessionParameter[]): SessionParameter[] {
-  const seen = new Set<string>();
-  return parameters.filter((entry) => {
-    const key = entry.key.trim();
-    const value = entry.value.trim();
-    if (!key || !value) {
-      return false;
-    }
-    const lowered = key.toLowerCase();
-    if (seen.has(lowered)) {
-      return false;
-    }
-    seen.add(lowered);
-    return true;
-  });
-}
-
 function buildEnvironmentOptions(payload: ActiveSpecializationsResponse | undefined): Array<{
   name: string;
   label: string;
@@ -1575,6 +1560,7 @@ export function ChatPanel({
   projectTags = [],
   isLoading,
   activeTurnId,
+  onNewConversation,
   onSendMessage,
   onStopResponse,
   onModelChange,
@@ -1590,6 +1576,7 @@ export function ChatPanel({
   onPromptOverrideChange,
   onSessionParametersChange,
 }: ChatPanelProps) {
+  const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1707,13 +1694,6 @@ export function ChatPanel({
   const resolvedEnvironmentLabel =
     environmentOptions.find((item) => item.name === resolvedEnvironmentName)?.label ?? "Generic";
   const selectedEnvironmentName = sessionEnvironment ?? resolvedEnvironmentName;
-  const selectedEnvironmentLabel =
-    environmentOptions.find((item) => item.name === selectedEnvironmentName)?.label ?? resolvedEnvironmentLabel;
-  const activeNode = contextNodes[contextNodes.length - 1] ?? pinnedNodes[0] ?? null;
-  const normalizedSessionParameters = useMemo(
-    () => normalizeSessionParameters(sessionParameters),
-    [sessionParameters],
-  );
   const slashQuery = useMemo(() => {
     const trimmed = draft.trimStart();
     if (!trimmed.startsWith("/")) {
@@ -2070,6 +2050,10 @@ export function ChatPanel({
 
   const handleConfirmPreview = useCallback(
     async (turnId: number, preview: SubmissionDraftPreview, draftPayload?: SubmissionSubmitDraft) => {
+      setExpandedSubmissionByTurn((current) => ({
+        ...current,
+        [turnId]: false,
+      }));
       setPreviewStateByTurn((current) => ({
         ...current,
         [turnId]: { status: "submitting", processPk: null, processPks: [], errorText: null },
@@ -2089,6 +2073,8 @@ export function ChatPanel({
             processPks,
           },
         }));
+        void queryClient.invalidateQueries({ queryKey: ["processes"] });
+        void queryClient.invalidateQueries({ queryKey: ["groups"] });
       } catch (error) {
         const errorText = error instanceof Error ? error.message : "Failed to submit workflow.";
         setPreviewStateByTurn((current) => ({
@@ -2097,10 +2083,14 @@ export function ChatPanel({
         }));
       }
     },
-    [],
+    [queryClient],
   );
 
   const handleCancelPreview = useCallback(async (turnId: number) => {
+    setExpandedSubmissionByTurn((current) => ({
+      ...current,
+      [turnId]: false,
+    }));
     setPreviewStateByTurn((current) => ({
       ...current,
       [turnId]: { status: "cancelled", processPk: null, processPks: [], errorText: null },
@@ -2252,67 +2242,27 @@ export function ChatPanel({
 
   return (
     <Panel className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden p-0">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-200/80 bg-white/80 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/55 md:px-8">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 rounded-full border border-zinc-200/80 bg-zinc-50/90 px-3 py-1.5 text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-100 dark:hover:bg-zinc-800"
-              onClick={() => {
-                onSessionEnvironmentAutoChange(false);
-              }}
-            >
-              <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
-              <span className="truncate">{resolvedEnvironmentLabel}</span>
-            </button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
-            <input
-              type="checkbox"
-              className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
-              checked={sessionEnvironmentAuto}
-              onChange={(event) => onSessionEnvironmentAutoChange(event.target.checked)}
-            />
-            Allow auto-switch
-          </label>
-          <select
-            value={selectedEnvironmentName}
-            onChange={(event) => handleSessionEnvironmentSelect(event.target.value)}
-            className="h-9 rounded-lg border border-zinc-200/80 bg-zinc-50/90 px-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/70 dark:text-zinc-200 dark:focus:border-zinc-600"
-          >
-            {environmentOptions.map((option) => (
-              <option key={option.name} value={option.name}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
       <div className="min-h-0 flex flex-1 flex-col xl:flex-row">
         <div className="min-h-0 flex flex-1 flex-col">
-      <div
-        ref={messagesContainerRef}
-        className="minimal-scrollbar min-h-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto px-5 pb-6 pt-5 md:px-8"
-        onScroll={() => {
-          const nearBottom = isNearBottom();
-          setIsAutoScrollEnabled((current) => (current === nearBottom ? current : nearBottom));
-        }}
-      >
-        {turns.length === 0 ? (
-          <div className="flex h-full flex-col items-center justify-center text-center">
-            <p className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
-              Ask SABR about your AiiDA workflow
-            </p>
-            <p className="mt-2 max-w-xl text-sm text-zinc-500 dark:text-zinc-400">
-              Profile-aware assistant with live process telemetry and runtime logs.
-            </p>
-          </div>
-        ) : (
-          turns.map((turn) => {
+          <div
+            ref={messagesContainerRef}
+            className="minimal-scrollbar min-h-0 flex-1 space-y-5 overflow-x-hidden overflow-y-auto px-5 pb-6 pt-5 md:px-8"
+            onScroll={() => {
+              const nearBottom = isNearBottom();
+              setIsAutoScrollEnabled((current) => (current === nearBottom ? current : nearBottom));
+            }}
+          >
+            {turns.length === 0 ? (
+              <div className="flex h-full flex-col items-center justify-center text-center">
+                <p className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
+                  Ask SABR about your AiiDA workflow
+                </p>
+                <p className="mt-2 max-w-xl text-sm text-zinc-500 dark:text-zinc-400">
+                  Profile-aware assistant with live process telemetry and runtime logs.
+                </p>
+              </div>
+            ) : (
+              turns.map((turn) => {
             const assistantStreamText = turnTextBufferByTurn[turn.turnId] ?? turn.assistantText ?? "";
             const thinkingText = (turn.thinkingText ?? "").trim()
               ? (turn.thinkingText ?? "")
@@ -2547,7 +2497,7 @@ export function ChatPanel({
                 {submittedPreview ? (
                   <div className="ml-10 max-w-[86%] rounded-xl border border-emerald-200/80 bg-emerald-50/85 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
                     <p className="font-medium">
-                      \uD83D\uDE80 Job Submitted: {submittedPreview.processLabel}{" "}
+                      {"🚀"} Job Submitted: {submittedPreview.processLabel}{" "}
                       {submittedPreview.processPks.length > 0 ? `(${submittedPreview.processPks.length} jobs)` : "(PK pending)"}
                     </p>
                     {submittedPreview.processPks.length > 0 ? (
@@ -2571,73 +2521,73 @@ export function ChatPanel({
                 ) : null}
               </article>
             );
-          })
-        )}
-        <div ref={messagesEndRef} className="h-2" aria-hidden />
-      </div>
+              })
+            )}
+            <div ref={messagesEndRef} className="h-2" aria-hidden />
+          </div>
 
-      <div className="bg-white/75 px-4 pb-4 pt-3 backdrop-blur dark:bg-zinc-950/35 md:px-6">
-        <div className="pt-2">
-          <div className="rounded-2xl border border-zinc-200/80 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
-            <ActionToolbar
-              actions={toolbarActions}
-              activeSpecializations={activeSpecializations}
-              isBusy={isLoading}
-              onTriggerAction={handleToolbarAction}
-            />
-            <div className="relative">
-              {showSlashMenu ? (
-                <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-2xl border border-zinc-200/85 bg-white/96 shadow-xl backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/96">
-                  <div className="minimal-scrollbar max-h-72 overflow-y-auto p-2">
-                    {slashSections.map((section) => (
-                      <div key={section.id} className="mb-2 last:mb-0">
-                        <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
-                          {section.label}
-                        </p>
-                        <div className="space-y-1">
-                          {section.items.map((item) => {
-                            const flatIndex = slashItems.findIndex((candidate) => candidate.id === item.id);
-                            const isSelected = flatIndex === slashSelectionIndex;
-                            return (
-                              <button
-                                key={`${section.id}-${item.id}`}
-                                type="button"
-                                className={cn(
-                                  "flex w-full items-start gap-3 rounded-xl border px-3 py-2 text-left transition-colors duration-150",
-                                  isSelected
-                                    ? "border-zinc-300 bg-zinc-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
-                                    : "border-transparent text-zinc-700 hover:border-zinc-200 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:border-zinc-800 dark:hover:bg-zinc-900/70",
-                                  !item.enabled && "opacity-45",
-                                )}
-                                onMouseEnter={() => setSlashSelectionIndex(Math.max(flatIndex, 0))}
-                                onClick={() => handleSelectSlashAction(item)}
-                                disabled={!item.enabled}
-                                title={item.disabled_reason || item.description || item.prompt}
-                              >
-                                <span className="mt-0.5 shrink-0 text-sm" aria-hidden>
-                                  {item.icon ?? "↗"}
-                                </span>
-                                <span className="min-w-0">
-                                  <span className="flex items-center gap-2">
-                                    <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
-                                      {item.command || "/action"}
+          <div className="bg-white/75 px-4 pb-4 pt-3 backdrop-blur dark:bg-zinc-950/35 md:px-6">
+            <div className="pt-2">
+              <div className="rounded-2xl border border-zinc-200/80 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
+                <ActionToolbar
+                  actions={toolbarActions}
+                  activeSpecializations={activeSpecializations}
+                  isBusy={isLoading}
+                  onTriggerAction={handleToolbarAction}
+                />
+                <div className="relative">
+                  {showSlashMenu ? (
+                    <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-2xl border border-zinc-200/85 bg-white/96 shadow-xl backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/96">
+                      <div className="minimal-scrollbar max-h-72 overflow-y-auto p-2">
+                        {slashSections.map((section) => (
+                          <div key={section.id} className="mb-2 last:mb-0">
+                            <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+                              {section.label}
+                            </p>
+                            <div className="space-y-1">
+                              {section.items.map((item) => {
+                                const flatIndex = slashItems.findIndex((candidate) => candidate.id === item.id);
+                                const isSelected = flatIndex === slashSelectionIndex;
+                                return (
+                                  <button
+                                    key={`${section.id}-${item.id}`}
+                                    type="button"
+                                    className={cn(
+                                      "flex w-full items-start gap-3 rounded-xl border px-3 py-2 text-left transition-colors duration-150",
+                                      isSelected
+                                        ? "border-zinc-300 bg-zinc-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+                                        : "border-transparent text-zinc-700 hover:border-zinc-200 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:border-zinc-800 dark:hover:bg-zinc-900/70",
+                                      !item.enabled && "opacity-45",
+                                    )}
+                                    onMouseEnter={() => setSlashSelectionIndex(Math.max(flatIndex, 0))}
+                                    onClick={() => handleSelectSlashAction(item)}
+                                    disabled={!item.enabled}
+                                    title={item.disabled_reason || item.description || item.prompt}
+                                  >
+                                    <span className="mt-0.5 shrink-0 text-sm" aria-hidden>
+                                      {item.icon ?? "↗"}
                                     </span>
-                                    <span className="truncate text-sm font-medium">{item.label}</span>
-                                  </span>
-                                  <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
-                                    {item.description || item.prompt}
-                                  </span>
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
+                                    <span className="min-w-0">
+                                      <span className="flex items-center gap-2">
+                                        <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                                          {item.command || "/action"}
+                                        </span>
+                                        <span className="truncate text-sm font-medium">{item.label}</span>
+                                      </span>
+                                      <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
+                                        {item.description || item.prompt}
+                                      </span>
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-              <textarea
+                    </div>
+                  ) : null}
+                  <textarea
                 ref={textareaRef}
                 rows={2}
                 value={draft}
@@ -2735,34 +2685,34 @@ export function ChatPanel({
                     handleSubmit();
                   }
                 }}
-              />
-            </div>
+                  />
+                </div>
 
 
-            <div className="mt-3 flex flex-row items-center justify-between gap-2">
-              <div className="flex flex-row items-center gap-2">
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="border-zinc-200/80 bg-transparent transition-colors duration-200 hover:bg-zinc-100/70 dark:border-zinc-800 dark:hover:bg-zinc-900/70"
-                  onClick={() => fileInputRef.current?.click()}
-                  aria-label="Attach file"
-                >
-                  <Paperclip className="h-4 w-4" />
-                </Button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  accept=".aiida,.zip"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) {
-                      onAttachFile(file);
-                    }
-                    event.target.value = "";
-                  }}
-                />
+                <div className="mt-3 flex flex-row items-center justify-between gap-2">
+                  <div className="flex flex-row items-center gap-2">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="border-zinc-200/80 bg-transparent transition-colors duration-200 hover:bg-zinc-100/70 dark:border-zinc-800 dark:hover:bg-zinc-900/70"
+                      onClick={() => fileInputRef.current?.click()}
+                      aria-label="Attach file"
+                    >
+                      <Paperclip className="h-4 w-4" />
+                    </Button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      className="hidden"
+                      accept=".aiida,.zip"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) {
+                          onAttachFile(file);
+                        }
+                        event.target.value = "";
+                      }}
+                    />
 
                 <div ref={modelMenuRef} className="relative">
                   <button
@@ -2899,84 +2849,74 @@ export function ChatPanel({
                 )}
               </div>
 
-              <Button
-                size="icon"
-                onClick={() => {
-                  if (isLoading) {
-                    onStopResponse();
-                    return;
-                  }
-                  handleSubmit();
-                }}
-                disabled={!isLoading && isDraftEmpty}
-                className={cn(
-                  "transition-all duration-200",
-                  isLoading &&
-                  "bg-rose-600 text-white hover:bg-rose-500 dark:bg-rose-500 dark:text-white dark:hover:bg-rose-400",
-                )}
-                aria-label={isLoading ? "Stop response" : "Send message"}
-              >
-                {isLoading ? <Square className="h-4 w-4" /> : <SendHorizontal className="h-4 w-4" />}
-              </Button>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="icon"
+                      onClick={() => {
+                        if (isLoading) {
+                          onStopResponse();
+                          return;
+                        }
+                        handleSubmit();
+                      }}
+                      disabled={!isLoading && isDraftEmpty}
+                      className={cn(
+                        "transition-all duration-200",
+                        isLoading &&
+                        "bg-rose-600 text-white hover:bg-rose-500 dark:bg-rose-500 dark:text-white dark:hover:bg-rose-400",
+                      )}
+                      aria-label={isLoading ? "Stop response" : "Send message"}
+                    >
+                      {isLoading ? <Square className="h-4 w-4" /> : <SendHorizontal className="h-4 w-4" />}
+                    </Button>
+                    <Button
+                      size="icon"
+                      onClick={onNewConversation}
+                      className="transition-all duration-200"
+                      aria-label="New Conversation"
+                      title="New Conversation"
+                    >
+                      <PlusSquare className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-          </div>
-        </div>
         </div>
         <aside className="minimal-scrollbar border-t border-zinc-200/80 bg-zinc-50/55 p-4 xl:w-[320px] xl:overflow-y-auto xl:border-l xl:border-t-0 dark:border-zinc-800 dark:bg-zinc-950/45">
           <div className="space-y-4">
             <div className="rounded-2xl border border-zinc-200/80 bg-white/90 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
               <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
-                Context Slots
+                Environment
               </p>
               <div className="mt-3 space-y-3 text-sm">
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
-                    Active Node
-                  </p>
-                  {activeNode ? (
-                    <button
-                      type="button"
-                      className="mt-1 inline-flex items-center gap-2 rounded-full border border-zinc-200/80 bg-zinc-50 px-3 py-1.5 text-left text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                      onClick={() => onOpenDetail(activeNode.pk)}
-                    >
-                      <span className="font-mono">#{activeNode.pk}</span>
-                      <span className="truncate">{activeNode.formula || activeNode.label}</span>
-                    </button>
-                  ) : (
-                    <p className="mt-1 text-zinc-500 dark:text-zinc-400">No active node pinned.</p>
-                  )}
-                </div>
-
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
-                    Target Project
-                  </p>
-                  <p className="mt-1 text-zinc-700 dark:text-zinc-200">
-                    {resolvedEnvironmentLabel}
-                    {selectedGroup ? <span className="text-zinc-500 dark:text-zinc-400"> · Group {selectedGroup}</span> : null}
-                  </p>
-                </div>
-
-                <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-400 dark:text-zinc-500">
-                    Parameters
-                  </p>
-                  {normalizedSessionParameters.length > 0 ? (
-                    <div className="mt-1 flex flex-wrap gap-1.5">
-                      {normalizedSessionParameters.map((entry) => (
-                        <span
-                          key={`${entry.key}:${entry.value}`}
-                          className="rounded-full border border-amber-200/80 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200"
-                        >
-                          {entry.key}: {entry.value}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="mt-1 text-zinc-500 dark:text-zinc-400">No session parameters set.</p>
-                  )}
-                </div>
+                <CommandPaletteSelect
+                  value={selectedEnvironmentName}
+                  options={environmentOptions.map((option) => ({
+                    value: option.name,
+                    label: option.label,
+                    keywords: [option.name],
+                  }))}
+                  ariaLabel="Select session environment"
+                  searchable={environmentOptions.length > 6}
+                  className="w-full"
+                  triggerClassName="flex w-full items-center justify-between rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-2.5 py-2 text-sm dark:border-zinc-800 dark:bg-zinc-900/70"
+                  onChange={handleSessionEnvironmentSelect}
+                />
+                <label className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+                    checked={sessionEnvironmentAuto}
+                    onChange={(event) => onSessionEnvironmentAutoChange(event.target.checked)}
+                  />
+                  Allow auto-switch
+                </label>
+                <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                  Resolved: <span className="text-zinc-700 dark:text-zinc-200">{resolvedEnvironmentLabel}</span>
+                  {selectedGroup ? <span> · Group {selectedGroup}</span> : null}
+                </p>
               </div>
             </div>
 

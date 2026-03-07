@@ -6,6 +6,7 @@ import type {
   BridgeStatusResponse,
   BridgeSwitchProfileResponse,
   BootstrapResponse,
+  BandsPlotResponse,
   ChatResponse,
   ChatProjectMutationResponse,
   ChatSessionMutationResponse,
@@ -18,9 +19,12 @@ import type {
   GroupsResponse,
   ActiveSpecializationsResponse,
   InfrastructureComputer,
+  InfrastructureExportResponse,
   LogsResponse,
   NodeHoverMetadataResponse,
   NodeScriptResponse,
+  NodeFileContentResponse,
+  NodeFileListResponse,
   ParseInfrastructureResponse,
   ProcessDetailResponse,
   ProcessLogsResponse,
@@ -40,6 +44,7 @@ export const AIIDA_API_PREFIX = "/api/aiida";
 const frontendBaseURL = `${API_BASE_URL}${FRONTEND_API_PREFIX}`;
 const aiidaBaseURL = `${API_BASE_URL}${AIIDA_API_PREFIX}`;
 const specializationsBaseURL = `${API_BASE_URL}/api/specializations`;
+const sessionsBaseURL = `${API_BASE_URL}/api`;
 
 function resolveHttpOrigin(): string {
   if (import.meta.env.DEV) {
@@ -263,6 +268,18 @@ export async function updateChatSession(
   return data;
 }
 
+export async function updateChatSessionTitle(
+  sessionId: string,
+  payload: { title?: string | null },
+): Promise<ChatSessionMutationResponse> {
+  const { data } = await axios.put<ChatSessionMutationResponse>(
+    `${sessionsBaseURL}/sessions/${encodeURIComponent(sessionId)}/title`,
+    payload,
+    { timeout: 15000 },
+  );
+  return data;
+}
+
 export async function getChatSessionWorkspace(
   sessionId: string,
   relativePath?: string,
@@ -295,6 +312,45 @@ export async function getProcessDetail(identifier: number | string): Promise<Pro
 
 export async function getProcessLogs(identifier: number | string): Promise<ProcessLogsResponse> {
   const { data } = await aiidaApi.get<ProcessLogsResponse>(`/process/${identifier}/logs`);
+  return data;
+}
+
+export async function getBandsPlotData(pk: number): Promise<BandsPlotResponse> {
+  const { data } = await aiidaApi.get<BandsPlotResponse>(`/data/bands/${pk}`);
+  return data;
+}
+
+export async function getRemoteFiles(pk: number): Promise<NodeFileListResponse> {
+  const { data } = await aiidaApi.get<NodeFileListResponse>(`/data/remote/${pk}/files`);
+  return data;
+}
+
+export async function getRemoteFileContent(pk: number, filename: string): Promise<NodeFileContentResponse> {
+  const { data } = await aiidaApi.get<NodeFileContentResponse>(`/data/remote/${pk}/files/${encodeURIComponent(filename)}`);
+  return data;
+}
+
+export async function getRepositoryFiles(
+  pk: number,
+  source: "folder" | "repository" = "folder",
+): Promise<NodeFileListResponse> {
+  const { data } = await aiidaApi.get<NodeFileListResponse>(`/data/repository/${pk}/files`, {
+    params: { source },
+  });
+  return data;
+}
+
+export async function getRepositoryFileContent(
+  pk: number,
+  filename: string,
+  source: "folder" | "repository" = "folder",
+): Promise<NodeFileContentResponse> {
+  const { data } = await aiidaApi.get<NodeFileContentResponse>(
+    `/data/repository/${pk}/files/${encodeURIComponent(filename)}`,
+    {
+      params: { source },
+    },
+  );
   return data;
 }
 
@@ -384,6 +440,18 @@ export async function getInfrastructure(): Promise<InfrastructureComputer[]> {
 
 export async function setupInfrastructure(config: any): Promise<any> {
   const { data } = await aiidaApi.post("/management/infrastructure/setup", config);
+  return data;
+}
+
+export async function exportComputerConfig(computerPk: number): Promise<InfrastructureExportResponse> {
+  const { data } = await aiidaApi.get<InfrastructureExportResponse>(
+    `/management/infrastructure/computer/pk/${computerPk}/export`,
+  );
+  return data;
+}
+
+export async function exportCodeConfig(codePk: number): Promise<InfrastructureExportResponse> {
+  const { data } = await aiidaApi.get<InfrastructureExportResponse>(`/management/infrastructure/code/${codePk}/export`);
   return data;
 }
 

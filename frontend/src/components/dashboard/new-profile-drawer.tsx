@@ -11,6 +11,7 @@ import {
     AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { cn } from "@/lib/utils";
 import { getCurrentUserInfo, setupProfile, switchBridgeProfile } from "@/lib/api";
 import type { ProfileSetupRequest } from "@/types/aiida";
@@ -20,6 +21,12 @@ type NewProfileDrawerProps = {
     onClose: () => void;
     onSuccess: () => void;
 };
+
+const BACKEND_OPTIONS = [
+    { value: "core.sqlite_dos", label: "sqlite_dos (Default)" },
+    { value: "core.psql_dos", label: "psql_dos" },
+    { value: "core.sqlite_zip", label: "sqlite_zip" },
+];
 
 export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawerProps) {
     const queryClient = useQueryClient();
@@ -191,16 +198,15 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
 
                         <div className="space-y-1">
                             <label className="text-[10px] uppercase font-bold text-zinc-500 dark:text-zinc-400 flex items-center gap-1"><Database className="h-3 w-3" /> Backend Database</label>
-                            <select
+                            <CommandPaletteSelect
                                 value={form.backend}
-                                onChange={(e) => setForm({ ...form, backend: e.target.value })}
+                                options={BACKEND_OPTIONS}
                                 disabled={isSubmitting}
-                                className="w-full h-8 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-2 text-xs text-zinc-700 dark:text-zinc-200 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
-                            >
-                                <option value="core.sqlite_dos">sqlite_dos (Default)</option>
-                                <option value="core.psql_dos">psql_dos</option>
-                                <option value="core.sqlite_zip">sqlite_zip</option>
-                            </select>
+                                ariaLabel="Select backend database"
+                                className="w-full"
+                                triggerClassName="flex w-full items-center justify-between rounded-lg px-1.5 py-1.5 text-xs"
+                                onChange={(backend) => setForm({ ...form, backend })}
+                            />
                         </div>
 
                         <div className="space-y-1 w-full">
@@ -293,4 +299,3 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
 
     return drawerContent;
 }
-

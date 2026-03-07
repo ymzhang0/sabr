@@ -1,5 +1,5 @@
 
-import React, { useState, useCallback } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
     X,
     Upload,
@@ -16,6 +16,8 @@ import {
     ChevronUp
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
+import type { ParseInfrastructureResponse } from "@/types/aiida";
 import { cn } from "@/lib/utils";
 import { parseInfrastructure, setupInfrastructure, getSshHosts, type SSHHostDetails } from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
@@ -26,11 +28,71 @@ type QuickAddModalProps = {
     onSuccess: () => void;
 };
 
+type InfrastructureParseData = ParseInfrastructureResponse["data"];
+
+const DEFAULT_COMPUTER_CONFIG: NonNullable<InfrastructureParseData["computer"]> = {
+    label: "",
+    hostname: "",
+    username: "",
+    description: "",
+    transport_type: "core.ssh",
+    scheduler_type: "core.direct",
+    shebang: "#!/bin/bash",
+    work_dir: "/tmp/aiida",
+    mpiprocs_per_machine: 1,
+    mpirun_command: "mpirun -np {tot_num_mpiprocs}",
+    default_memory_per_machine: null,
+    use_double_quotes: false,
+    prepend_text: "",
+    append_text: "",
+    key_filename: "",
+    proxy_command: "",
+    proxy_jump: "",
+    safe_interval: 0,
+    use_login_shell: true,
+    connection_timeout: 60,
+};
+
+const DEFAULT_CODE_CONFIG: NonNullable<InfrastructureParseData["code"]> = {
+    label: "",
+    description: "",
+    default_calc_job_plugin: "",
+    remote_abspath: "",
+    prepend_text: "",
+    append_text: "",
+};
+
+function createEmptyParseResult(): InfrastructureParseData {
+    return {
+        type: "computer",
+        preset_matched: false,
+        preset_domain: "",
+        computer: { ...DEFAULT_COMPUTER_CONFIG },
+        code: { ...DEFAULT_CODE_CONFIG },
+    };
+}
+
+function mergeParseResult(raw?: InfrastructureParseData | null): InfrastructureParseData {
+    return {
+        type: raw?.type ?? "computer",
+        preset_matched: Boolean(raw?.preset_matched),
+        preset_domain: raw?.preset_domain ?? "",
+        computer: {
+            ...DEFAULT_COMPUTER_CONFIG,
+            ...(raw?.computer ?? {}),
+        },
+        code: {
+            ...DEFAULT_CODE_CONFIG,
+            ...(raw?.code ?? {}),
+        },
+    };
+}
+
 export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps) {
     const [pasteText, setPasteText] = useState("");
     const [isParsing, setIsParsing] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const [parseResult, setParseResult] = useState<any>(null);
+    const [parseResult, setParseResult] = useState<InfrastructureParseData>(() => createEmptyParseResult());
     const [error, setError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<"paste" | "form">("paste");
 
@@ -43,6 +105,42 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
     });
     const sshHosts = sshHostsQuery.data || [];
 
+    useEffect(() => {
+        if (!isOpen) {
+            return;
+        }
+        setPasteText("");
+        setIsParsing(false);
+        setIsSubmitting(false);
+        setError(null);
+        setActiveTab("paste");
+        setShowAdvanced(false);
+        setSelectedSshHost("");
+        setParseResult(createEmptyParseResult());
+    }, [isOpen]);
+
+    const updateComputer = useCallback((patch: Partial<NonNullable<InfrastructureParseData["computer"]>>) => {
+        setParseResult((current) => ({
+            ...current,
+            computer: {
+                ...DEFAULT_COMPUTER_CONFIG,
+                ...(current.computer ?? {}),
+                ...patch,
+            },
+        }));
+    }, []);
+
+    const updateCode = useCallback((patch: Partial<NonNullable<InfrastructureParseData["code"]>>) => {
+        setParseResult((current) => ({
+            ...current,
+            code: {
+                ...DEFAULT_CODE_CONFIG,
+                ...(current.code ?? {}),
+                ...patch,
+            },
+        }));
+    }, []);
+
     const handleParse = async () => {
         if (!pasteText.trim() && !selectedSshHost) return;
         setIsParsing(true);
@@ -54,7 +152,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
 
             const response = await parseInfrastructure(textToParse, hostDetails);
             if (response.status === "success" && response.data) {
-                setParseResult(response.data);
+                setParseResult(mergeParseResult(response.data));
                 setActiveTab("form");
             } else {
                 setError("Failed to parse input. Please try again or fill manually.");
@@ -82,9 +180,12 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                 computer_description: parseResult.computer.description || "",
                 transport_type: parseResult.computer.transport_type || "core.ssh",
                 scheduler_type: parseResult.computer.scheduler_type || "core.direct",
+                shebang: parseResult.computer.shebang || "#!/bin/bash",
                 work_dir: parseResult.computer.work_dir || "/tmp/aiida",
                 mpiprocs_per_machine: parseResult.computer.mpiprocs_per_machine || 1,
                 mpirun_command: parseResult.computer.mpirun_command || "mpirun -np {tot_num_mpiprocs}",
+                default_memory_per_machine: parseResult.computer.default_memory_per_machine ?? null,
+                use_double_quotes: parseResult.computer.use_double_quotes === true,
                 prepend_text: parseResult.computer.prepend_text || "",
                 append_text: parseResult.computer.append_text || "",
                 use_login_shell: parseResult.computer.use_login_shell !== false,
@@ -124,7 +225,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl w-full max-w-xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
                 <header className="px-6 py-4 border-b border-zinc-100 dark:border-zinc-900 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                         <div className="p-2 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
@@ -179,18 +280,23 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                 <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">
                                     Or Select Existing SSH Host
                                 </label>
-                                <select
-                                    className="w-full h-10 bg-zinc-50 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-lg px-3 text-sm text-zinc-700 dark:text-zinc-300 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all"
+                                <CommandPaletteSelect
                                     value={selectedSshHost}
-                                    onChange={(e) => setSelectedSshHost(e.target.value)}
-                                >
-                                    <option value="">-- No SSH Host Selected --</option>
-                                    {sshHosts.map((host) => (
-                                        <option key={host.alias} value={host.alias}>
-                                            {host.alias} {host.hostname ? `(${host.hostname})` : ""}
-                                        </option>
-                                    ))}
-                                </select>
+                                    options={[
+                                        { value: "", label: "No SSH Host Selected" },
+                                        ...sshHosts.map((host) => ({
+                                            value: host.alias,
+                                            label: host.alias,
+                                            description: host.hostname || null,
+                                            keywords: [host.hostname || ""],
+                                        })),
+                                    ]}
+                                    ariaLabel="Select existing SSH host"
+                                    searchable={sshHosts.length > 6}
+                                    className="w-full"
+                                    triggerClassName="flex w-full items-center justify-between rounded-lg px-2 py-2 text-sm"
+                                    onChange={setSelectedSshHost}
+                                />
                             </div>
 
                             <div className="bg-blue-50/50 dark:bg-blue-900/20 border border-blue-100/50 dark:border-blue-900/30 rounded-xl p-4 flex gap-3">
@@ -211,7 +317,6 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                         </div>
                     ) : (
                         <div className="space-y-6 animate-in slide-in-from-right-2 duration-300">
-                            {parseResult ? (
                                 <div className="space-y-6">
                                     {parseResult.preset_matched && (
                                         <div className="bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl p-4 flex gap-3 animate-in fade-in zoom-in-95">
@@ -235,7 +340,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Label</label>
                                                     <input
                                                         value={parseResult.computer.label || ""}
-                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, label: e.target.value } })}
+                                                        onChange={(e) => updateComputer({ label: e.target.value })}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                                                     />
                                                 </div>
@@ -243,25 +348,74 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Hostname</label>
                                                     <input
                                                         value={parseResult.computer.hostname || ""}
-                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, hostname: e.target.value } })}
+                                                        onChange={(e) => updateComputer({ hostname: e.target.value })}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1 col-span-2">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Description</label>
+                                                    <input
+                                                        value={parseResult.computer.description || ""}
+                                                        onChange={(e) => updateComputer({ description: e.target.value })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Transport Type</label>
+                                                    <input
+                                                        value={parseResult.computer.transport_type || ""}
+                                                        onChange={(e) => updateComputer({ transport_type: e.target.value })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Scheduler Type</label>
+                                                    <input
+                                                        value={parseResult.computer.scheduler_type || ""}
+                                                        onChange={(e) => updateComputer({ scheduler_type: e.target.value })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                                                     />
                                                 </div>
                                                 <div className="space-y-1">
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Username</label>
                                                     <input
                                                         value={parseResult.computer.username || ""}
-                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, username: e.target.value } })}
+                                                        onChange={(e) => updateComputer({ username: e.target.value })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1 col-span-2">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Work Directory</label>
+                                                    <input
+                                                        value={parseResult.computer.work_dir || ""}
+                                                        onChange={(e) => updateComputer({ work_dir: e.target.value })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Procs / Machine</label>
+                                                    <input
+                                                        type="number"
+                                                        value={parseResult.computer.mpiprocs_per_machine || ""}
+                                                        onChange={(e) => updateComputer({ mpiprocs_per_machine: parseInt(e.target.value, 10) || 1 })}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                                                     />
                                                 </div>
                                                 <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">CPUs per node</label>
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Default Memory / Machine (kB)</label>
                                                     <input
                                                         type="number"
-                                                        value={parseResult.computer.mpiprocs_per_machine || ""}
-                                                        onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, mpiprocs_per_machine: parseInt(e.target.value) || 1 } })}
+                                                        value={parseResult.computer.default_memory_per_machine ?? ""}
+                                                        onChange={(e) => updateComputer({ default_memory_per_machine: e.target.value ? parseInt(e.target.value, 10) || null : null })}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
+                                                <div className="space-y-1 col-span-2">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Run Command</label>
+                                                    <input
+                                                        value={parseResult.computer.mpirun_command || ""}
+                                                        onChange={(e) => updateComputer({ mpirun_command: e.target.value })}
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                                                     />
                                                 </div>
                                             </div>
@@ -271,30 +425,68 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                 className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 pt-2 transition-colors"
                                             >
                                                 {showAdvanced ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                                                {showAdvanced ? "Hide Advanced Settings" : "Show Advanced Settings (10+ parameters)"}
+                                                {showAdvanced ? "Hide Advanced Settings" : "Show Advanced Settings"}
                                             </button>
 
                                             {showAdvanced && (
                                                 <div className="grid grid-cols-2 gap-4 pt-4 border-t border-zinc-200 dark:border-zinc-800 animate-in slide-in-from-top-2 duration-200">
-                                                    <div className="space-y-1 col-span-2">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Work Directory</label>
-                                                        <input value={parseResult.computer.work_dir || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, work_dir: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Shebang</label>
+                                                        <input value={parseResult.computer.shebang || ""} onChange={(e) => updateComputer({ shebang: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
                                                     </div>
                                                     <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Transport Type</label>
-                                                        <input value={parseResult.computer.transport_type || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, transport_type: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Key File</label>
+                                                        <input value={parseResult.computer.key_filename || ""} onChange={(e) => updateComputer({ key_filename: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
                                                     </div>
                                                     <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Scheduler Type</label>
-                                                        <input value={parseResult.computer.scheduler_type || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, scheduler_type: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Command</label>
+                                                        <input value={parseResult.computer.proxy_command || ""} onChange={(e) => updateComputer({ proxy_command: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
                                                     </div>
-                                                    <div className="space-y-1 col-span-2">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Run Command</label>
-                                                        <input value={parseResult.computer.mpirun_command || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, mpirun_command: e.target.value } })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono text-zinc-600 dark:text-zinc-400" />
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Jump</label>
+                                                        <input value={parseResult.computer.proxy_jump || ""} onChange={(e) => updateComputer({ proxy_jump: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
                                                     </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Safe Interval</label>
+                                                        <input type="number" step="0.1" value={parseResult.computer.safe_interval ?? ""} onChange={(e) => updateComputer({ safe_interval: parseFloat(e.target.value) || 0 })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Connection Timeout</label>
+                                                        <input type="number" value={parseResult.computer.connection_timeout ?? ""} onChange={(e) => updateComputer({ connection_timeout: parseInt(e.target.value, 10) || 60 })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateComputer({ use_double_quotes: !parseResult.computer?.use_double_quotes })}
+                                                        className={cn(
+                                                            "flex items-center justify-between rounded-lg border px-3 py-2 text-sm transition-colors",
+                                                            parseResult.computer.use_double_quotes
+                                                                ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300"
+                                                                : "border-zinc-200 bg-white text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
+                                                        )}
+                                                    >
+                                                        <span className="text-[11px] font-semibold uppercase tracking-wider">Use Double Quotes</span>
+                                                        <span>{parseResult.computer.use_double_quotes ? "Enabled" : "Disabled"}</span>
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => updateComputer({ use_login_shell: parseResult.computer?.use_login_shell === false })}
+                                                        className={cn(
+                                                            "flex items-center justify-between rounded-lg border px-3 py-2 text-sm transition-colors",
+                                                            parseResult.computer.use_login_shell !== false
+                                                                ? "border-zinc-200 bg-white text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
+                                                                : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
+                                                        )}
+                                                    >
+                                                        <span className="text-[11px] font-semibold uppercase tracking-wider">Use Login Shell</span>
+                                                        <span>{parseResult.computer.use_login_shell !== false ? "Enabled" : "Disabled"}</span>
+                                                    </button>
                                                     <div className="space-y-1 col-span-2">
                                                         <label className="text-[10px] uppercase font-bold text-zinc-400">Prepend Text</label>
-                                                        <textarea value={parseResult.computer.prepend_text || ""} onChange={(e) => setParseResult({ ...parseResult, computer: { ...parseResult.computer, prepend_text: e.target.value } })} className="w-full h-24 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono whitespace-pre text-zinc-600 dark:text-zinc-400" />
+                                                        <textarea value={parseResult.computer.prepend_text || ""} onChange={(e) => updateComputer({ prepend_text: e.target.value })} className="w-full h-24 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono whitespace-pre text-zinc-600 dark:text-zinc-400" />
+                                                    </div>
+                                                    <div className="space-y-1 col-span-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Append Text</label>
+                                                        <textarea value={parseResult.computer.append_text || ""} onChange={(e) => updateComputer({ append_text: e.target.value })} className="w-full h-24 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono whitespace-pre text-zinc-600 dark:text-zinc-400" />
                                                     </div>
                                                 </div>
                                             )}
@@ -312,7 +504,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Target Plugin</label>
                                                     <input
                                                         value={parseResult.code.default_calc_job_plugin || ""}
-                                                        onChange={(e) => setParseResult({ ...parseResult, code: { ...parseResult.code, default_calc_job_plugin: e.target.value } })}
+                                                        onChange={(e) => updateCode({ default_calc_job_plugin: e.target.value })}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
                                                     />
                                                 </div>
@@ -320,7 +512,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Code Label</label>
                                                     <input
                                                         value={parseResult.code.label || ""}
-                                                        onChange={(e) => setParseResult({ ...parseResult, code: { ...parseResult.code, label: e.target.value } })}
+                                                        onChange={(e) => updateCode({ label: e.target.value })}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none"
                                                         placeholder="e.g., pw"
                                                     />
@@ -329,20 +521,30 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Remote Executable Path</label>
                                                     <input
                                                         value={parseResult.code.remote_abspath || ""}
-                                                        onChange={(e) => setParseResult({ ...parseResult, code: { ...parseResult.code, remote_abspath: e.target.value } })}
+                                                        onChange={(e) => updateCode({ remote_abspath: e.target.value })}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                    />
+                                                </div>
+                                                <div className="col-span-2 space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Code Prepend Text</label>
+                                                    <textarea
+                                                        value={parseResult.code.prepend_text || ""}
+                                                        onChange={(e) => updateCode({ prepend_text: e.target.value })}
+                                                        className="w-full h-20 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                    />
+                                                </div>
+                                                <div className="col-span-2 space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Code Append Text</label>
+                                                    <textarea
+                                                        value={parseResult.code.append_text || ""}
+                                                        onChange={(e) => updateCode({ append_text: e.target.value })}
+                                                        className="w-full h-20 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
                                                     />
                                                 </div>
                                             </div>
                                         </div>
                                     )}
                                 </div>
-                            ) : (
-                                <div className="flex flex-col items-center justify-center py-12 text-zinc-500">
-                                    <Settings2 className="h-12 w-12 opacity-20 mb-4" />
-                                    <p>No data parsed yet. Go to the "Drop & Paste" tab.</p>
-                                </div>
-                            )}
                         </div>
                     )}
 

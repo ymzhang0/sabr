@@ -602,6 +602,11 @@ def _extract_submission_inputs(draft: dict[str, Any]) -> dict[str, Any]:
             nested_inputs = unwrap(direct_inputs, depth + 1)
             return nested_inputs if isinstance(nested_inputs, dict) else direct_inputs
 
+        builder_inputs = node.get("builder_inputs")
+        if isinstance(builder_inputs, dict):
+            nested_builder_inputs = unwrap(builder_inputs, depth + 1)
+            return nested_builder_inputs if isinstance(nested_builder_inputs, dict) else builder_inputs
+
         for key in ("builder", "draft", "submission", "payload", "result"):
             nested = node.get(key)
             if not isinstance(nested, dict):
@@ -747,7 +752,7 @@ def _normalize_primary_input_field(label: str, value: Any) -> dict[str, Any] | N
         if display is None and pk is not None:
             display = f"PK #{pk}"
         if display is None:
-            display = json.dumps(value, ensure_ascii=True)
+            display = json.dumps(value, ensure_ascii=False)
         field["value"] = display
         if pk is not None:
             field["pk"] = pk
@@ -885,7 +890,7 @@ def _build_submission_draft_payload(
 def _format_submission_draft_tag(submission_draft: dict[str, Any]) -> str:
     return f"{SUBMISSION_DRAFT_PREFIX}\n" + json.dumps(
         submission_draft,
-        ensure_ascii=True,
+        ensure_ascii=False,
         indent=2,
     )
 

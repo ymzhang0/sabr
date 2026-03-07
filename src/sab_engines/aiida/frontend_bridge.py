@@ -14,9 +14,14 @@ def is_worker_connected() -> bool:
     return aiida_worker_client.is_connected
 
 
-def get_recent_processes(limit: int = 5) -> list[dict[str, Any]]:
+def get_recent_processes(limit: int = 5, *, root_only: bool = True) -> list[dict[str, Any]]:
     try:
-        payload = request_json_sync("GET", "/management/recent-processes", params={"limit": int(limit)}, timeout=6.0)
+        payload = request_json_sync(
+            "GET",
+            "/management/recent-processes",
+            params={"limit": int(limit), "root_only": bool(root_only)},
+            timeout=6.0,
+        )
     except (BridgeOfflineError, BridgeAPIError):
         return []
     except Exception:  # noqa: BLE001
@@ -111,8 +116,10 @@ def get_recent_nodes(
     limit: int = 15,
     group_label: str | None = None,
     node_type: str | None = None,
+    *,
+    root_only: bool = True,
 ) -> list[dict[str, Any]]:
-    params: dict[str, Any] = {"limit": int(limit)}
+    params: dict[str, Any] = {"limit": int(limit), "root_only": bool(root_only)}
     if group_label:
         params["group_label"] = group_label
     if node_type:

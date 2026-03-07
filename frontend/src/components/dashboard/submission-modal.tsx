@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Folder, Loader2
 import { type ReactNode, useCallback, useEffect, useMemo, useState, useRef } from "react";
 
 import { Button } from "@/components/ui/button";
+import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { cn } from "@/lib/utils";
 
 type SubmissionDraftPkMapEntry = {
@@ -622,6 +623,68 @@ function inferFieldKind(value: unknown): DraftFieldEditorKind {
   return "string";
 }
 
+function isNodeMetadataEnvelope(value: unknown): value is Record<string, unknown> {
+  const record = asRecord(value);
+  if (!record) {
+    return false;
+  }
+  const loweredKeys = new Set(
+    Object.keys(record)
+      .map((key) => key.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (loweredKeys.size === 0) {
+    return false;
+  }
+  if (loweredKeys.has("pk") || loweredKeys.has("uuid")) {
+    return true;
+  }
+  if (loweredKeys.has("type") && loweredKeys.has("value")) {
+    return true;
+  }
+  return loweredKeys.has("node_type") || loweredKeys.has("full_type");
+}
+
+function coerceNodeEnvelopeValue(value: unknown): unknown {
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+  for (const candidateKey of ["value", "payload", "label", "name", "full_label", "code", "family"]) {
+    const candidate = record[candidateKey];
+    if (candidate === null || candidate === undefined) {
+      continue;
+    }
+    if (typeof candidate === "string" && !candidate.trim()) {
+      continue;
+    }
+    return candidate;
+  }
+  return value;
+}
+
+function summarizeNodeMetadataEnvelope(value: unknown): string {
+  const record = asRecord(value);
+  if (!record) {
+    return "AiiDA node";
+  }
+  const label = typeof record.label === "string" && record.label.trim() ? record.label.trim() : "";
+  const type =
+    (typeof record.type === "string" && record.type.trim() ? record.type.trim() : "") ||
+    (typeof record.node_type === "string" && record.node_type.trim() ? record.node_type.trim() : "Node");
+  const pk = typeof record.pk === "number" && Number.isFinite(record.pk) ? Math.trunc(record.pk) : null;
+  if (label && pk !== null) {
+    return `${label} (#${pk})`;
+  }
+  if (label) {
+    return label;
+  }
+  if (pk !== null) {
+    return `${type} #${pk}`;
+  }
+  return `Unstored ${type}`;
+}
+
 function flattenInputPorts(payload: unknown, prefix = "", out: Record<string, unknown> = {}): Record<string, unknown> {
   if (Array.isArray(payload)) {
     if (prefix) {
@@ -644,6 +707,10 @@ function flattenInputPorts(payload: unknown, prefix = "", out: Record<string, un
       return;
     }
     const path = prefix ? `${prefix}.${cleanKey} ` : cleanKey;
+    if (isNodeMetadataEnvelope(value)) {
+      out[path] = coerceNodeEnvelopeValue(value);
+      return;
+    }
     if (asRecord(value)) {
       flattenInputPorts(value, path, out);
       return;
@@ -710,7 +777,11 @@ function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): Subm
       seen.add(normalizedPath);
       const entryRecord = asRecord(rawValue);
       const hasValueField = entryRecord && Object.prototype.hasOwnProperty.call(entryRecord, "value");
-      const entryValue = hasValueField ? entryRecord?.value : rawValue;
+      const entryValue = hasValueField
+        ? coerceNodeEnvelopeValue(entryRecord?.value)
+        : isNodeMetadataEnvelope(rawValue)
+          ? coerceNodeEnvelopeValue(rawValue)
+          : rawValue;
       const leaf = normalizedPath.toLowerCase().split(".").pop() ?? "";
       const isRecommended =
         (typeof entryRecord?.is_recommended === "boolean"
@@ -1579,6 +1650,10 @@ function parseDraftFieldEditorState(
   const errors: Record<string, string> = {};
 
   Object.entries(editors).forEach(([path, editor]) => {
+    if (!isFieldModified(editor)) {
+      return;
+    }
+
     if (editor.kind === "boolean") {
       valuesByPath[path] = Boolean(editor.value);
       return;
@@ -2742,6 +2817,17 @@ export function SubmissionModal({
         .slice(0, 80);
       const hasSelectableOptions = effectiveCodeOptions.length > 0;
       const hasCurrentOption = effectiveCodeOptions.some((option) => option.value === currentValue);
+      const codeSelectOptions = [
+        ...(!hasCurrentOption && currentValue
+          ? [{ value: currentValue, label: `Current: ${currentValue}` }]
+          : []),
+        ...filteredOptions.map((option) => ({
+          value: option.value,
+          label: option.plugin ? `${option.label} (${option.plugin})` : option.label,
+          description: option.plugin ? option.value : null,
+          keywords: [option.plugin ?? "", option.value],
+        })),
+      ];
 
       if (hasSelectableOptions) {
         return (
@@ -2768,31 +2854,28 @@ export function SubmissionModal({
               )}
               placeholder="Search available codes"
             />
-            <select
+            <CommandPaletteSelect
               value={currentValue}
-              onChange={(event) => updateDraftFieldValue(path, event.currentTarget.value)}
-              className={cn(
-                "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
-                compact ? "h-8" : "h-9",
+              options={codeSelectOptions}
+              placeholder={
+                submissionDraft?.meta.required_code_plugin
+                  ? `Select ${submissionDraft.meta.required_code_plugin} code`
+                  : "Select code label"
+              }
+              fallbackLabel={currentValue || undefined}
+              emptyLabel="No matching codes"
+              searchable={false}
+              ariaLabel={`Select code for ${path}`}
+              className="w-full"
+              triggerClassName={cn(
+                "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-xs",
+                compact && "min-h-8",
                 error
-                  ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
-                  : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
+                  ? "text-rose-700 hover:bg-rose-50/80 hover:text-rose-800 dark:text-rose-300 dark:hover:bg-rose-950/30 dark:hover:text-rose-200"
+                  : "text-slate-700 dark:text-slate-100",
               )}
-            >
-              {!hasCurrentOption && currentValue ? (
-                <option value={currentValue}>{`Current: ${currentValue} `}</option>
-              ) : null}
-              {filteredOptions.length === 0 ? (
-                <option value={currentValue} disabled>
-                  No matching codes
-                </option>
-              ) : null}
-              {filteredOptions.map((option) => (
-                <option key={`${turnId} -${path} -${option.value} `} value={option.value}>
-                  {option.plugin ? `${option.label} (${option.plugin})` : option.label}
-                </option>
-              ))}
-            </select>
+              onChange={(nextValue) => updateDraftFieldValue(path, nextValue)}
+            />
             {error ? (
               <p className="text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
             ) : null}
@@ -2896,6 +2979,53 @@ export function SubmissionModal({
     }
 
     if (field.kind === "json" || uiType === "dict") {
+      const rawEntryValue = entryValueByPath[path];
+      if (isNodeMetadataEnvelope(rawEntryValue) && coerceNodeEnvelopeValue(rawEntryValue) === rawEntryValue) {
+        return (
+          <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">
+            {summarizeNodeMetadataEnvelope(rawEntryValue)}
+          </span>
+        );
+      }
+      const descendantPaths = Object.keys(draftState)
+        .filter((candidatePath) => candidatePath.startsWith(`${path}.`) && candidatePath !== path)
+        .filter(
+          (candidatePath, _index, allPaths) => !allPaths.some((otherPath) => otherPath !== candidatePath && otherPath.startsWith(`${candidatePath}.`)),
+        )
+        .sort(sortPathsByDepth);
+      if (descendantPaths.length > 0) {
+        return (
+          <div className="min-w-0 rounded-md border border-slate-200/80 bg-slate-50/70 p-2 dark:border-slate-700 dark:bg-slate-900/40">
+            <div className="space-y-2">
+              {descendantPaths.map((descendantPath) => {
+                const relativePath = descendantPath.slice(path.length + 1) || descendantPath;
+                const descendantUiType = inferUiTypeFromPathAndValue(descendantPath, entryValueByPath[descendantPath]);
+                return (
+                  <div
+                    key={`${path} -property - ${descendantPath} `}
+                    className="grid grid-cols-[minmax(0,1fr)_minmax(180px,1.3fr)] items-start gap-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                        {formatSettingKey(relativePath.split(".").pop() ?? relativePath)}
+                      </p>
+                      <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={relativePath}>
+                        {relativePath}
+                      </p>
+                    </div>
+                    <div className="min-w-0">
+                      {renderEditableFieldControl(descendantPath, descendantUiType, true, {
+                        isCodeField: codeFieldPaths.has(descendantPath) || descendantPath.split(".").pop()?.toLowerCase() === "code",
+                        isInheritedCode: inheritedCodePaths.has(descendantPath),
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      }
       return (
         <div className="min-w-0">
           <button
@@ -3205,24 +3335,25 @@ export function SubmissionModal({
                       <span className="font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                         Apply To All
                       </span>
-                      <select
+                      <CommandPaletteSelect
                         value={globalOverridePath}
-                        onChange={(event) => {
-                          const nextPath = event.currentTarget.value;
+                        options={globalOverrideOptions.map((field) => ({
+                          value: field.path,
+                          label: field.label,
+                          keywords: [field.path],
+                        }))}
+                        ariaLabel="Select field to override for all jobs"
+                        searchable={globalOverrideOptions.length > 8}
+                        className="min-w-[220px]"
+                        triggerClassName="flex w-full items-center justify-between rounded-md px-1.5 py-1 text-xs text-slate-700 dark:text-slate-100"
+                        onChange={(nextPath) => {
                           setGlobalOverridePath(nextPath);
                           const field = draftState[nextPath];
                           if (field) {
                             setGlobalOverrideValue(String(field.value));
                           }
                         }}
-                        className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                      >
-                        {globalOverrideOptions.map((field) => (
-                          <option key={`${turnId} -override - ${field.path} `} value={field.path}>
-                            {field.label}
-                          </option>
-                        ))}
-                      </select>
+                      />
                       {draftState[globalOverridePath]?.kind === "boolean" ? (
                         <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
                           <input

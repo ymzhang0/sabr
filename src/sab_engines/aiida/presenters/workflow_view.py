@@ -147,6 +147,9 @@ def _flatten_input_ports(payload: Any, *, prefix: str = "", out: dict[str, Any] 
             if not key_text:
                 continue
             path = f"{prefix}.{key_text}" if prefix else key_text
+            if _is_node_metadata_envelope(value):
+                flattened[path] = _coerce_node_envelope_value(value)
+                continue
             if isinstance(value, dict):
                 _flatten_input_ports(value, prefix=path, out=flattened)
                 continue
@@ -156,6 +159,46 @@ def _flatten_input_ports(payload: Any, *, prefix: str = "", out: dict[str, Any] 
     if prefix:
         flattened[prefix] = payload
     return flattened
+
+
+def _is_node_metadata_envelope(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    lowered_keys = {str(key).strip().lower() for key in value.keys() if str(key).strip()}
+    if not lowered_keys:
+        return False
+    if {"pk", "uuid"} & lowered_keys:
+        return True
+    if "type" in lowered_keys and "value" in lowered_keys:
+        return True
+    return bool({"node_type", "full_type"} & lowered_keys)
+
+
+def _coerce_node_envelope_value(value: dict[str, Any]) -> Any:
+    for candidate_key in ("value", "payload", "label", "name", "full_label", "code", "family"):
+        if candidate_key not in value:
+            continue
+        candidate = value.get(candidate_key)
+        if candidate is None:
+            continue
+        if isinstance(candidate, str) and not candidate.strip():
+            continue
+        return candidate
+    return value
+
+
+def _merge_builder_inputs_into_inputs(inputs: dict[str, Any], builder_inputs: dict[str, Any]) -> dict[str, Any]:
+    for key, builder_value in list(builder_inputs.items()):
+        current_value = inputs.get(key, None)
+        if isinstance(current_value, dict) and isinstance(builder_value, dict):
+            if _is_node_metadata_envelope(current_value) and not _is_node_metadata_envelope(builder_value):
+                inputs[key] = builder_value
+                continue
+            _merge_builder_inputs_into_inputs(current_value, builder_value)
+            continue
+        if key not in inputs or current_value is None or _is_node_metadata_envelope(current_value):
+            inputs[key] = builder_value
+    return inputs
 
 
 def _build_all_inputs(
@@ -703,12 +746,25 @@ def _extract_declared_code_plugin(value: Any) -> str | None:
     return None
 
 
+def _infer_code_plugin_from_entry_point(entry_point: Any) -> str | None:
+    if not isinstance(entry_point, str):
+        return None
+    cleaned = entry_point.strip()
+    if not cleaned:
+        return None
+    if ":" in cleaned:
+        cleaned = cleaned.split(":", 1)[1].strip()
+    segments = [segment.strip() for segment in cleaned.split(".") if segment.strip()]
+    if len(segments) < 3:
+        return None
+    return ".".join(segments[:2])
+
+
 def _resolve_required_code_plugin(
     entry_points: list[str],
     inputs: dict[str, Any],
     port_spec: dict[str, Any] | None,
 ) -> str | None:
-    del entry_points
     candidates: list[str] = []
     seen: set[str] = set()
     flattened = _flatten_input_ports(inputs)
@@ -733,6 +789,16 @@ def _resolve_required_code_plugin(
         if plugin and normalized not in seen:
             seen.add(normalized)
             candidates.append(plugin)
+    if candidates:
+        return candidates[0]
+
+    for entry_point in [*entry_points, port_spec.get("entry_point") if isinstance(port_spec, dict) else None]:
+        plugin = _infer_code_plugin_from_entry_point(entry_point)
+        normalized = _normalize_key(plugin)
+        if plugin and normalized not in seen:
+            seen.add(normalized)
+            candidates.append(plugin)
+
     if candidates:
         return candidates[0]
     return None
@@ -1293,9 +1359,7 @@ def enrich_submission_draft_payload(submission_draft: dict[str, Any]) -> dict[st
         builder_inputs = meta["draft"]["builder_inputs"]
         
     if builder_inputs:
-        for k, v in list(builder_inputs.items()):
-            if k not in inputs or inputs[k] is None:
-                inputs[k] = v
+        _merge_builder_inputs_into_inputs(inputs, builder_inputs)
         payload["inputs"] = inputs
 
     recommended_inputs = _as_dict(payload.get("recommended_inputs"))

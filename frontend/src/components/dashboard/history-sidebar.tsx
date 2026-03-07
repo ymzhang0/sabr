@@ -1,7 +1,8 @@
-import { ChevronDown, ChevronRight, FolderOpen, Layers3, Moon, Plus, Search, Sun, Tag } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, FolderOpen, Layers3, Moon, Plus, Search, Sparkles, Sun, Tag } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { Panel } from "@/components/ui/panel";
 import { cn } from "@/lib/utils";
 import type {
@@ -23,9 +24,12 @@ type HistorySidebarProps = {
   onToggleTheme: () => void;
   onActivateSession: (sessionId: string) => void;
   onUpdateSessionTags: (sessionId: string, tags: string[]) => void;
+  onRenameSession: (sessionId: string, title: string) => void;
   onCreateProject: (payload: { name: string; rootPath: string }) => void;
   onOpenWorkspace: (sessionId: string) => void;
 };
+
+const DEFAULT_SESSION_TITLE = "New Conversation";
 
 function formatSessionTime(value: string): string {
   const parsed = new Date(value);
@@ -61,6 +65,7 @@ export function HistorySidebar({
   onToggleTheme,
   onActivateSession,
   onUpdateSessionTags,
+  onRenameSession,
   onCreateProject,
   onOpenWorkspace,
 }: HistorySidebarProps) {
@@ -71,6 +76,9 @@ export function HistorySidebar({
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const renameModeRef = useRef<"commit" | "cancel">("commit");
 
   useEffect(() => {
     if (!activeProjectId) {
@@ -78,6 +86,17 @@ export function HistorySidebar({
     }
     setExpandedProjects((current) => ({ ...current, [activeProjectId]: true }));
   }, [activeProjectId]);
+
+  useEffect(() => {
+    if (!renamingSessionId) {
+      return;
+    }
+    const exists = sessions.some((session) => session.id === renamingSessionId);
+    if (!exists) {
+      setRenamingSessionId(null);
+      setRenameDraft("");
+    }
+  }, [renamingSessionId, sessions]);
 
   const availableTags = useMemo(
     () =>
@@ -147,8 +166,46 @@ export function HistorySidebar({
     setIsProjectFormOpen(false);
   };
 
+  const tagFilterOptions = useMemo(
+    () => [
+      { value: "all", label: "All Tags" },
+      ...availableTags.map((tag) => ({
+        value: tag,
+        label: tag,
+        keywords: [tag.replace(/^#/, "")],
+      })),
+    ],
+    [availableTags],
+  );
+
+  const beginRenameSession = (session: ChatSessionSummary) => {
+    renameModeRef.current = "commit";
+    setRenamingSessionId(session.id);
+    setRenameDraft(session.title === DEFAULT_SESSION_TITLE ? "" : session.title);
+  };
+
+  const cancelRenameSession = () => {
+    renameModeRef.current = "cancel";
+    setRenamingSessionId(null);
+    setRenameDraft("");
+  };
+
+  const commitRenameSession = () => {
+    if (renameModeRef.current === "cancel") {
+      renameModeRef.current = "commit";
+      return;
+    }
+    if (!renamingSessionId) {
+      return;
+    }
+    onRenameSession(renamingSessionId, renameDraft.trim());
+    setRenamingSessionId(null);
+    setRenameDraft("");
+    renameModeRef.current = "commit";
+  };
+
   return (
-    <aside className="flex h-full min-h-0 w-full flex-col gap-2 p-3 font-sans tracking-tight">
+    <aside className="flex h-full min-h-0 w-full flex-col gap-2 font-sans tracking-tight">
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Projects</h1>
@@ -175,18 +232,16 @@ export function HistorySidebar({
           </div>
 
           <div className="flex items-center gap-2">
-            <select
-              className="h-9 flex-1 rounded-lg border border-zinc-200/65 bg-zinc-50/70 px-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:focus:border-zinc-600"
+            <CommandPaletteSelect
               value={tagFilter}
-              onChange={(event) => setTagFilter(event.target.value)}
-            >
-              <option value="all">All Tags</option>
-              {availableTags.map((tag) => (
-                <option key={tag} value={tag}>
-                  {tag}
-                </option>
-              ))}
-            </select>
+              options={tagFilterOptions}
+              label="Tag"
+              ariaLabel="Filter by tag"
+              searchable={availableTags.length > 6}
+              className="flex-1"
+              triggerClassName="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-sm"
+              onChange={setTagFilter}
+            />
             <Button
               variant={isProjectFormOpen ? "outline" : "default"}
               className="h-9 rounded-lg px-3"
@@ -321,21 +376,83 @@ export function HistorySidebar({
                       ) : (
                         groupSessions.map((session) => {
                           const isActive = session.id === activeSessionId;
+                          const isRenaming = session.id === renamingSessionId;
+                          const isTitlePending = session.title_state === "pending";
+                          const showPendingSkeleton = isTitlePending && session.title === DEFAULT_SESSION_TITLE;
                           return (
-                            <button
+                            <div
                               key={session.id}
-                              type="button"
-                              onClick={() => onActivateSession(session.id)}
-                              disabled={isBusy || isActive}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => {
+                                if (isRenaming || isBusy || isActive) {
+                                  return;
+                                }
+                                onActivateSession(session.id);
+                              }}
+                              onKeyDown={(event) => {
+                                if (isRenaming || isBusy || isActive) {
+                                  return;
+                                }
+                                if (event.key === "Enter" || event.key === " ") {
+                                  event.preventDefault();
+                                  onActivateSession(session.id);
+                                }
+                              }}
                               className={cn(
                                 "w-full rounded-2xl border px-3 py-3 text-left transition-all",
+                                "cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-300 dark:focus:ring-zinc-700",
                                 "border-zinc-200/75 bg-zinc-50/70 hover:border-zinc-300/85 hover:bg-white/90 dark:border-zinc-800/80 dark:bg-zinc-950/35 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/65",
                                 isActive && "border-zinc-300 bg-zinc-100 shadow-[0_10px_28px_-22px_rgba(15,23,42,0.7)] dark:border-zinc-700 dark:bg-zinc-800/65",
                               )}
                             >
                               <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
-                                  <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{session.title}</p>
+                                  <div
+                                    className="min-w-0"
+                                    onDoubleClick={(event) => {
+                                      event.stopPropagation();
+                                      beginRenameSession(session);
+                                    }}
+                                  >
+                                    {isRenaming ? (
+                                      <input
+                                        autoFocus
+                                        type="text"
+                                        value={renameDraft}
+                                        onChange={(event) => setRenameDraft(event.target.value)}
+                                        onClick={(event) => event.stopPropagation()}
+                                        onBlur={commitRenameSession}
+                                        onKeyDown={(event) => {
+                                          event.stopPropagation();
+                                          if (event.key === "Enter") {
+                                            event.preventDefault();
+                                            event.currentTarget.blur();
+                                          }
+                                          if (event.key === "Escape") {
+                                            event.preventDefault();
+                                            cancelRenameSession();
+                                          }
+                                        }}
+                                        className="h-8 w-full rounded-lg border border-zinc-300 bg-white px-2 text-sm font-semibold text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-500"
+                                        placeholder="Rename session"
+                                      />
+                                    ) : showPendingSkeleton ? (
+                                      <div className="flex items-center gap-2">
+                                        <Sparkles className="h-3.5 w-3.5 shrink-0 animate-pulse text-amber-500" />
+                                        <div className="h-3 w-24 rounded-full bg-zinc-200/90 dark:bg-zinc-700/80" />
+                                      </div>
+                                    ) : (
+                                      <div className="flex items-center gap-2">
+                                        {isTitlePending ? (
+                                          <Sparkles className="h-3.5 w-3.5 shrink-0 animate-pulse text-amber-500" />
+                                        ) : null}
+                                        <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                                          {session.title}
+                                        </p>
+                                      </div>
+                                    )}
+                                  </div>
                                   <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{formatSessionTime(session.updated_at)}</p>
                                 </div>
                                 <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -365,7 +482,7 @@ export function HistorySidebar({
                                   </span>
                                 ))}
                               </div>
-                            </button>
+                            </div>
                           );
                         })
                       )}

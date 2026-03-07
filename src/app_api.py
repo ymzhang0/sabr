@@ -6,10 +6,11 @@ from contextlib import asynccontextmanager
 
 from loguru import logger
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event, setup_logging
 
@@ -28,6 +29,10 @@ state = {}
 # Dynamic hub registry.
 ACTIVE_HUBS = []
 DEFAULT_ENGINE = "aiida"
+
+
+class SessionTitleUpdateRequest(BaseModel):
+    title: str | None = None
 
 
 def _configure_proxy_environment() -> None:
@@ -198,6 +203,30 @@ mount_engine(app, "aiida")
 @app.get("/api/health")
 async def healthcheck():
     return {"status": "ok"}
+
+
+@app.put("/api/sessions/{session_id}/title")
+async def update_session_title(session_id: str, payload: SessionTitleUpdateRequest):
+    from src.sab_engines.aiida.chat import (
+        get_active_chat_project_id,
+        get_active_chat_session_id,
+        get_chat_snapshot,
+        list_chat_projects,
+        update_chat_session,
+    )
+
+    state = app.state
+    session = update_chat_session(state, session_id, title=payload.title)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {
+        "session": session,
+        "chat": get_chat_snapshot(state),
+        "active_session_id": get_active_chat_session_id(state),
+        "active_project_id": get_active_chat_project_id(state),
+        "projects": list_chat_projects(state),
+        "version": int(getattr(state, "chat_sessions_version", 0)),
+    }
 
 
 @app.get("/api/specializations/active")

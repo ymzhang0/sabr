@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.sab_engines.aiida import router as aiida_router
+from src.sab_engines.aiida.presenters import node_view as aiida_node_view
 from src.sab_engines.aiida.router import (
     _coerce_chat_metadata,
     _extract_folder_preview,
@@ -140,7 +141,7 @@ def test_attach_tree_links_sets_inputs_and_outputs_on_each_tree_node() -> None:
     }
     root_inputs = [{"link_label": "structure", "node_type": "StructureData", "pk": 5}]
     links_by_pk = {
-        11: (root_inputs, [], [], []),
+        11: (root_inputs, [], None, None),
     }
 
     aiida_router._attach_tree_links(tree, links_by_pk)
@@ -153,6 +154,47 @@ def test_attach_tree_links_sets_inputs_and_outputs_on_each_tree_node() -> None:
     assert tree["children"]["child"]["outputs"] == {}
 
 
+def test_attach_tree_links_prefers_direct_links_for_tree_nodes() -> None:
+    tree = {
+        "pk": 11,
+        "children": {},
+    }
+    verbose_inputs = [{"link_label": "structure", "node_type": "StructureData", "pk": 5}]
+    direct_inputs = [{"link_label": "structure", "node_type": "StructureData", "pk": 7}]
+    direct_outputs = [{"link_label": "remote_folder", "node_type": "RemoteData", "pk": 9}]
+    links_by_pk = {
+        11: (verbose_inputs, [], direct_inputs, direct_outputs),
+    }
+
+    aiida_router._attach_tree_links(tree, links_by_pk)
+
+    assert tree["inputs"] == {
+        "structure": {"link_label": "structure", "node_type": "StructureData", "pk": 7}
+    }
+    assert tree["direct_inputs"] == tree["inputs"]
+    assert tree["outputs"] == {
+        "remote_folder": {"link_label": "remote_folder", "node_type": "RemoteData", "pk": 9}
+    }
+    assert tree["direct_outputs"] == tree["outputs"]
+
+
+def test_extract_preview_for_node_type_prefers_embedded_preview_info() -> None:
+    payload = {
+        "preview_info": {
+            "formula": "Si2",
+            "atom_count": 2,
+        },
+        "path": "/remote/workdir",
+    }
+
+    preview = aiida_node_view._extract_preview_for_node_type("StructureData", payload)
+
+    assert preview == {
+        "formula": "Si2",
+        "atom_count": 2,
+    }
+
+
 @pytest.mark.anyio
 async def test_enrich_process_detail_payload_always_exposes_link_arrays() -> None:
     payload = {"summary": {"pk": None}}
@@ -161,6 +203,32 @@ async def test_enrich_process_detail_payload_always_exposes_link_arrays() -> Non
 
     assert enriched["inputs"] == {}
     assert enriched["outputs"] == {}
+
+
+@pytest.mark.anyio
+async def test_frontend_processes_defaults_to_root_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_get_frontend_nodes(**kwargs: object) -> list[dict[str, object]]:
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(aiida_router, "_get_frontend_nodes", _fake_get_frontend_nodes)
+
+    response = await aiida_router.frontend_processes(
+        limit=15,
+        group_label=None,
+        node_type=None,
+        root_only=True,
+    )
+
+    assert response == {"items": []}
+    assert captured == {
+        "limit": 15,
+        "group_label": None,
+        "node_type": None,
+        "root_only": True,
+    }
 
 
 def test_clear_pending_submission_memory_sets_none() -> None:
@@ -223,13 +291,28 @@ async def test_frontend_active_specializations_normalizes_query_values(
 
 @pytest.mark.anyio
 async def test_submit_bridge_workchain_single_adds_submitted_pk(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def _fake_request_json(method: str, path: str, json: dict[str, object]):  # noqa: ARG001
+    async def _fake_auto_assign_submission_groups(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def _fake_request_json(
+        method: str,
+        path: str,
+        json: dict[str, object],
+        headers: dict[str, str] | None = None,
+    ):  # noqa: ARG001
         assert method == "POST"
         assert path == "/submission/submit"
         assert "draft" in json
+        assert headers == {"X-SABR-Session-Id": "chat-0307"}
         return {"status": "SUBMITTED", "pk": 321}
 
     monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+    monkeypatch.setattr(
+        aiida_router,
+        "_build_submission_request_headers",
+        lambda _state: {"X-SABR-Session-Id": "chat-0307"},
+    )
+    monkeypatch.setattr(aiida_router, "_auto_assign_submission_groups", _fake_auto_assign_submission_groups)
 
     captured: dict[str, object] = {}
 
@@ -253,16 +336,31 @@ async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch:
     submitted = [901, 902, 903]
     call_count = 0
 
-    async def _fake_request_json(method: str, path: str, json: dict[str, object]):  # noqa: ARG001
+    async def _fake_auto_assign_submission_groups(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def _fake_request_json(
+        method: str,
+        path: str,
+        json: dict[str, object],
+        headers: dict[str, str] | None = None,
+    ):  # noqa: ARG001
         nonlocal call_count
         assert method == "POST"
         assert path == "/submission/submit"
         assert "draft" in json
+        assert headers == {"X-SABR-Session-Id": "chat-0307"}
         pk = submitted[call_count]
         call_count += 1
         return {"status": "SUBMITTED", "pk": pk}
 
     monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+    monkeypatch.setattr(
+        aiida_router,
+        "_build_submission_request_headers",
+        lambda _state: {"X-SABR-Session-Id": "chat-0307"},
+    )
+    monkeypatch.setattr(aiida_router, "_auto_assign_submission_groups", _fake_auto_assign_submission_groups)
 
     captured: dict[str, object] = {}
 
@@ -288,6 +386,79 @@ async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch:
     assert response["failures"] == []
     assert len(response["responses"]) == 3
     assert captured[aiida_router.PENDING_SUBMISSION_KEY] is None
+
+
+def test_build_active_submission_group_labels_uses_session_detail(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(aiida_router, "get_active_chat_session_id", lambda _state: "chat-0307")
+    monkeypatch.setattr(
+        aiida_router,
+        "get_chat_session_detail",
+        lambda _state, _session_id: {
+            "project_group_label": "Si_Research",
+            "session_group_label": "Si_Research/chat-0307",
+        },
+    )
+
+    labels = aiida_router._build_active_submission_group_labels(SimpleNamespace())
+
+    assert labels == {
+        "project": "Si_Research",
+        "session": "Si_Research/chat-0307",
+    }
+
+
+@pytest.mark.anyio
+async def test_auto_assign_submission_groups_creates_missing_groups_and_adds_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_labels: list[str] = []
+    assigned_calls: list[tuple[int, list[int]]] = []
+    groups = [
+        {
+            "pk": 10,
+            "label": "Si_Research",
+            "count": 3,
+        }
+    ]
+
+    monkeypatch.setattr(
+        aiida_router,
+        "_build_active_submission_group_labels",
+        lambda _state: {
+            "project": "Si_Research",
+            "session": "Si_Research/chat-0307",
+        },
+    )
+    monkeypatch.setattr(aiida_router, "list_groups", lambda: list(groups))
+
+    def _fake_create_group(label: str) -> dict[str, object]:
+        created_labels.append(label)
+        item = {
+            "pk": 11,
+            "label": label,
+            "count": 0,
+        }
+        groups.append(item)
+        return {"item": item}
+
+    monkeypatch.setattr(aiida_router, "create_group", _fake_create_group)
+    monkeypatch.setattr(
+        aiida_router,
+        "add_nodes_to_group",
+        lambda pk, node_pks: assigned_calls.append((pk, node_pks)) or {"group": {"pk": pk}, "added": node_pks},
+    )
+
+    labels = await aiida_router._auto_assign_submission_groups(SimpleNamespace(), [903, 901, 901])
+
+    assert labels == {
+        "project": "Si_Research",
+        "session": "Si_Research/chat-0307",
+    }
+    assert created_labels == ["Si_Research/chat-0307"]
+    assert assigned_calls == [
+        (10, [901, 903]),
+        (11, [901, 903]),
+    ]
 
 
 @pytest.mark.anyio
@@ -386,6 +557,103 @@ async def test_frontend_node_script_falls_back_to_node_summary_when_worker_route
     assert response.pk == 77
     assert response.node_type == "Dict"
     assert "ecutwfc" in response.script
+
+
+@pytest.mark.anyio
+async def test_worker_repository_files_proxies_worker_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_request_json(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        assert method == "GET"
+        assert path == "/data/repository/314/files"
+        assert kwargs.get("params") == {"source": "folder"}
+        return {"pk": 314, "files": ["aiida.out", "_scheduler-stderr.txt"], "source": "folder"}
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    response = await aiida_router.worker_repository_files(314, source="folder")
+
+    assert response["pk"] == 314
+    assert response["files"] == ["aiida.out", "_scheduler-stderr.txt"]
+
+
+@pytest.mark.anyio
+async def test_worker_remote_files_proxies_worker_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_request_json(method: str, path: str, **_kwargs: object) -> dict[str, object]:
+        assert method == "GET"
+        assert path == "/data/remote/280/files"
+        return {"pk": 280, "files": ["aiida.out"]}
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    response = await aiida_router.worker_remote_files(280)
+
+    assert response == {"pk": 280, "files": ["aiida.out"]}
+
+
+@pytest.mark.anyio
+async def test_worker_bands_data_proxies_worker_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = {
+        "pk": 335,
+        "data": {
+            "paths": [{"x": [0.0, 1.0], "values": [[-1.0, 0.5]]}],
+            "tick_pos": [0.0, 1.0],
+            "tick_labels": ["G", "X"],
+        },
+    }
+
+    async def _fake_request_json(method: str, path: str, **_kwargs: object) -> dict[str, object]:
+        assert method == "GET"
+        assert path == "/data/bands/335"
+        return expected
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    response = await aiida_router.worker_bands_data(335)
+
+    assert response == expected
+
+
+@pytest.mark.anyio
+async def test_export_management_computer_proxies_worker_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = {
+        "kind": "computer",
+        "label": "localhost",
+        "filename": "localhost-setup.yaml",
+        "format": "yaml",
+        "content": "label: localhost\nhostname: localhost\n",
+    }
+
+    async def _fake_request_json(method: str, path: str, **_: object) -> dict[str, object]:
+        assert method == "GET"
+        assert path == "/management/infrastructure/computer/pk/7/export"
+        return expected
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    response = await aiida_router.export_management_computer(7)
+
+    assert response.model_dump() == expected
+
+
+@pytest.mark.anyio
+async def test_export_management_code_proxies_worker_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = {
+        "kind": "code",
+        "label": "pw-7.5",
+        "filename": "pw-7.5@localhost.yaml",
+        "format": "yaml",
+        "content": "label: pw-7.5\ncomputer: localhost\n",
+    }
+
+    async def _fake_request_json(method: str, path: str, **_: object) -> dict[str, object]:
+        assert method == "GET"
+        assert path == "/management/infrastructure/code/42/export"
+        return expected
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    response = await aiida_router.export_management_code(42)
+
+    assert response.model_dump() == expected
 
 
 @pytest.mark.anyio

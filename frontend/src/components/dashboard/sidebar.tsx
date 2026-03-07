@@ -29,11 +29,11 @@ import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
 import { cn } from "@/lib/utils";
-import { getInfrastructure, getNodeScript } from "@/lib/api";
+import { exportCodeConfig, exportComputerConfig, getInfrastructure, getNodeScript } from "@/lib/api";
 import { QuickAddModal } from "@/components/dashboard/quick-add-modal";
 import { CodeSetupModal } from "@/components/dashboard/code-setup-modal";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { GroupItem, ProcessItem, InfrastructureComputer } from "@/types/aiida";
+import type { GroupItem, ProcessItem, InfrastructureComputer, InfrastructureExportResponse } from "@/types/aiida";
 import { DataImportModal } from "@/components/dashboard/data-import-modal";
 
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
@@ -82,6 +82,16 @@ type ManualCopyState = {
   title: string;
   description: string;
   text: string;
+};
+
+type InfrastructureContextMenuTarget = {
+  x: number;
+  y: number;
+};
+
+type MenuDimensions = {
+  width: number;
+  height: number;
 };
 
 type ContextMenuPosition = {
@@ -157,16 +167,27 @@ async function copyTextWithFallback(text: string): Promise<boolean> {
   return false;
 }
 
-function clampMenuPosition(x: number, y: number): ContextMenuPosition {
+function downloadTextFile(filename: string, content: string, mimeType = "text/plain;charset=utf-8"): void {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  document.body.removeChild(anchor);
+  URL.revokeObjectURL(url);
+}
+
+function clampMenuPosition(x: number, y: number, dimensions: MenuDimensions = { width: 196, height: 240 }): ContextMenuPosition {
   if (typeof window === "undefined") {
     return { x, y };
   }
-  const menuWidth = 196;
-  const menuHeight = 240;
   const margin = 12;
+  const cursorOffset = 8;
   return {
-    x: Math.max(margin, Math.min(x, window.innerWidth - menuWidth - margin)),
-    y: Math.max(margin, Math.min(y, window.innerHeight - menuHeight - margin)),
+    x: Math.max(margin, Math.min(x + cursorOffset, window.innerWidth - dimensions.width - margin)),
+    y: Math.max(margin, Math.min(y + cursorOffset, window.innerHeight - dimensions.height - margin)),
   };
 }
 
@@ -495,12 +516,17 @@ function getNodeMetadata(process: ProcessItem): NodeMetadata {
 type SidebarProps = {
   processes: ProcessItem[];
   groups: GroupItem[];
-  selectedGroup: string;
+  selectedGroupLabel: string | null;
+  isAllGroupsSelected: boolean;
+  isCurrentContextSelected: boolean;
+  currentContextGroupLabel: string | null;
   processLimit: number;
   contextNodeIds: number[];
   isUpdatingProcessLimit: boolean;
   isDarkMode: boolean;
   onToggleTheme: () => void;
+  onSelectAllGroups: () => void;
+  onSelectCurrentContext: () => void;
   onGroupChange: (groupLabel: string) => void;
   nodeTypeFilter: "all" | "structures" | "tasks" | "failed";
   onNodeTypeFilterChange: (type: "all" | "structures" | "tasks" | "failed") => void;
@@ -520,12 +546,17 @@ type SidebarProps = {
 export function Sidebar({
   processes,
   groups,
-  selectedGroup,
+  selectedGroupLabel,
+  isAllGroupsSelected,
+  isCurrentContextSelected,
+  currentContextGroupLabel,
   processLimit,
   contextNodeIds,
   isUpdatingProcessLimit,
   isDarkMode,
   onToggleTheme,
+  onSelectAllGroups,
+  onSelectCurrentContext,
   onGroupChange,
   nodeTypeFilter,
   onNodeTypeFilterChange,
@@ -546,7 +577,8 @@ export function Sidebar({
   const [selectedNodePks, setSelectedNodePks] = useState<Set<number>>(new Set());
   const [contextMenuNode, setContextMenuNode] = useState<{ pk: number; x: number; y: number } | null>(null);
   const [contextMenuGroup, setContextMenuGroup] = useState<{ pk: number; x: number; y: number } | null>(null);
-  const [contextMenuComputer, setContextMenuComputer] = useState<{ pk: number; label: string; x: number; y: number } | null>(null);
+  const [contextMenuComputer, setContextMenuComputer] = useState<({ pk: number; label: string } & InfrastructureContextMenuTarget) | null>(null);
+  const [contextMenuCode, setContextMenuCode] = useState<({ pk: number; label: string; computerLabel: string } & InfrastructureContextMenuTarget) | null>(null);
 
   const [isSwitchingProfile, setIsSwitchingProfile] = useState(false);
   const switchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -577,6 +609,8 @@ export function Sidebar({
   const [manualCopyState, setManualCopyState] = useState<ManualCopyState | null>(null);
   const nodeMenuRef = useRef<HTMLDivElement | null>(null);
   const groupMenuRef = useRef<HTMLDivElement | null>(null);
+  const computerMenuRef = useRef<HTMLDivElement | null>(null);
+  const codeMenuRef = useRef<HTMLDivElement | null>(null);
   const manualCopyTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const [isDataImportOpen, setIsDataImportOpen] = useState(false);
@@ -724,6 +758,38 @@ export function Sidebar({
     }
   }, [openManualCopyDialog]);
 
+  const handleInfrastructureExport = useCallback(async (payload: InfrastructureExportResponse, title: string) => {
+    try {
+      downloadTextFile(payload.filename, payload.content, "application/x-yaml;charset=utf-8");
+    } catch {
+      openManualCopyDialog(
+        title,
+        "Automatic download failed in this browser context. Copy the exported configuration manually below.",
+        payload.content,
+      );
+    }
+  }, [openManualCopyDialog]);
+
+  const handleExportComputer = useCallback(async (computerPk: number, computerLabel: string) => {
+    try {
+      const payload = await exportComputerConfig(computerPk);
+      await handleInfrastructureExport(payload, `Export computer ${computerLabel}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Failed to export computer ${computerLabel}.`;
+      window.alert(message);
+    }
+  }, [handleInfrastructureExport]);
+
+  const handleExportCode = useCallback(async (codePk: number, codeLabel: string) => {
+    try {
+      const payload = await exportCodeConfig(codePk);
+      await handleInfrastructureExport(payload, `Export code ${codeLabel}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Failed to export code ${codeLabel}.`;
+      window.alert(message);
+    }
+  }, [handleInfrastructureExport]);
+
   useEffect(() => {
     if (!manualCopyState || !manualCopyTextareaRef.current) {
       return;
@@ -742,13 +808,16 @@ export function Sidebar({
       const target = event.target;
       if (
         (nodeMenuRef.current && target instanceof Node && nodeMenuRef.current.contains(target)) ||
-        (groupMenuRef.current && target instanceof Node && groupMenuRef.current.contains(target))
+        (groupMenuRef.current && target instanceof Node && groupMenuRef.current.contains(target)) ||
+        (computerMenuRef.current && target instanceof Node && computerMenuRef.current.contains(target)) ||
+        (codeMenuRef.current && target instanceof Node && codeMenuRef.current.contains(target))
       ) {
         return;
       }
       setContextMenuNode(null);
       setContextMenuGroup(null);
       setContextMenuComputer(null);
+      setContextMenuCode(null);
     };
     window.addEventListener("mousedown", handlePointerDown);
     return () => window.removeEventListener("mousedown", handlePointerDown);
@@ -762,11 +831,17 @@ export function Sidebar({
       setContextMenuNode(null);
       setContextMenuGroup(null);
       setContextMenuComputer(null);
+      setContextMenuCode(null);
       setManualCopyState(null);
     };
     window.addEventListener("keydown", handleEscape);
     return () => window.removeEventListener("keydown", handleEscape);
   }, []);
+
+  const currentContextGroup = useMemo(
+    () => groups.find((group) => group.label === currentContextGroupLabel) ?? null,
+    [currentContextGroupLabel, groups],
+  );
 
   const groupTree = useMemo(() => {
     const root: Record<string, any> = { children: {}, group: null, path: "" };
@@ -808,7 +883,7 @@ export function Sidebar({
             const isExpanded = expandedFolders.has(child.path);
             const hasChildren = Object.keys(child.children).length > 0;
             const group = child.group;
-            const isSelected = group && selectedGroup === group.label;
+            const isSelected = group && selectedGroupLabel === group.label;
 
             return (
               <div key={child.path} className="flex flex-col">
@@ -831,7 +906,7 @@ export function Sidebar({
                   onContextMenu={(e) => {
                     if (group) {
                       e.preventDefault();
-                      setContextMenuGroup({ pk: group.pk, x: e.pageX, y: e.pageY });
+                      setContextMenuGroup({ pk: group.pk, ...clampMenuPosition(e.clientX, e.clientY, { width: 176, height: 120 }) });
                     }
                   }}
                   style={{ paddingLeft: `${level * 12 + 8}px` }}
@@ -908,7 +983,12 @@ export function Sidebar({
                 onClick={(e) => toggleComputer(computer.pk, e)}
                 onContextMenu={(e) => {
                   e.preventDefault();
-                  setContextMenuComputer({ pk: computer.pk, label: computer.label, x: e.pageX, y: e.pageY });
+                  setContextMenuComputer({
+                    pk: computer.pk,
+                    label: computer.label,
+                    ...clampMenuPosition(e.clientX, e.clientY, { width: 180, height: 96 }),
+                  });
+                  setContextMenuCode(null);
                 }}
                 className="group flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
               >
@@ -935,6 +1015,17 @@ export function Sidebar({
                   {computer.codes.map((code) => (
                     <div
                       key={code.pk}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setContextMenuComputer(null);
+                        setContextMenuCode({
+                          pk: code.pk,
+                          label: code.label,
+                          computerLabel: computer.label,
+                          ...clampMenuPosition(e.clientX, e.clientY, { width: 180, height: 96 }),
+                        });
+                      }}
                       className="flex items-center gap-2 rounded-md px-3 py-1 text-xs text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100/30 dark:hover:bg-zinc-800/20"
                     >
                       <Code2 className="h-3.5 w-3.5 shrink-0" />
@@ -1019,44 +1110,85 @@ export function Sidebar({
           </div>
         </div>
 
-        <div className="flex flex-col gap-1 shrink-0">
-          <div className="flex items-center justify-between group/groupbtn">
+        <div className="flex flex-col gap-3 shrink-0">
+          <div className="flex flex-col gap-1">
+            <span className="pl-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
+              Current Context
+            </span>
             <button
-              onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
-              className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
+              type="button"
+              onClick={onSelectCurrentContext}
+              disabled={!currentContextGroupLabel}
+              className={cn(
+                "flex items-center justify-between rounded-xl border px-3 py-2.5 text-left transition-all",
+                currentContextGroupLabel
+                  ? "border-zinc-200/75 bg-white/70 hover:border-zinc-300/85 hover:bg-white/85 dark:border-zinc-800/80 dark:bg-zinc-900/45 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/60"
+                  : "cursor-not-allowed border-dashed border-zinc-200/70 bg-zinc-50/50 text-zinc-400 dark:border-zinc-800/70 dark:bg-zinc-900/30 dark:text-zinc-500",
+                isCurrentContextSelected && currentContextGroupLabel
+                  ? "border-zinc-300 bg-zinc-100/80 shadow-[0_10px_24px_-20px_rgba(15,23,42,0.7)] dark:border-zinc-700 dark:bg-zinc-800/60"
+                  : null,
+              )}
             >
-              <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
-              Groups
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                const label = window.prompt("Enter new group name:");
-                if (label) onCreateGroup(label);
-              }}
-              className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/groupbtn:opacity-100"
-            >
-              <Plus className="h-3.5 w-3.5 text-zinc-400" />
+              <div className="flex min-w-0 items-center gap-2.5">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                  <FolderOpen className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">Current Context</p>
+                  <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                    {currentContextGroupLabel ?? "No active session"}
+                  </p>
+                </div>
+              </div>
+              {currentContextGroup ? (
+                <span className="ml-3 shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                  {currentContextGroup.count}
+                </span>
+              ) : null}
             </button>
           </div>
 
-          {isGroupsExpanded && (
-            <div className="flex flex-col gap-1 mt-1 max-h-[300px] overflow-y-auto minimal-scrollbar">
-              <div
-                role="button"
-                tabIndex={0}
-                onClick={() => onGroupChange("")}
-                className={cn(
-                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                  !selectedGroup ? "bg-zinc-100 dark:bg-zinc-800/60 font-medium" : "hover:bg-zinc-100/50 dark:hover:bg-zinc-800/30 text-zinc-600 dark:text-zinc-400"
-                )}
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between group/groupbtn">
+              <button
+                onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
+                className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
               >
-                <FolderOpen className="h-4 w-4" />
-                <span>All Groups</span>
-              </div>
-              {renderGroupTree(groupTree)}
+                <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
+                Archive
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const label = window.prompt("Enter new group name:");
+                  if (label) onCreateGroup(label);
+                }}
+                className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/groupbtn:opacity-100"
+              >
+                <Plus className="h-3.5 w-3.5 text-zinc-400" />
+              </button>
             </div>
-          )}
+
+            {isGroupsExpanded && (
+              <div className="mt-1 flex max-h-[300px] flex-col gap-1 overflow-y-auto minimal-scrollbar">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={onSelectAllGroups}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                    isAllGroupsSelected
+                      ? "bg-zinc-100 font-medium dark:bg-zinc-800/60"
+                      : "text-zinc-600 hover:bg-zinc-100/50 dark:text-zinc-400 dark:hover:bg-zinc-800/30",
+                  )}
+                >
+                  <FolderOpen className="h-4 w-4" />
+                  <span>All Groups</span>
+                </div>
+                {renderGroupTree(groupTree)}
+              </div>
+            )}
+          </div>
         </div>
 
         <hr className="border-zinc-200/60 dark:border-zinc-800/60 shrink-0" />
@@ -1065,14 +1197,18 @@ export function Sidebar({
         <div className="flex min-h-0 flex-1 flex-col gap-2 relative">
           <div className="flex items-center justify-between shrink-0">
             <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 pl-[18px]">
-              Nodes {selectedGroup ? (
+              Nodes {isCurrentContextSelected ? (
+                "in Current Context"
+              ) : selectedGroupLabel ? (
                 <>
-                  in <span title={selectedGroup}>
-                    {selectedGroup.split('/').pop()!.length > 20
-                      ? `${selectedGroup.split('/').pop()?.slice(0, 17)}...`
-                      : selectedGroup.split('/').pop()}
+                  in <span title={selectedGroupLabel}>
+                    {selectedGroupLabel.split('/').pop()!.length > 20
+                      ? `${selectedGroupLabel.split('/').pop()?.slice(0, 17)}...`
+                      : selectedGroupLabel.split('/').pop()}
                   </span>
                 </>
+              ) : isAllGroupsSelected ? (
+                "Across Archive"
               ) : "Recent"}
             </span>
             <div className="flex items-center gap-1 text-[11px] text-zinc-500">
@@ -1305,10 +1441,10 @@ export function Sidebar({
         );
       })(), document.body)}
 
-      {contextMenuGroup && (
+      {contextMenuGroup && typeof document !== "undefined" && createPortal(
         <div
           ref={groupMenuRef}
-          className="fixed z-50 min-w-40 rounded-md border border-zinc-200 bg-white p-1 shadow-md dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
+          className="fixed z-[110] min-w-40 rounded-md border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
           style={{ top: contextMenuGroup.y, left: contextMenuGroup.x }}
           onClick={(e) => e.stopPropagation()}
         >
@@ -1342,7 +1478,68 @@ export function Sidebar({
           >
             <Trash2 className="h-3.5 w-3.5" /> Delete Group
           </button>
-        </div>
+        </div>,
+        document.body,
+      )}
+
+      {contextMenuComputer && typeof document !== "undefined" && createPortal(
+        <div
+          ref={computerMenuRef}
+          className="fixed z-[110] min-w-44 rounded-md border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
+          style={{ top: contextMenuComputer.y, left: contextMenuComputer.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+                  void handleExportComputer(contextMenuComputer.pk, contextMenuComputer.label);
+                  setContextMenuComputer(null);
+                }}
+          >
+            <Download className="h-3.5 w-3.5" /> Export Computer Config
+          </button>
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              setSelectedComputerLabel(contextMenuComputer.label);
+              setIsCodeSetupOpen(true);
+              setContextMenuComputer(null);
+            }}
+          >
+            <Plus className="h-3.5 w-3.5" /> Add Code
+          </button>
+        </div>,
+        document.body,
+      )}
+
+      {contextMenuCode && typeof document !== "undefined" && createPortal(
+        <div
+          ref={codeMenuRef}
+          className="fixed z-[110] min-w-44 rounded-md border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
+          style={{ top: contextMenuCode.y, left: contextMenuCode.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              void handleExportCode(contextMenuCode.pk, contextMenuCode.label);
+              setContextMenuCode(null);
+            }}
+          >
+            <Download className="h-3.5 w-3.5" /> Export Code Config
+          </button>
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              setSelectedComputerLabel(contextMenuCode.computerLabel);
+              setIsCodeSetupOpen(true);
+              setContextMenuCode(null);
+            }}
+          >
+            <Pencil className="h-3.5 w-3.5" /> Edit on Computer
+          </button>
+        </div>,
+        document.body,
       )}
 
       {manualCopyState && (

@@ -29,6 +29,7 @@ from .chat import (
     get_active_chat_session_id,
     get_chat_history,
     get_chat_session_detail,
+    get_chat_session_workspace_path,
     get_chat_snapshot,
     list_chat_projects,
     list_chat_session_workspace_files,
@@ -39,7 +40,15 @@ from .chat import (
     update_chat_session,
 )
 from .bridge_client import bridge_endpoint
-from .client import BridgeAPIError, BridgeOfflineError, bridge_service, request_json
+from .client import (
+    BridgeAPIError,
+    BridgeOfflineError,
+    PROJECT_ID_HEADER,
+    SESSION_ID_HEADER,
+    WORKSPACE_PATH_HEADER,
+    bridge_service,
+    request_json,
+)
 from .presenters.node_view import (
     attach_tree_links as _attach_tree_links,
     enrich_process_detail_payload as _enrich_process_detail_payload,
@@ -75,6 +84,7 @@ from .schemas import (
     FrontendStopChatRequest,
     FrontendChatProjectCreateRequest,
     FrontendChatSessionCreateRequest,
+    FrontendChatSessionTitleUpdateRequest,
     FrontendChatSessionUpdateRequest,
     SubmissionDraftRequest,
     SystemCountsResponse,
@@ -91,6 +101,7 @@ from .schemas import (
     NodeHoverMetadataResponse,
     NodeScriptResponse,
     InfrastructureComputer,
+    InfrastructureExportResponse,
     ParseInfrastructureRequest,
     UserInfoResponse,
     ProfileSetupRequest,
@@ -330,10 +341,97 @@ def _get_frontend_nodes(
     limit: int = 15,
     group_label: str | None = None,
     node_type: str | None = None,
+    *,
+    root_only: bool = True,
 ) -> list[dict[str, Any]]:
     if not hub.current_profile:
         hub.start()
-    return get_recent_nodes(limit=limit, group_label=group_label, node_type=node_type)
+    return get_recent_nodes(limit=limit, group_label=group_label, node_type=node_type, root_only=root_only)
+
+
+def _build_active_submission_group_labels(state: Any) -> dict[str, str] | None:
+    session_id = get_active_chat_session_id(state)
+    if not session_id:
+        return None
+
+    session_detail = get_chat_session_detail(state, session_id)
+    if not isinstance(session_detail, dict):
+        return None
+
+    project_group_label = str(session_detail.get("project_group_label") or "").strip()
+    session_group_label = str(session_detail.get("session_group_label") or "").strip()
+    if not project_group_label or not session_group_label:
+        return None
+
+    return {
+        "project": project_group_label,
+        "session": session_group_label,
+    }
+
+
+def _build_submission_request_headers(state: Any) -> dict[str, str] | None:
+    session_id = get_active_chat_session_id(state)
+    if not session_id:
+        return None
+
+    headers: dict[str, str] = {
+        SESSION_ID_HEADER: session_id,
+    }
+
+    active_project_id = get_active_chat_project_id(state)
+    if active_project_id:
+        headers[PROJECT_ID_HEADER] = active_project_id
+
+    workspace_path = get_chat_session_workspace_path(state, session_id)
+    if workspace_path:
+        headers[WORKSPACE_PATH_HEADER] = workspace_path
+
+    return headers
+
+
+async def _ensure_submission_group(label: str) -> dict[str, Any] | None:
+    cleaned_label = str(label or "").strip()
+    if not cleaned_label:
+        return None
+
+    existing = next((group for group in list_groups() if str(group.get("label") or "").strip() == cleaned_label), None)
+    if existing:
+        return existing
+
+    try:
+        response = create_group(cleaned_label)
+    except BridgeAPIError as exc:
+        if int(exc.status_code or 0) != 409:
+            raise
+        response = {"item": next((group for group in list_groups() if str(group.get("label") or "").strip() == cleaned_label), None)}
+
+    group_payload = response.get("item") if isinstance(response, dict) else None
+    if isinstance(group_payload, dict):
+        return group_payload
+
+    return next((group for group in list_groups() if str(group.get("label") or "").strip() == cleaned_label), None)
+
+
+async def _auto_assign_submission_groups(
+    state: Any,
+    submitted_pks: list[int],
+) -> dict[str, str] | None:
+    normalized_pks = sorted({int(pk) for pk in submitted_pks if isinstance(pk, int) and pk > 0})
+    if not normalized_pks:
+        return None
+
+    labels = _build_active_submission_group_labels(state)
+    if not labels:
+        return None
+
+    for label in (labels["project"], labels["session"]):
+        group = await _ensure_submission_group(label)
+        group_pk = int(group.get("pk") or 0) if isinstance(group, dict) else 0
+        if group_pk <= 0:
+            continue
+        add_nodes_to_group(group_pk, normalized_pks)
+
+    return labels
 
 
 def _raise_worker_http_error(exc: Exception) -> None:
@@ -520,6 +618,36 @@ async def setup_management_infrastructure(payload: dict[str, Any]):
         _raise_worker_http_error(exc)
 
 
+@router.get(
+    "/management/infrastructure/computer/pk/{computer_pk}/export",
+    response_model=InfrastructureExportResponse,
+    tags=[WORKER_PROXY_TAG],
+)
+async def export_management_computer(computer_pk: int = ApiPath(..., ge=1)):
+    try:
+        payload = await request_json("GET", f"/management/infrastructure/computer/pk/{int(computer_pk)}/export")
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail={"error": "Worker returned an invalid computer export payload"})
+    return InfrastructureExportResponse(**payload)
+
+
+@router.get(
+    "/management/infrastructure/code/{code_pk}/export",
+    response_model=InfrastructureExportResponse,
+    tags=[WORKER_PROXY_TAG],
+)
+async def export_management_code(code_pk: int = ApiPath(..., ge=1)):
+    try:
+        payload = await request_json("GET", f"/management/infrastructure/code/{int(code_pk)}/export")
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail={"error": "Worker returned an invalid code export payload"})
+    return InfrastructureExportResponse(**payload)
+
+
 @router.get("/management/profiles/current-user-info", response_model=UserInfoResponse, tags=[WORKER_PROXY_TAG])
 async def get_current_user_info():
     """Proxy to fetch current user information from the worker."""
@@ -544,6 +672,7 @@ async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequ
         raise HTTPException(status_code=422, detail="Submission draft is required")
 
     draft_payload = payload.draft
+    worker_request_headers = _build_submission_request_headers(request.app.state)
     if isinstance(draft_payload, list):
         if len(draft_payload) == 0:
             raise HTTPException(status_code=422, detail="Submission draft list cannot be empty")
@@ -562,7 +691,12 @@ async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequ
                 )
                 continue
             try:
-                raw = await request_json("POST", "/submission/submit", json={"draft": draft_item})
+                raw = await request_json(
+                    "POST",
+                    "/submission/submit",
+                    json={"draft": draft_item},
+                    headers=worker_request_headers,
+                )
                 response = format_single_submission_response(raw)
                 response_pk = _extract_submitted_pk(response)
                 if response_pk is not None:
@@ -602,12 +736,32 @@ async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequ
                 },
             )
 
-        return format_batch_submission_response(submitted_pks, responses, failures)
+        batch_response = format_batch_submission_response(submitted_pks, responses, failures)
+        try:
+            auto_groups = await _auto_assign_submission_groups(request.app.state, submitted_pks)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(log_event("aiida.frontend.submission.auto_group_failed", error=str(exc), submitted_pks=submitted_pks))
+        else:
+            if auto_groups:
+                batch_response["auto_groups"] = auto_groups
+        return batch_response
 
     try:
-        raw = await request_json("POST", "/submission/submit", json={"draft": draft_payload})
+        raw = await request_json(
+            "POST",
+            "/submission/submit",
+            json={"draft": draft_payload},
+            headers=worker_request_headers,
+        )
         response = format_single_submission_response(raw)
         _clear_pending_submission_memory(request.app.state)
+        try:
+            auto_groups = await _auto_assign_submission_groups(request.app.state, response.get("submitted_pks", []))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(log_event("aiida.frontend.submission.auto_group_failed", error=str(exc), response=response))
+        else:
+            if auto_groups:
+                response["auto_groups"] = auto_groups
         return response
     except BridgeOfflineError as exc:
         raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
@@ -661,6 +815,61 @@ async def worker_process_events(request: Request):
             }
 
     return EventSourceResponse(_proxy_generator())
+
+
+@router.get("/data/remote/{pk}/files", tags=[WORKER_PROXY_TAG])
+async def worker_remote_files(pk: int):
+    try:
+        return await request_json("GET", f"/data/remote/{int(pk)}/files")
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+
+
+@router.get("/data/bands/{pk}", tags=[WORKER_PROXY_TAG])
+async def worker_bands_data(pk: int):
+    try:
+        return await request_json("GET", f"/data/bands/{int(pk)}")
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+
+
+@router.get("/data/remote/{pk}/files/{filename:path}", tags=[WORKER_PROXY_TAG])
+async def worker_remote_file_content(pk: int, filename: str):
+    try:
+        return await request_json("GET", f"/data/remote/{int(pk)}/files/{filename}")
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+
+
+@router.get("/data/repository/{pk}/files", tags=[WORKER_PROXY_TAG])
+async def worker_repository_files(
+    pk: int,
+    source: str = Query(default="folder"),
+):
+    try:
+        return await request_json(
+            "GET",
+            f"/data/repository/{int(pk)}/files",
+            params={"source": source},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+
+
+@router.get("/data/repository/{pk}/files/{filename:path}", tags=[WORKER_PROXY_TAG])
+async def worker_repository_file_content(
+    pk: int,
+    filename: str,
+    source: str = Query(default="folder"),
+):
+    try:
+        return await request_json(
+            "GET",
+            f"/data/repository/{int(pk)}/files/{filename}",
+            params={"source": source},
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
 
 
 @router.get("/process/{identifier}", tags=[WORKER_PROXY_TAG])
@@ -880,9 +1089,10 @@ async def frontend_processes(
     limit: int = Query(default=15, ge=1, le=100),
     group_label: str | None = Query(default=None),
     node_type: str | None = Query(default=None),
+    root_only: bool = Query(default=True),
 ):
     try:
-        processes = _get_frontend_nodes(limit=limit, group_label=group_label, node_type=node_type)
+        processes = _get_frontend_nodes(limit=limit, group_label=group_label, node_type=node_type, root_only=root_only)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except Exception as error:  # noqa: BLE001
@@ -1198,6 +1408,26 @@ async def frontend_update_chat_session(
     }
 
 
+@router.put("/frontend/chat/sessions/{session_id}/title", tags=[FRONTEND_TAG])
+async def frontend_update_chat_session_title(
+    request: Request,
+    session_id: str,
+    payload: FrontendChatSessionTitleUpdateRequest,
+):
+    state = request.app.state
+    session = update_chat_session(state, session_id, title=payload.title)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {
+        "session": session,
+        "chat": get_chat_snapshot(state),
+        "active_session_id": get_active_chat_session_id(state),
+        "active_project_id": get_active_chat_project_id(state),
+        "projects": list_chat_projects(state),
+        "version": int(getattr(state, "chat_sessions_version", 0)),
+    }
+
+
 @router.get("/frontend/chat/sessions/{session_id}/workspace", tags=[FRONTEND_TAG])
 async def frontend_chat_session_workspace(
     request: Request,
@@ -1220,7 +1450,8 @@ async def frontend_chat_stream(request: Request):
 
     async def event_generator():
         stream_id = id(request)
-        last_version = -1
+        last_chat_version = -1
+        last_sessions_version = -1
         heartbeat_ts = time.monotonic()
         logger.info(log_event("aiida.frontend.chat_stream.connected", stream_id=stream_id))
         while True:
@@ -1229,16 +1460,28 @@ async def frontend_chat_stream(request: Request):
                 break
 
             try:
-                version = int(getattr(state, "chat_version", 0))
-                snapshot = get_chat_snapshot(state)
+                chat_version = int(getattr(state, "chat_version", 0))
+                sessions_version = int(getattr(state, "chat_sessions_version", 0))
+                chat_snapshot = get_chat_snapshot(state)
+                sessions_snapshot = _chat_sessions_payload(state)
                 now = time.monotonic()
-                should_push = (version != last_version) or ((now - heartbeat_ts) >= 10)
-                if should_push:
+                should_push_heartbeat = (now - heartbeat_ts) >= 10
+                pushed = False
+                if chat_version != last_chat_version or should_push_heartbeat:
                     yield {
                         "event": "chat",
-                        "data": json.dumps(snapshot),
+                        "data": json.dumps(chat_snapshot),
                     }
-                    last_version = version
+                    last_chat_version = chat_version
+                    pushed = True
+                if sessions_version != last_sessions_version or should_push_heartbeat:
+                    yield {
+                        "event": "sessions",
+                        "data": json.dumps(sessions_snapshot),
+                    }
+                    last_sessions_version = sessions_version
+                    pushed = True
+                if pushed:
                     heartbeat_ts = now
             except Exception as error:  # noqa: BLE001
                 logger.exception(
@@ -1247,6 +1490,10 @@ async def frontend_chat_stream(request: Request):
                 yield {
                     "event": "chat",
                     "data": json.dumps({"version": -1, "session_id": None, "messages": [], "snapshot": {}}),
+                }
+                yield {
+                    "event": "sessions",
+                    "data": json.dumps({"version": -1, "active_session_id": None, "active_project_id": None, "projects": [], "items": []}),
                 }
 
             await asyncio.sleep(0.4)
