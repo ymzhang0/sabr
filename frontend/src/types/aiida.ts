@@ -87,6 +87,29 @@ export type ChatSessionSummary = {
   snapshot: ChatSessionSnapshot;
 };
 
+export type ChatSessionBatchProgressItem = {
+  pk: number;
+  label: string;
+  process_label?: string | null;
+  state: string;
+  exit_status: number | null;
+  status: "success" | "running" | "queued" | "failed" | string;
+};
+
+export type ChatSessionBatchProgress = {
+  session_id: string;
+  label: string;
+  group_label: string;
+  total: number;
+  done: number;
+  percent: number;
+  success: number;
+  running: number;
+  queued: number;
+  failed: number;
+  items: ChatSessionBatchProgressItem[];
+};
+
 export type ChatSessionDetail = ChatSessionSummary & {
   version: number;
   messages: ChatMessage[];
@@ -107,6 +130,17 @@ export type ChatSessionMutationResponse = {
   projects: ChatProject[];
   session: ChatSessionDetail;
   chat: ChatSnapshot;
+};
+
+export type ChatDeleteResponse = {
+  version: number;
+  active_session_id: string | null;
+  active_project_id: string | null;
+  projects: ChatProject[];
+  items: ChatSessionSummary[];
+  chat: ChatSnapshot;
+  deleted_project_ids: string[];
+  deleted_session_ids: string[];
 };
 
 export type ChatProject = {
@@ -138,6 +172,14 @@ export type WorkspaceEntry = {
 
 export type ChatSessionWorkspaceResponse = {
   session_id: string;
+  project_id: string;
+  project_name: string;
+  workspace_path: string;
+  relative_path: string;
+  entries: WorkspaceEntry[];
+};
+
+export type ChatProjectWorkspaceResponse = {
   project_id: string;
   project_name: string;
   workspace_path: string;
@@ -273,9 +315,10 @@ export type GroupDeleteResponse = {
   count?: number;
 };
 
-export type GroupExportResponse = {
-  group: GroupItem | null;
-  nodes: Record<string, unknown>[];
+export type GroupExportDownload = {
+  blob: Blob;
+  filename: string;
+  contentType: string;
 };
 
 export type SoftDeleteNodeResponse = {

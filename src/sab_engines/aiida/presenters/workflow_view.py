@@ -87,6 +87,33 @@ def format_batch_submission_response(
     }
 
 
+def format_worker_batch_submission_response(raw: Any) -> dict[str, Any]:
+    response = raw if isinstance(raw, dict) else {"result": raw}
+
+    submitted_pks: list[int] = []
+    for candidate in response.get("submitted_pks", []):
+        parsed = _coerce_int(candidate)
+        if parsed is not None:
+            submitted_pks.append(parsed)
+
+    responses = _as_dict_list(response.get("responses"))
+    failures = _as_dict_list(response.get("failures"))
+
+    if not submitted_pks:
+        for item in responses:
+            candidate = extract_submitted_pk(item.get("response", item))
+            if candidate is not None:
+                submitted_pks.append(candidate)
+
+    formatted = format_batch_submission_response(submitted_pks, responses, failures)
+    if "status" in response and response.get("status") not in (None, ""):
+        formatted["status"] = str(response.get("status"))
+    for key in ("total", "submitted_count", "failed_count", "batch_context", "auto_groups"):
+        if key in response:
+            formatted[key] = response.get(key)
+    return formatted
+
+
 def _as_dict(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         return value
@@ -649,7 +676,14 @@ def _build_validation_summary(
     if warnings:
         summary_lines.append(f"Top warning: {warnings[0]}")
 
+    preserved = {
+        str(key): value
+        for key, value in summary_seed.items()
+        if str(key) not in {"status", "is_valid", "blocking_error_count", "warning_count", "errors", "warnings", "summary_text"}
+    }
+
     return {
+        **preserved,
         "status": normalized_status,
         "is_valid": is_valid,
         "blocking_error_count": max(0, blocking_error_count),

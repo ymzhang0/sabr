@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import json
 import re
+import shutil
 import time
+import unicodedata
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ from src.sab_engines.aiida.client import (
     set_bridge_request_headers,
     WORKSPACE_PATH_HEADER,
 )
+from src.sab_engines.aiida.frontend_bridge import inspect_group, list_groups, rename_group
 from src.sab_engines.aiida.presenters.workflow_view import enrich_submission_draft_payload
 from src.sab_core.config import settings
 from src.sab_core.logging_utils import log_event
@@ -48,11 +51,13 @@ _TITLE_STAGE_INITIAL = "initial"
 _TITLE_STAGE_DEEP_SUMMARY = "deep_summary"
 _TITLE_STAGE_CONTEXT_SWITCH = "context_switch"
 _TITLE_GENERATOR_SYSTEM_PROMPT = (
-    "作为科研助手，请根据给定会话信息生成一个极其简短的中文标题。"
-    "优先输出 4-6 个汉字；如果必须保留材料缩写或节点编号，可使用紧凑科研写法，如 Si、GaAs、#101。"
-    "标题必须体现科研对象或任务，不要空泛。"
-    "优先参考 Context Bar 中的 pinned node / context node / 研究对象。"
-    "只输出标题本身，不要输出“标题：”、引号、句号、解释或 Markdown。"
+    "You are a scientific research assistant. Generate one very short English session title."
+    " The title must use ASCII only."
+    " Prefer 2-4 concise English words."
+    " Keep material abbreviations or node numbers when useful, such as Si Bands, GaAs Relax, Node 101."
+    " The title must describe the research object or task."
+    " Prefer the pinned/context nodes when available."
+    " Output only the title itself. No Chinese. No quotes. No markdown. No explanation."
 )
 _KNOWN_PARALLEL_KEYS = {
     "num_machines",
@@ -74,7 +79,19 @@ _CRITICAL_ADVANCED_KEYS = {
     "protocol",
     *_KNOWN_PARALLEL_KEYS,
 }
+_BATCH_PROCESS_TYPES = {
+    "processnode",
+    "workflownode",
+    "workchainnode",
+    "calcjobnode",
+    "calcfunctionnode",
+}
+_BATCH_RUNNING_STATES = {"running"}
+_BATCH_QUEUED_STATES = {"created", "waiting"}
+_BATCH_FINISHED_STATES = {"finished", "completed", "success"}
+_BATCH_FAILED_STATES = {"failed", "excepted", "killed", "error"}
 _UNSET = object()
+_SESSION_SLUG_MAX_LENGTH = 48
 
 
 def _draft_fragment_hash(fragment: str) -> str:
@@ -120,6 +137,94 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _extract_requested_structure_count(user_intent: str) -> int | None:
+    text = str(user_intent or "").strip()
+    if not text:
+        return None
+
+    patterns = (
+        r"生成\s*(\d+)\s*个\s*(?:等间距)?(?:的)?(?:\s*[A-Za-z0-9._-]+)?\s*结构",
+        r"(\d+)\s*个\s*(?:等间距)?(?:的)?(?:\s*[A-Za-z0-9._-]+)?\s*结构",
+        r"\b(?:generate|create|prepare|build)\s+(\d+)\s+(?:equally\s+spaced\s+)?(?:structures?|jobs?|tasks?)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            count = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if count > 1:
+            return count
+    return None
+
+
+def _extract_requested_kpoints_distance(user_intent: str) -> float | None:
+    text = str(user_intent or "").strip()
+    if not text:
+        return None
+
+    patterns = (
+        r"k[\s-]*points?\s*distance\s*(?:设置为|设为|set\s+to|to|=|:)?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"k[\s-]*point\s*distance\s*(?:设置为|设为|set\s+to|to|=|:)?\s*([0-9]+(?:\.[0-9]+)?)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            return float(match.group(1))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_intent_hints(user_intent: str) -> dict[str, Any]:
+    text = str(user_intent or "").strip()
+    if not text:
+        return {}
+
+    lowered = text.lower()
+    requested_structure_count = _extract_requested_structure_count(text)
+    expected_batch = requested_structure_count is not None
+    if not expected_batch:
+        expected_batch = any(
+            marker in text
+            for marker in (
+                "批量",
+                "高通量",
+                "多个结构",
+                "这些结构",
+                "参数扫描",
+                "参数网格",
+                "等间距",
+            )
+        ) or any(
+            marker in lowered
+            for marker in (
+                "batch",
+                "high-throughput",
+                "multiple structures",
+                "structure list",
+                "parameter sweep",
+                "parameter grid",
+            )
+        )
+
+    hints: dict[str, Any] = {}
+    if expected_batch:
+        hints["expected_batch"] = True
+    if requested_structure_count is not None:
+        hints["requested_structure_count"] = requested_structure_count
+
+    kpoints_distance = _extract_requested_kpoints_distance(text)
+    if kpoints_distance is not None:
+        hints["kpoints_distance"] = kpoints_distance
+
+    return hints
+
+
 def _trim_text(value: Any, *, limit: int = 120) -> str:
     text = " ".join(str(value or "").split())
     if len(text) <= limit:
@@ -156,14 +261,250 @@ def _normalize_group_label_segment(value: Any, *, fallback: str) -> str:
     return text or fallback
 
 
+def _ascii_text(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return normalized.encode("ascii", "ignore").decode("ascii")
+
+
+def _sanitize_session_title_text(value: Any) -> str:
+    text = _ascii_text(value)
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"^title[:：\s-]*", "", text, flags=re.IGNORECASE).strip()
+    text = text.strip("`'\"“”‘’[](){}")
+    text = re.sub(r"[^A-Za-z0-9#()+._ -]+", " ", text)
+    text = " ".join(text.split())
+    return text.strip(" -_.")
+
+
+def _normalize_session_title(value: Any, *, fallback: str = _DEFAULT_SESSION_TITLE, max_length: int = 80) -> str:
+    text = _sanitize_session_title_text(value)
+    if not text:
+        text = _sanitize_session_title_text(fallback) or _DEFAULT_SESSION_TITLE
+    return text[:max_length].strip() or (_sanitize_session_title_text(fallback) or _DEFAULT_SESSION_TITLE)
+
+
+def _slugify_session_name(value: Any, *, fallback: str = "session") -> str:
+    text = _ascii_text(value).lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    text = re.sub(r"-{2,}", "-", text)
+    text = text[:_SESSION_SLUG_MAX_LENGTH].strip("-")
+    return text or fallback
+
+
+def _get_session_slug(session: dict[str, Any]) -> str:
+    stored = str(session.get("session_slug") or "").strip()
+    if stored:
+        return stored
+    workspace_path = _resolve_filesystem_path(session.get("workspace_path"))
+    if workspace_path is not None:
+        workspace_name = workspace_path.name.strip()
+        if workspace_name:
+            return workspace_name
+    session_id = str(session.get("id") or "").strip()
+    return session_id or "session"
+
+
+def _resolve_unique_session_slug(
+    store: dict[str, Any],
+    project_id: str,
+    preferred_slug: str,
+    *,
+    session_id: str | None = None,
+) -> str:
+    base_slug = preferred_slug.strip() or "session"
+    existing_slugs = {
+        _get_session_slug(session)
+        for session in store.get("sessions", [])
+        if isinstance(session, dict)
+        and str(session.get("project_id") or "").strip() == project_id
+        and str(session.get("id") or "").strip() != str(session_id or "").strip()
+    }
+
+    if base_slug not in existing_slugs:
+        return base_slug
+
+    suffix = 2
+    while True:
+        candidate = f"{base_slug}-{suffix}"
+        if candidate not in existing_slugs:
+            return candidate
+        suffix += 1
+
+
+def _desired_session_slug(store: dict[str, Any], session: dict[str, Any], title: Any) -> str:
+    project_id = str(session.get("project_id") or "").strip()
+    title_slug = _slugify_session_name(title, fallback="new-conversation")
+    return _resolve_unique_session_slug(store, project_id, title_slug, session_id=str(session.get("id") or ""))
+
+
+def _rename_session_group_label_if_needed(store: dict[str, Any], session: dict[str, Any], old_slug: str | None) -> None:
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
+    old_group_label = _build_session_group_label(project_name, old_slug or "session")
+    new_group_label = _build_session_group_label(project_name, _get_session_slug(session))
+    if old_group_label == new_group_label:
+        return
+
+    with suppress(Exception):
+        existing_new = next(
+            (group for group in list_groups() if str(group.get("label") or "").strip() == new_group_label),
+            None,
+        )
+        existing_old = next(
+            (group for group in list_groups() if str(group.get("label") or "").strip() == old_group_label),
+            None,
+        )
+        if existing_old and not existing_new:
+            rename_group(int(existing_old.get("pk") or 0), new_group_label)
+
+
 def _build_project_group_label(project_name: Any) -> str:
     return _normalize_group_label_segment(project_name, fallback=_DEFAULT_PROJECT_NAME)
 
 
-def _build_session_group_label(project_name: Any, session_id: Any) -> str:
+def _build_session_group_label(project_name: Any, session_name: Any) -> str:
     project_group_label = _build_project_group_label(project_name)
-    session_segment = _normalize_group_label_segment(session_id, fallback="session")
+    session_segment = _normalize_group_label_segment(session_name, fallback="session")
     return f"{project_group_label}/{session_segment}"
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and re.fullmatch(r"-?\d+", stripped):
+            return int(stripped)
+    return None
+
+
+def _normalize_process_state_value(value: Any) -> str:
+    return str(value or "").strip().replace("_", " ").lower()
+
+
+def _is_batch_process_node(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+
+    process_state = _normalize_process_state_value(entry.get("process_state") or entry.get("state"))
+    if process_state and process_state != "n/a":
+        return True
+
+    node_type_candidates = (
+        entry.get("type"),
+        entry.get("node_type"),
+        entry.get("full_type"),
+    )
+    for candidate in node_type_candidates:
+        normalized = str(candidate or "").strip().lower()
+        if any(token in normalized for token in _BATCH_PROCESS_TYPES):
+            return True
+
+    process_label = str(entry.get("process_label") or "").strip()
+    return bool(process_label and process_label.upper() != "N/A")
+
+
+def _classify_batch_process_status(entry: dict[str, Any]) -> str | None:
+    process_state = _normalize_process_state_value(entry.get("process_state") or entry.get("state"))
+    exit_status = _coerce_optional_int(entry.get("exit_status"))
+
+    if process_state in _BATCH_RUNNING_STATES:
+        return "running"
+    if process_state in _BATCH_QUEUED_STATES:
+        return "queued"
+    if process_state in _BATCH_FINISHED_STATES:
+        if exit_status in (None, 0):
+            return "success"
+        return "failed"
+    if process_state in _BATCH_FAILED_STATES:
+        return "failed"
+
+    if exit_status is not None and exit_status != 0:
+        return "failed"
+    if process_state:
+        return "queued"
+    return None
+
+
+def _batch_process_label(entry: dict[str, Any]) -> str:
+    for key in ("label", "process_label"):
+        value = str(entry.get(key) or "").strip()
+        if value and value.upper() != "N/A":
+            return value
+    pk = _coerce_optional_int(entry.get("pk"))
+    return f"Process #{pk}" if pk is not None and pk > 0 else "Process"
+
+
+def _summarize_chat_session_batch_progress(
+    *,
+    session_id: str,
+    title: str,
+    session_group_label: str,
+    nodes: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    status_rank = {
+        "running": 0,
+        "queued": 1,
+        "failed": 2,
+        "success": 3,
+    }
+    items: list[dict[str, Any]] = []
+    success = 0
+    running = 0
+    queued = 0
+    failed = 0
+
+    for entry in nodes:
+        if not _is_batch_process_node(entry):
+            continue
+        status = _classify_batch_process_status(entry)
+        if status is None:
+            continue
+
+        if status == "success":
+            success += 1
+        elif status == "running":
+            running += 1
+        elif status == "queued":
+            queued += 1
+        elif status == "failed":
+            failed += 1
+
+        items.append(
+            {
+                "pk": _coerce_optional_int(entry.get("pk")) or 0,
+                "label": _batch_process_label(entry),
+                "process_label": str(entry.get("process_label") or "").strip() or None,
+                "state": _normalize_process_state_value(entry.get("process_state") or entry.get("state")) or "unknown",
+                "exit_status": _coerce_optional_int(entry.get("exit_status")),
+                "status": status,
+            }
+        )
+
+    total = len(items)
+    if total <= 1:
+        return None
+
+    done = success + failed
+    percent = int(round((done / total) * 100)) if total else 0
+
+    items.sort(key=lambda item: (status_rank.get(str(item["status"]), 99), item["pk"]))
+
+    return {
+        "session_id": session_id,
+        "label": str(title or _DEFAULT_SESSION_TITLE),
+        "group_label": session_group_label,
+        "total": total,
+        "done": done,
+        "percent": max(0, min(100, percent)),
+        "success": success,
+        "running": running,
+        "queued": queued,
+        "failed": failed,
+        "items": items,
+    }
 
 
 def _resolve_filesystem_path(path_value: Any) -> Path | None:
@@ -191,7 +532,50 @@ def _project_sessions_root_path(project: dict[str, Any]) -> Path:
 
 
 def _session_workspace_path(session: dict[str, Any], project: dict[str, Any]) -> Path:
-    return _project_sessions_root_path(project) / str(session.get("id") or "").strip()
+    return _project_sessions_root_path(project) / _get_session_slug(session)
+
+
+def _is_path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_rmtree(path: Path | None) -> None:
+    if path is None:
+        return
+    with suppress(FileNotFoundError):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _cleanup_session_workspace_dir(session: dict[str, Any], project: dict[str, Any]) -> None:
+    sessions_root = _project_sessions_root_path(project)
+    candidates: list[Path] = [_session_workspace_path(session, project)]
+    explicit_workspace = _resolve_filesystem_path(session.get("workspace_path"))
+    if explicit_workspace is not None:
+        candidates.insert(0, explicit_workspace)
+
+    for candidate in candidates:
+        if not _is_path_within(candidate, sessions_root):
+            continue
+        _safe_rmtree(candidate)
+        break
+
+    with suppress(OSError):
+        if sessions_root.exists() and not any(sessions_root.iterdir()):
+            sessions_root.rmdir()
+
+
+def _cleanup_project_workspace_dir(project: dict[str, Any]) -> None:
+    sessions_root = _project_sessions_root_path(project)
+    _safe_rmtree(sessions_root)
+
+    root = _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or ""))
+    managed_root = _managed_project_root(str(project.get("id") or ""))
+    if root == managed_root:
+        _safe_rmtree(root)
 
 
 def _normalize_project_root_path(path_value: Any, *, project_id: str) -> str:
@@ -346,18 +730,7 @@ def _build_title_context_key(snapshot: dict[str, Any] | None) -> str:
 
 
 def _sanitize_generated_title(raw_title: Any, fallback: str) -> str:
-    text = str(raw_title or "").strip()
-    if not text:
-        return fallback
-
-    text = text.replace("\n", " ").replace("\r", " ")
-    text = re.sub(r"^标题[:：\s-]*", "", text, flags=re.IGNORECASE).strip()
-    text = text.strip("`'\"“”‘’[](){}")
-    text = " ".join(text.split())
-    if not text:
-        return fallback
-
-    text = text[:_TITLE_MAX_LENGTH].strip()
+    text = _normalize_session_title(raw_title, fallback=fallback, max_length=_TITLE_MAX_LENGTH)
     if len(text) > _TITLE_RESEARCH_CHARS_LIMIT and "#" not in text and "(" not in text:
         text = text[:_TITLE_RESEARCH_CHARS_LIMIT].strip()
 
@@ -380,26 +753,26 @@ def _build_title_generation_prompt(
     session_environment = str(snapshot.get("session_environment") or "").strip()
     current_title = str(session.get("title") or _DEFAULT_SESSION_TITLE)
     stage_label = {
-        _TITLE_STAGE_INITIAL: "初始命名",
-        _TITLE_STAGE_DEEP_SUMMARY: "深度摘要",
-        _TITLE_STAGE_CONTEXT_SWITCH: "上下文切换",
-    }.get(stage, "会话总结")
+        _TITLE_STAGE_INITIAL: "Initial Naming",
+        _TITLE_STAGE_DEEP_SUMMARY: "Deep Summary",
+        _TITLE_STAGE_CONTEXT_SWITCH: "Context Switch",
+    }.get(stage, "Session Summary")
 
     prompt_lines = [
         _TITLE_GENERATOR_SYSTEM_PROMPT,
         "",
-        f"触发阶段：{stage_label}",
-        f"当前轮次：{completed_turn_id}",
-        f"当前标题：{current_title}",
-        f"首条用户指令：{first_user_intent or '无'}",
-        f"最新用户指令：{latest_user_intent or first_user_intent or '无'}",
+        f"Stage: {stage_label}",
+        f"Turn: {completed_turn_id}",
+        f"Current title: {current_title}",
+        f"First user request: {first_user_intent or 'None'}",
+        f"Latest user request: {latest_user_intent or first_user_intent or 'None'}",
     ]
     if latest_assistant_reply:
-        prompt_lines.append(f"最新助理回复摘要：{latest_assistant_reply}")
+        prompt_lines.append(f"Latest assistant summary: {latest_assistant_reply}")
     if selected_group:
-        prompt_lines.append(f"当前分组：{selected_group}")
+        prompt_lines.append(f"Selected group: {selected_group}")
     if session_environment:
-        prompt_lines.append(f"当前环境：{session_environment}")
+        prompt_lines.append(f"Environment: {session_environment}")
     if pinned_lines:
         prompt_lines.append("Pinned Context:")
         prompt_lines.extend(f"- {line}" for line in pinned_lines)
@@ -409,7 +782,7 @@ def _build_title_generation_prompt(
     prompt_lines.extend(
         [
             "",
-            "请直接输出最终标题。",
+            "Return the final English title only.",
         ]
     )
     return "\n".join(prompt_lines)
@@ -559,7 +932,7 @@ def _normalize_chat_session_record(
     updated_at = str(raw_session.get("updated_at") or created_at)
     raw_title = _trim_text(raw_session.get("title") or _DEFAULT_SESSION_TITLE, limit=80) or _DEFAULT_SESSION_TITLE
     is_legacy_identifier_title = _looks_like_session_identifier_title(raw_title, session_id)
-    title = _DEFAULT_SESSION_TITLE if is_legacy_identifier_title else raw_title
+    title = _DEFAULT_SESSION_TITLE if is_legacy_identifier_title else _normalize_session_title(raw_title)
     auto_title = True if is_legacy_identifier_title else bool(
         raw_session.get("auto_title", title == _DEFAULT_SESSION_TITLE)
     )
@@ -579,10 +952,19 @@ def _normalize_chat_session_record(
         title_last_generated_turn = 0
         title_generation_count = 0
 
+    workspace_path = str(raw_session.get("workspace_path") or "").strip() or None
+    session_slug = str(raw_session.get("session_slug") or "").strip()
+    if not session_slug and workspace_path:
+        session_slug = Path(workspace_path).name.strip()
+    if not session_slug:
+        title_slug = _slugify_session_name(title, fallback="")
+        session_slug = title_slug or session_id
+
     return {
         "id": session_id,
         "project_id": project_id,
         "title": title,
+        "session_slug": session_slug,
         "auto_title": auto_title,
         "title_state": _TITLE_STATE_IDLE if is_legacy_identifier_title else _normalize_title_state(raw_session.get("title_state")),
         "title_first_intent": str(raw_session.get("title_first_intent") or "").strip() or None,
@@ -593,7 +975,7 @@ def _normalize_chat_session_record(
         "created_at": created_at,
         "updated_at": updated_at,
         "tags": _normalize_chat_session_tags(raw_session.get("tags")),
-        "workspace_path": str(raw_session.get("workspace_path") or "").strip() or None,
+        "workspace_path": workspace_path,
         "snapshot": _normalize_chat_session_snapshot(raw_session.get("snapshot")),
         "messages": _normalize_chat_messages(raw_session.get("messages")),
     }
@@ -633,7 +1015,19 @@ def _ensure_project_workspace_dir(project: dict[str, Any]) -> Path:
 def _ensure_session_workspace_dir(store: dict[str, Any], session: dict[str, Any]) -> str:
     project = _get_store_project(store, str(session.get("project_id") or ""))
     _ensure_project_workspace_dir(project)
-    workspace = _ensure_directory(_session_workspace_path(session, project))
+    desired_workspace = _session_workspace_path(session, project)
+    current_workspace = _resolve_filesystem_path(session.get("workspace_path"))
+    sessions_root = _project_sessions_root_path(project)
+    if (
+        current_workspace is not None
+        and current_workspace != desired_workspace
+        and _is_path_within(current_workspace, sessions_root)
+        and current_workspace.exists()
+        and not desired_workspace.exists()
+    ):
+        desired_workspace.parent.mkdir(parents=True, exist_ok=True)
+        current_workspace.rename(desired_workspace)
+    workspace = _ensure_directory(desired_workspace)
     session["project_id"] = str(project["id"])
     session["workspace_path"] = str(workspace)
     return str(workspace)
@@ -897,6 +1291,7 @@ def _serialize_chat_session_summary(session: dict[str, Any], store: dict[str, An
         "id": session["id"],
         "project_id": str(session.get("project_id") or project.get("id") or ""),
         "title": str(session.get("title") or _DEFAULT_SESSION_TITLE),
+        "session_slug": _get_session_slug(session),
         "auto_title": bool(session.get("auto_title", False)),
         "title_state": _normalize_title_state(session.get("title_state")),
         "is_archived": bool(session.get("is_archived", False)),
@@ -905,7 +1300,7 @@ def _serialize_chat_session_summary(session: dict[str, Any], store: dict[str, An
         "tags": _normalize_chat_session_tags(session.get("tags")),
         "project_label": project_name,
         "project_group_label": project_group_label,
-        "session_group_label": _build_session_group_label(project_name, session.get("id")),
+        "session_group_label": _build_session_group_label(project_name, _get_session_slug(session)),
         "workspace_path": workspace_path,
         "node_count": len(snapshot.get("context_nodes") or []),
         "preview": _build_chat_session_preview(messages),
@@ -958,6 +1353,28 @@ def get_chat_session_detail(state: Any, session_id: str) -> dict[str, Any] | Non
     if session is None:
         return None
     return _serialize_chat_session_detail(session, store, state)
+
+
+def get_chat_session_batch_progress(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
+    session_group_label = _build_session_group_label(project_name, _get_session_slug(session))
+    group_payload = inspect_group(session_group_label, limit=500)
+    if not isinstance(group_payload, dict):
+        return None
+
+    raw_nodes = group_payload.get("nodes")
+    nodes = raw_nodes if isinstance(raw_nodes, list) else []
+    return _summarize_chat_session_batch_progress(
+        session_id=str(session.get("id") or session_id),
+        title=str(session.get("title") or _DEFAULT_SESSION_TITLE),
+        session_group_label=session_group_label,
+        nodes=[entry for entry in nodes if isinstance(entry, dict)],
+    )
 
 
 def get_chat_session_workspace_path(state: Any, session_id: str | None = None) -> str | None:
@@ -1025,6 +1442,46 @@ def list_chat_session_workspace_files(
 
     return {
         "session_id": str(session["id"]),
+        "project_id": str(project.get("id") or ""),
+        "project_name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "workspace_path": str(workspace_root),
+        "relative_path": str(target.relative_to(workspace_root)) if target != workspace_root else "",
+        "entries": entries,
+    }
+
+
+def list_chat_project_workspace_files(
+    state: Any,
+    project_id: str,
+    *,
+    relative_path: str | None = None,
+) -> dict[str, Any] | None:
+    _session, store = _find_chat_session(state, None)
+    project = _get_store_project(store, project_id)
+    if project is None:
+        return None
+
+    workspace_root = _ensure_project_workspace_dir(project)
+    target = _resolve_workspace_target_path(workspace_root, relative_path=relative_path)
+    if target.exists() and not target.is_dir():
+        raise ValueError("Requested workspace path is a file")
+    target.mkdir(parents=True, exist_ok=True)
+
+    entries: list[dict[str, Any]] = []
+    for child in sorted(target.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))[:200]:
+        stat = child.stat()
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "relative_path": str(child.relative_to(workspace_root)),
+                "is_dir": child.is_dir(),
+                "size": None if child.is_dir() else int(stat.st_size),
+                "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+
+    return {
         "project_id": str(project.get("id") or ""),
         "project_name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
         "workspace_path": str(workspace_root),
@@ -1117,12 +1574,19 @@ def create_chat_session(
         archive_chat_session(state, archive_session_id.strip())
         store = _get_chat_session_store(state)
     now = _now_iso()
-    cleaned_title = _trim_text(title or "", limit=80)
+    cleaned_title = _sanitize_session_title_text(title or "")[:80].strip()
     resolved_project_id = _resolve_new_chat_session_project_id(store, requested_project_id=project_id)
+    session_id = uuid4().hex
     session = {
-        "id": uuid4().hex,
+        "id": session_id,
         "project_id": resolved_project_id,
         "title": cleaned_title or _DEFAULT_SESSION_TITLE,
+        "session_slug": _resolve_unique_session_slug(
+            store,
+            resolved_project_id,
+            _slugify_session_name(cleaned_title or _DEFAULT_SESSION_TITLE, fallback="new-conversation"),
+            session_id=session_id,
+        ),
         "auto_title": not bool(cleaned_title),
         "title_state": _TITLE_STATE_READY if cleaned_title else _TITLE_STATE_IDLE,
         "title_first_intent": None,
@@ -1187,14 +1651,18 @@ def update_chat_session(
 
     changed = False
     if title is not _UNSET:
-        cleaned_title = _trim_text(title or "", limit=80)
+        old_slug = _get_session_slug(session)
+        cleaned_title = _sanitize_session_title_text(title or "")[:80].strip()
         session["title"] = cleaned_title or _DEFAULT_SESSION_TITLE
+        session["session_slug"] = _desired_session_slug(store, session, cleaned_title or _DEFAULT_SESSION_TITLE)
         session["auto_title"] = not bool(cleaned_title)
         session["title_state"] = _TITLE_STATE_READY if cleaned_title else _TITLE_STATE_IDLE
         if not cleaned_title:
             session["title_generation_count"] = 0
             session["title_last_generated_turn"] = 0
             session["title_last_context_key"] = None
+        _ensure_session_workspace_dir(store, session)
+        _rename_session_group_label_if_needed(store, session, old_slug)
         changed = True
     if tags is not _UNSET:
         session["tags"] = _normalize_chat_session_tags(tags)
@@ -1212,6 +1680,170 @@ def update_chat_session(
         touch_chat(state)
     _persist_chat_session_store(state)
     return _serialize_chat_session_detail(session, store, state)
+
+
+def _normalize_identifier_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+    return normalized
+
+
+def _reconcile_active_chat_targets(state: Any, store: dict[str, Any]) -> None:
+    project_ids = {
+        str(project.get("id") or "").strip()
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip()
+    }
+    sessions = [
+        session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict)
+    ]
+    sessions_by_recent = sorted(
+        sessions,
+        key=lambda session: str(session.get("updated_at") or session.get("created_at") or ""),
+        reverse=True,
+    )
+
+    active_session_id = str(store.get("active_session_id") or "").strip()
+    active_session = next(
+        (
+            session
+            for session in sessions_by_recent
+            if session.get("id") == active_session_id and not bool(session.get("is_archived", False))
+        ),
+        None,
+    )
+    if active_session is None:
+        active_session = next(
+            (session for session in sessions_by_recent if not bool(session.get("is_archived", False))),
+            None,
+        )
+    store["active_session_id"] = str(active_session.get("id") or "") if isinstance(active_session, dict) else None
+
+    if isinstance(active_session, dict):
+        active_project_id = str(active_session.get("project_id") or "").strip()
+        store["active_project_id"] = active_project_id if active_project_id in project_ids else None
+    else:
+        current_project_id = str(store.get("active_project_id") or "").strip()
+        if current_project_id in project_ids:
+            store["active_project_id"] = current_project_id
+        else:
+            projects_by_recent = sorted(
+                (
+                    project
+                    for project in store.get("projects", [])
+                    if isinstance(project, dict) and str(project.get("id") or "").strip()
+                ),
+                key=lambda project: max(
+                    str(project.get("updated_at") or project.get("created_at") or ""),
+                    max(
+                        (
+                            str(session.get("updated_at") or session.get("created_at") or "")
+                            for session in sessions
+                            if str(session.get("project_id") or "").strip() == str(project.get("id") or "").strip()
+                        ),
+                        default="",
+                    ),
+                ),
+                reverse=True,
+            )
+            store["active_project_id"] = (
+                str(projects_by_recent[0].get("id") or "").strip()
+                if projects_by_recent
+                else None
+            )
+
+    state.active_chat_session_id = store.get("active_session_id")
+    state.active_chat_project_id = store.get("active_project_id")
+
+
+def delete_chat_items(
+    state: Any,
+    *,
+    project_ids: list[str] | None = None,
+    session_ids: list[str] | None = None,
+) -> dict[str, list[str]]:
+    normalized_project_ids = set(_normalize_identifier_list(project_ids))
+    normalized_session_ids = set(_normalize_identifier_list(session_ids))
+    if not normalized_project_ids and not normalized_session_ids:
+        return {"deleted_project_ids": [], "deleted_session_ids": []}
+
+    store = _get_chat_session_store(state)
+    existing_projects = {
+        str(project.get("id") or "").strip(): project
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip()
+    }
+    existing_sessions = {
+        str(session.get("id") or "").strip(): session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict) and str(session.get("id") or "").strip()
+    }
+
+    matched_project_ids = {project_id for project_id in normalized_project_ids if project_id in existing_projects}
+    matched_session_ids = {session_id for session_id in normalized_session_ids if session_id in existing_sessions}
+    matched_session_ids.update(
+        str(session.get("id") or "").strip()
+        for session in existing_sessions.values()
+        if str(session.get("project_id") or "").strip() in matched_project_ids
+    )
+
+    if not matched_project_ids and not matched_session_ids:
+        return {"deleted_project_ids": [], "deleted_session_ids": []}
+
+    projects_by_id = existing_projects
+    sessions_by_id = existing_sessions
+
+    for project_id in matched_project_ids:
+        project = projects_by_id.get(project_id)
+        if not isinstance(project, dict):
+            continue
+        _cleanup_project_workspace_dir(project)
+
+    for session_id in matched_session_ids:
+        session = sessions_by_id.get(session_id)
+        if not isinstance(session, dict):
+            continue
+        project_id = str(session.get("project_id") or "").strip()
+        if project_id in matched_project_ids:
+            continue
+        project = projects_by_id.get(project_id)
+        if isinstance(project, dict):
+            _cleanup_session_workspace_dir(session, project)
+
+    store["sessions"] = [
+        session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict) and str(session.get("id") or "").strip() not in matched_session_ids
+    ]
+    store["projects"] = [
+        project
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip() not in matched_project_ids
+    ]
+
+    deleted_project_ids = sorted(matched_project_ids)
+    deleted_session_ids = sorted(matched_session_ids)
+    if not deleted_project_ids and not deleted_session_ids:
+        return {"deleted_project_ids": [], "deleted_session_ids": []}
+
+    _reconcile_active_chat_targets(state, store)
+    _touch_chat_sessions(state)
+    touch_chat(state)
+    _persist_chat_session_store(state)
+    return {
+        "deleted_project_ids": deleted_project_ids,
+        "deleted_session_ids": deleted_session_ids,
+    }
 
 
 def get_chat_history(state: Any, session_id: str | None = None) -> list[dict[str, Any]]:
@@ -1853,6 +2485,44 @@ def _extract_pending_submission_payload(deps: Any) -> dict[str, Any] | None:
     return pending if isinstance(pending, dict) else None
 
 
+def _deps_expect_batch(deps: Any) -> bool:
+    raw_hints = getattr(deps, "intent_hints", None)
+    if not isinstance(raw_hints, dict):
+        return False
+    return bool(raw_hints.get("expected_batch"))
+
+
+def _submission_draft_is_batch(submission_draft: dict[str, Any] | None) -> bool:
+    if not isinstance(submission_draft, dict):
+        return False
+    if isinstance(submission_draft.get("jobs"), list) and len(submission_draft["jobs"]) > 1:
+        return True
+    if isinstance(submission_draft.get("batch_aggregation"), dict):
+        return True
+    meta = submission_draft.get("meta")
+    if not isinstance(meta, dict):
+        return False
+    raw_draft = meta.get("draft")
+    if isinstance(raw_draft, list) and len(raw_draft) > 1:
+        return True
+    if _coerce_positive_int(meta.get("job_count")) and int(meta["job_count"]) > 1:
+        return True
+    structure_pks = meta.get("structure_pks")
+    if isinstance(structure_pks, list) and len(structure_pks) > 1:
+        return True
+    return False
+
+
+def _strip_submission_draft_tail(answer_text: str | None) -> str:
+    text = str(answer_text or "")
+    if not text.strip():
+        return text
+    tag_index = text.upper().rfind(_SUBMISSION_DRAFT_PREFIX)
+    if tag_index < 0:
+        return text
+    return text[:tag_index].rstrip()
+
+
 def _normalize_submission_draft_payload(
     raw_submission_draft: dict[str, Any],
     *,
@@ -2193,6 +2863,7 @@ def _build_chat_message_payload(
     answer_text: str | None = None,
 ) -> dict[str, Any] | None:
     combined: dict[str, Any] = {}
+    forced_batch_block = False
     output_payload = getattr(output, "data_payload", None)
     if isinstance(output_payload, dict):
         combined["data_payload"] = output_payload
@@ -2236,6 +2907,12 @@ def _build_chat_message_payload(
     if resolved_submission_draft is None:
         resolved_submission_draft = parsed_submission_draft_from_text
 
+    if _deps_expect_batch(deps) and isinstance(resolved_submission_draft, dict) and not _submission_draft_is_batch(
+        resolved_submission_draft
+    ):
+        resolved_submission_draft = None
+        forced_batch_block = True
+
     if isinstance(resolved_submission_draft, dict):
         combined["type"] = "SUBMISSION_DRAFT"
         combined["submission_draft"] = resolved_submission_draft
@@ -2244,6 +2921,28 @@ def _build_chat_message_payload(
         output_payload if isinstance(output_payload, dict) else None,
         resolved_submission_draft,
     )
+    if forced_batch_block:
+        recovery_plan = {
+            "status": "blocked",
+            "summary": "This request requires a batch submission draft, but only a single-job draft was produced.",
+            "issues": [
+                {
+                    "type": "batch_draft_required",
+                    "message": "Do not present a single-job submission draft for a multi-structure request.",
+                }
+            ],
+            "recommended_actions": [
+                {
+                    "action": "submit_new_batch_workflow",
+                    "reason": "Prepare one batch draft that contains the full structure set.",
+                }
+            ],
+            "user_decision_required": False,
+        }
+        next_step = (
+            "Prepare a batch submission draft for the full structure list before showing any launch button."
+        )
+        status = "SUBMISSION_BLOCKED"
     if isinstance(recovery_plan, dict) and recovery_plan:
         combined["recovery_plan"] = recovery_plan
     if isinstance(next_step, str) and next_step:
@@ -2396,11 +3095,16 @@ def _finalize_auto_title_update(
     title_state: str,
 ) -> None:
     session["title"] = title or _DEFAULT_SESSION_TITLE
+    store = _get_chat_session_store(state)
+    old_slug = _get_session_slug(session)
+    session["session_slug"] = _desired_session_slug(store, session, session["title"])
     session["title_state"] = _normalize_title_state(title_state)
     session["title_last_generated_turn"] = max(0, int(completed_turn_id))
     session["title_generation_count"] = max(0, int(session.get("title_generation_count") or 0)) + 1
     session["title_last_context_key"] = context_key or None
     session["updated_at"] = _now_iso()
+    _ensure_session_workspace_dir(store, session)
+    _rename_session_group_label_if_needed(store, session, old_slug)
     _touch_chat_sessions(state)
     _persist_chat_session_store(state)
 
@@ -2826,6 +3530,7 @@ async def _execute_chat_turn(
 
             normalized_node_ids = _merge_context_node_ids(context_node_ids, metadata)
             context_nodes = fetch_context_nodes(normalized_node_ids)
+            intent_hints = _extract_intent_hints(user_intent)
             if context_nodes:
                 _update_assistant_message(
                     state,
@@ -2839,8 +3544,14 @@ async def _execute_chat_turn(
                 "archive_path": context_archive,
                 "memory": getattr(state, "memory", None),
             }
+            if "session_id" in getattr(deps_class, "__annotations__", {}):
+                deps_kwargs["session_id"] = session_id
+            if "app_state" in getattr(deps_class, "__annotations__", {}):
+                deps_kwargs["app_state"] = state
             if "context_nodes" in getattr(deps_class, "__annotations__", {}):
                 deps_kwargs["context_nodes"] = context_nodes
+            if "intent_hints" in getattr(deps_class, "__annotations__", {}):
+                deps_kwargs["intent_hints"] = intent_hints
             current_deps = deps_class(**deps_kwargs)
             step_history: list[str] = getattr(current_deps, "step_history", [])
 
@@ -2992,6 +3703,14 @@ async def _execute_chat_turn(
                 tool_calls=bridge_tool_calls,
                 answer_text=answer_text,
             )
+            if (
+                intent_hints.get("expected_batch")
+                and not (
+                    isinstance(message_payload, dict)
+                    and isinstance(message_payload.get("submission_draft"), dict)
+                )
+            ):
+                answer_text = _strip_submission_draft_tail(answer_text)
             submission_draft_block = _build_submission_draft_text_block(message_payload)
             if submission_draft_block:
                 has_submission_prefix = _SUBMISSION_DRAFT_PREFIX.lower() in answer_text.lower()

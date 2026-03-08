@@ -9,12 +9,15 @@ import type {
   BandsPlotResponse,
   ChatResponse,
   ChatProjectMutationResponse,
+  ChatProjectWorkspaceResponse,
+  ChatDeleteResponse,
+  ChatSessionBatchProgress,
   ChatSessionMutationResponse,
   ChatSessionWorkspaceResponse,
   ChatSessionsResponse,
   GroupAssignNodesResponse,
   GroupDeleteResponse,
-  GroupExportResponse,
+  GroupExportDownload,
   GroupMutationResponse,
   GroupsResponse,
   ActiveSpecializationsResponse,
@@ -208,9 +211,35 @@ export async function removeNodeFromGroup(pk: number, nodePk: number): Promise<G
   return data;
 }
 
-export async function exportGroup(pk: number): Promise<GroupExportResponse> {
-  const { data } = await frontendApi.get<GroupExportResponse>(`/groups/${pk}/export`);
-  return data;
+function parseDownloadFilename(contentDisposition: string | undefined, fallback: string): string {
+  const raw = contentDisposition?.trim() ?? "";
+  if (!raw) {
+    return fallback;
+  }
+  const utf8Match = raw.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]).trim() || fallback;
+    } catch {
+      return utf8Match[1].trim() || fallback;
+    }
+  }
+  const simpleMatch = raw.match(/filename\s*=\s*"?([^"]+)"?/i);
+  if (simpleMatch?.[1]) {
+    return simpleMatch[1].trim() || fallback;
+  }
+  return fallback;
+}
+
+export async function exportGroup(pk: number): Promise<GroupExportDownload> {
+  const response = await frontendApi.get<Blob>(`/groups/${pk}/export`, {
+    responseType: "blob",
+  });
+  return {
+    blob: response.data,
+    filename: parseDownloadFilename(response.headers["content-disposition"], `group-${pk}.aiida`),
+    contentType: response.headers["content-type"] ?? "application/octet-stream",
+  };
 }
 
 export async function softDeleteNode(pk: number, deleted = true): Promise<SoftDeleteNodeResponse> {
@@ -237,6 +266,20 @@ export async function getChatSessions(): Promise<ChatSessionsResponse> {
   return data;
 }
 
+export async function getChatSessionBatchProgress(sessionId: string): Promise<ChatSessionBatchProgress | null> {
+  try {
+    const { data } = await frontendApi.get<{ item: ChatSessionBatchProgress | null }>(
+      `/chat/sessions/${sessionId}/batch-progress`,
+    );
+    return data.item ?? null;
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export async function createChatProject(payload: {
   name: string;
   root_path?: string;
@@ -257,6 +300,24 @@ export async function createChatSession(payload?: {
 
 export async function activateChatSession(sessionId: string): Promise<ChatSessionMutationResponse> {
   const { data } = await frontendApi.post<ChatSessionMutationResponse>(`/chat/sessions/${sessionId}/activate`);
+  return data;
+}
+
+export async function deleteChatSession(sessionId: string): Promise<ChatDeleteResponse> {
+  const { data } = await frontendApi.delete<ChatDeleteResponse>(`/chat/sessions/${sessionId}`);
+  return data;
+}
+
+export async function deleteChatProject(projectId: string): Promise<ChatDeleteResponse> {
+  const { data } = await frontendApi.delete<ChatDeleteResponse>(`/chat/projects/${projectId}`);
+  return data;
+}
+
+export async function deleteChatItems(payload: {
+  project_ids?: string[];
+  session_ids?: string[];
+}): Promise<ChatDeleteResponse> {
+  const { data } = await frontendApi.post<ChatDeleteResponse>("/chat/delete", payload);
   return data;
 }
 
@@ -285,6 +346,16 @@ export async function getChatSessionWorkspace(
   relativePath?: string,
 ): Promise<ChatSessionWorkspaceResponse> {
   const { data } = await frontendApi.get<ChatSessionWorkspaceResponse>(`/chat/sessions/${sessionId}/workspace`, {
+    params: relativePath ? { relative_path: relativePath } : undefined,
+  });
+  return data;
+}
+
+export async function getChatProjectWorkspace(
+  projectId: string,
+  relativePath?: string,
+): Promise<ChatProjectWorkspaceResponse> {
+  const { data } = await frontendApi.get<ChatProjectWorkspaceResponse>(`/chat/projects/${projectId}/workspace`, {
     params: relativePath ? { relative_path: relativePath } : undefined,
   });
   return data;
@@ -357,7 +428,8 @@ export async function getRepositoryFileContent(
 export async function submitPreviewDraft(
   draft: SubmissionSubmitDraftPayload,
 ): Promise<SubmissionResponse> {
-  const { data } = await aiidaApi.post<SubmissionResponse>("/submission/submit", { draft });
+  const endpoint = Array.isArray(draft) ? "/submission/submit_batch" : "/submission/submit";
+  const { data } = await aiidaApi.post<SubmissionResponse>(endpoint, { draft });
   return data;
 }
 

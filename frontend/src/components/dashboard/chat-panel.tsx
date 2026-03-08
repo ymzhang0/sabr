@@ -242,6 +242,7 @@ function normalizeSubmissionDraftPreview(rawSubmissionDraft: Record<string, unkn
   const submissionDraft: SubmissionDraftPayload = {
     process_label: processLabel,
     inputs,
+    batch_aggregation: asRecord(rawSubmissionDraft.batch_aggregation) ?? asRecord(metaRecord.batch_aggregation),
     input_groups: rawInputGroups,
     primary_inputs: rawPrimaryInputs ?? {},
     recommended_inputs: rawRecommendedInputs ?? rawAdvancedSettings ?? {},
@@ -262,6 +263,7 @@ function normalizeSubmissionDraftPreview(rawSubmissionDraft: Record<string, unkn
       input_groups: rawInputGroups,
       structure_metadata: Array.isArray(metaRecord.structure_metadata) ? metaRecord.structure_metadata : [],
       available_codes: Array.isArray(metaRecord.available_codes) ? metaRecord.available_codes : [],
+      batch_aggregation: asRecord(metaRecord.batch_aggregation),
       required_code_plugin:
         typeof metaRecord.required_code_plugin === "string" && metaRecord.required_code_plugin.trim()
           ? metaRecord.required_code_plugin.trim()
@@ -1334,6 +1336,8 @@ type ChatPanelProps = {
   models: string[];
   selectedModel: string;
   composerResetVersion: number;
+  currentProjectName: string | null;
+  currentSessionName: string | null;
   contextNodes: FocusNode[];
   pinnedNodes: FocusNode[];
   sessionEnvironment: string | null;
@@ -1550,6 +1554,8 @@ export function ChatPanel({
   models,
   selectedModel,
   composerResetVersion,
+  currentProjectName,
+  currentSessionName,
   contextNodes,
   pinnedNodes,
   sessionEnvironment,
@@ -1605,6 +1611,7 @@ export function ChatPanel({
   >({});
   const [nodeHoverMetadataByPk, setNodeHoverMetadataByPk] = useState<Record<number, NodeHoverMetadataState>>({});
   const nodeHoverMetadataRef = useRef<Record<number, NodeHoverMetadataState>>({});
+  const previewStateByTurnRef = useRef<Record<number, SubmissionModalState>>({});
 
   const turns = useMemo(() => groupMessages(messages), [messages]);
   const latestTurnId = turns.length > 0 ? turns[turns.length - 1].turnId : null;
@@ -1621,6 +1628,8 @@ export function ChatPanel({
       latestTurn.assistantStatus ?? "",
     ].join("|");
   }, [turns]);
+  const resolvedProjectName = currentProjectName?.trim() || "Unassigned Project";
+  const resolvedSessionName = currentSessionName?.trim() || "New Conversation";
   const isNearBottom = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) {
@@ -1645,6 +1654,10 @@ export function ChatPanel({
   useEffect(() => {
     nodeHoverMetadataRef.current = nodeHoverMetadataByPk;
   }, [nodeHoverMetadataByPk]);
+
+  useEffect(() => {
+    previewStateByTurnRef.current = previewStateByTurn;
+  }, [previewStateByTurn]);
 
   const activeResourcePlugins = useMemo(() => {
     const values = new Set<string>();
@@ -2050,21 +2063,45 @@ export function ChatPanel({
 
   const handleConfirmPreview = useCallback(
     async (turnId: number, preview: SubmissionDraftPreview, draftPayload?: SubmissionSubmitDraft) => {
+      const currentStatus = previewStateByTurnRef.current[turnId]?.status ?? "idle";
+      if (currentStatus !== "idle") {
+        return;
+      }
+      const submittingState: SubmissionModalState = {
+        status: "submitting",
+        processPk: null,
+        processPks: [],
+        errorText: null,
+      };
+      previewStateByTurnRef.current = {
+        ...previewStateByTurnRef.current,
+        [turnId]: submittingState,
+      };
       setExpandedSubmissionByTurn((current) => ({
         ...current,
         [turnId]: false,
       }));
       setPreviewStateByTurn((current) => ({
         ...current,
-        [turnId]: { status: "submitting", processPk: null, processPks: [], errorText: null },
+        [turnId]: submittingState,
       }));
       try {
         const response = await submitPreviewDraft(draftPayload ?? preview.submitDraft);
         const processPks = extractProcessPks(response);
         const processPk = processPks[0] ?? null;
+        const submittedState: SubmissionModalState = {
+          status: "submitted",
+          processPk,
+          processPks,
+          errorText: null,
+        };
+        previewStateByTurnRef.current = {
+          ...previewStateByTurnRef.current,
+          [turnId]: submittedState,
+        };
         setPreviewStateByTurn((current) => ({
           ...current,
-          [turnId]: { status: "submitted", processPk, processPks, errorText: null },
+          [turnId]: submittedState,
         }));
         setSubmittedPreviewByTurn((current) => ({
           ...current,
@@ -2077,9 +2114,19 @@ export function ChatPanel({
         void queryClient.invalidateQueries({ queryKey: ["groups"] });
       } catch (error) {
         const errorText = error instanceof Error ? error.message : "Failed to submit workflow.";
+        const errorState: SubmissionModalState = {
+          status: "error",
+          processPk: null,
+          processPks: [],
+          errorText,
+        };
+        previewStateByTurnRef.current = {
+          ...previewStateByTurnRef.current,
+          [turnId]: errorState,
+        };
         setPreviewStateByTurn((current) => ({
           ...current,
-          [turnId]: { status: "error", processPk: null, processPks: [], errorText },
+          [turnId]: errorState,
         }));
       }
     },
@@ -2087,13 +2134,27 @@ export function ChatPanel({
   );
 
   const handleCancelPreview = useCallback(async (turnId: number) => {
+    const currentStatus = previewStateByTurnRef.current[turnId]?.status ?? "idle";
+    if (currentStatus !== "idle") {
+      return;
+    }
+    const cancelledState: SubmissionModalState = {
+      status: "cancelled",
+      processPk: null,
+      processPks: [],
+      errorText: null,
+    };
+    previewStateByTurnRef.current = {
+      ...previewStateByTurnRef.current,
+      [turnId]: cancelledState,
+    };
     setExpandedSubmissionByTurn((current) => ({
       ...current,
       [turnId]: false,
     }));
     setPreviewStateByTurn((current) => ({
       ...current,
-      [turnId]: { status: "cancelled", processPk: null, processPks: [], errorText: null },
+      [turnId]: cancelledState,
     }));
     try {
       await cancelPendingSubmission();
@@ -2242,6 +2303,23 @@ export function ChatPanel({
 
   return (
     <Panel className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden p-0">
+      <div className="border-b border-zinc-200/80 bg-white/85 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/55 md:px-6">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
+            Project
+          </span>
+          <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+            {resolvedProjectName}
+          </span>
+          <span className="text-zinc-300 dark:text-zinc-700">/</span>
+          <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300">
+            Session
+          </span>
+          <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+            {resolvedSessionName}
+          </span>
+        </div>
+      </div>
       <div className="min-h-0 flex flex-1 flex-col xl:flex-row">
         <div className="min-h-0 flex flex-1 flex-col">
           <div

@@ -919,15 +919,6 @@
           443
         ]
       }
-    },
-    {
-      "timestamp": "2026-02-26T01:15:58.983917",
-      "intent": "can you check the plugins of the current aiida worker",
-      "response": "The current AiiDA worker has the **standard core plugins** installed. No external plugin packages (e.g., `aiida-quantumespresso`, `aiida-vasp`) were detected in the entry points.\n\n### **Available Plugin Summary:**\n*   **Calculations:** `core.arithmetic.add`, `core.templatereplacer`, `core.transfer`\n*   **Workflows:** `core.arithmetic.add_multiply`, `core.arithmetic.multiply_add`\n*   **Data Types:** Full suite of core types (Structure, Bands, Kpoints, Dict, etc.)\n*   **Parsers:** `core.arithmetic.add`, `core.templatereplacer`",
-      "metadata": {
-        "context_archive": null,
-        "context_node_ids": []
-      }
     }
   ],
   "action_history": [],

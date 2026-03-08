@@ -11,11 +11,13 @@ import {
   createChatProject,
   createChatSession,
   createGroup,
+  deleteChatItems,
+  deleteChatProject,
+  deleteChatSession,
   deleteGroup,
   exportGroup,
   getBootstrap,
   getChatMessages,
-  getChatSessionWorkspace,
   getChatSessions,
   getGroups,
   getLogs,
@@ -35,6 +37,7 @@ import { HistorySidebar } from "@/components/dashboard/history-sidebar";
 import { ProcessDetailDrawer } from "@/components/dashboard/process-detail-drawer";
 import { RuntimeTerminal } from "@/components/dashboard/runtime-terminal";
 import { Sidebar } from "@/components/dashboard/sidebar";
+import { WorkspaceExplorerSidebar } from "@/components/dashboard/workspace-explorer-sidebar";
 import { Button } from "@/components/ui/button";
 import { cn, decodeEscapedUnicode, decodeEscapedUnicodeDeep } from "@/lib/utils";
 import {
@@ -48,7 +51,6 @@ import type {
   ChatSessionSnapshot,
   ChatSessionsResponse,
   ChatSessionSummary,
-  ChatSessionWorkspaceResponse,
   ChatSnapshot,
   FocusNode,
   GroupItem,
@@ -57,7 +59,7 @@ import type {
   SendChatRequest,
   SessionParameter,
 } from "@/types/aiida";
-import { Database, History } from "lucide-react";
+import { Database, FolderOpen, History } from "lucide-react";
 
 const THEME_STORAGE_KEY = "sabr.dashboard.theme";
 const CURRENT_SESSION_STORAGE_KEY = "current_session_id";
@@ -555,7 +557,7 @@ function normalizeGroups(raw: unknown): GroupItem[] {
 export default function App() {
   const queryClient = useQueryClient();
   const [theme, setTheme] = useState<"light" | "dark">(initialTheme);
-  const [sidebarView, setSidebarView] = useState<"explorer" | "history">("explorer");
+  const [sidebarView, setSidebarView] = useState<"explorer" | "history" | "workspace">("explorer");
   const [selectedModel, setSelectedModel] = useState("");
   const [selectedGroup, setSelectedGroup] = useState("");
   const [nodeTypeFilter, setNodeTypeFilter] = useState<"all" | "structures" | "tasks" | "failed">("all");
@@ -574,7 +576,7 @@ export default function App() {
   const [composerResetVersion, setComposerResetVersion] = useState(0);
   const [streamedLogs, setStreamedLogs] = useState<{ version: number; lines: string[] } | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [activeWorkspace, setActiveWorkspace] = useState<ChatSessionWorkspaceResponse | null>(null);
+  const [activeWorkspaceProjectId, setActiveWorkspaceProjectId] = useState<string | null>(null);
   const [cloneDraft, setCloneDraft] = useState<SubmissionDraftPayload | null>(null);
   const [cloneTurnId, setCloneTurnId] = useState<number | null>(null);
   const [cloneModalState, setCloneModalState] = useState<SubmissionModalState>({ status: "idle" });
@@ -609,6 +611,8 @@ export default function App() {
   const chatSessions = chatSessionsQuery.data?.items ?? [];
   const chatProjects = chatSessionsQuery.data?.projects ?? [];
   const activeProjectId = chatSessionsQuery.data?.active_project_id ?? null;
+  const selectedWorkspaceProject =
+    chatProjects.find((project) => project.id === (activeWorkspaceProjectId ?? activeProjectId ?? "")) ?? null;
   const resolvedActiveChatSessionId = activeChatSessionId ?? chatSessionsQuery.data?.active_session_id ?? null;
   const activeChatSession = chatSessions.find((session) => session.id === resolvedActiveChatSessionId) ?? null;
   const currentContextGroupLabel = resolveCurrentContextGroupLabel(activeChatSession);
@@ -805,12 +809,16 @@ export default function App() {
 
     source.addEventListener("process_state_change", () => {
       queryClient.invalidateQueries({ queryKey: ["processes"] });
+      queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["chat-session-batch-progress"] });
     });
     source.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.event === "process_state_change" || data.pk) {
           queryClient.invalidateQueries({ queryKey: ["processes"] });
+          queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+          queryClient.invalidateQueries({ queryKey: ["chat-session-batch-progress"] });
         }
       } catch {
         // ignore unparseable keepalive messages
@@ -918,14 +926,6 @@ export default function App() {
     },
   });
 
-  const openWorkspaceMutation = useMutation({
-    mutationFn: ({ sessionId, relativePath }: { sessionId: string; relativePath?: string }) =>
-      getChatSessionWorkspace(sessionId, relativePath),
-    onSuccess: (workspace) => {
-      setActiveWorkspace(workspace);
-    },
-  });
-
   const createGroupMutation = useMutation({
     mutationFn: (label: string) => createGroup(label),
     onSuccess: () => {
@@ -983,8 +983,13 @@ export default function App() {
   );
 
   useEffect(() => {
-    setActiveWorkspace((current) => (current?.session_id === activeChatSessionId ? current : null));
-  }, [activeChatSessionId]);
+    setActiveWorkspaceProjectId((current) => {
+      if (current && chatProjects.some((project) => project.id === current)) {
+        return current;
+      }
+      return activeProjectId ?? null;
+    });
+  }, [activeProjectId, chatProjects]);
   const sessionSnapshotPayload = useMemo(
     () =>
       buildChatSessionSnapshotPayload({
@@ -1110,7 +1115,6 @@ export default function App() {
       project_id: projectId,
     });
     applyChatSnapshot(response.chat);
-    setActiveWorkspace(null);
     setComposerResetVersion((current) => current + 1);
     setSidebarView("explorer");
     await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
@@ -1129,18 +1133,6 @@ export default function App() {
       await queryClient.invalidateQueries({ queryKey: ["chat"] });
     },
     [activeChatSessionId, applyChatSnapshot, isChatBusy, queryClient],
-  );
-
-  const handleUpdateChatSessionTags = useCallback(
-    async (sessionId: string, tags: string[]) => {
-      if (!sessionId) {
-        return;
-      }
-      const response = await updateChatSession(sessionId, { tags });
-      applyChatSnapshot(response.chat);
-      await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
-    },
-    [applyChatSnapshot, queryClient],
   );
 
   const handleRenameChatSession = useCallback(
@@ -1164,18 +1156,99 @@ export default function App() {
     [createProjectMutation, handleCreateChatSession],
   );
 
-  const handleOpenWorkspace = useCallback(
-    async (sessionId: string) => {
-      if (!sessionId) {
+  const handleDeleteChatItems = useCallback(
+    async ({ projectIds, sessionIds }: { projectIds?: string[]; sessionIds?: string[] }) => {
+      const normalizedProjectIds = [...new Set((projectIds ?? []).map((value) => value.trim()).filter(Boolean))];
+      const normalizedSessionIds = [...new Set((sessionIds ?? []).map((value) => value.trim()).filter(Boolean))];
+      if (normalizedProjectIds.length === 0 && normalizedSessionIds.length === 0) {
         return;
       }
-      try {
-        await openWorkspaceMutation.mutateAsync({ sessionId });
-      } catch (error) {
-        console.error("Failed to open workspace", error);
+
+      const projectSet = new Set(normalizedProjectIds);
+      const sessionSet = new Set(normalizedSessionIds);
+      const targetedSessionIds = new Set(sessionSet);
+      chatSessions.forEach((session) => {
+        if (projectSet.has(session.project_id)) {
+          targetedSessionIds.add(session.id);
+        }
+      });
+
+      const deletingActiveSession =
+        Boolean(activeChatSessionId && targetedSessionIds.has(activeChatSessionId)) ||
+        Boolean(activeProjectId && projectSet.has(activeProjectId));
+
+      if (deletingActiveSession && hasPendingAgentStep) {
+        const confirmed = window.confirm(
+          "Deleting the active project/session will stop the running AiiDA agent step. Continue?",
+        );
+        if (!confirmed) {
+          return;
+        }
       }
+
+      if (deletingActiveSession && isChatBusy) {
+        await stopActiveChatTurn();
+      }
+
+      const summaryParts: string[] = [];
+      if (normalizedProjectIds.length > 0) {
+        summaryParts.push(`${normalizedProjectIds.length} project${normalizedProjectIds.length === 1 ? "" : "s"}`);
+      }
+      if (normalizedSessionIds.length > 0) {
+        summaryParts.push(`${normalizedSessionIds.length} session${normalizedSessionIds.length === 1 ? "" : "s"}`);
+      }
+      const confirmMessage =
+        normalizedProjectIds.length > 0
+          ? `Delete ${summaryParts.join(" and ")}? This will also delete all sessions inside the selected projects.`
+          : `Delete ${summaryParts.join(" and ")}?`;
+      if (!window.confirm(confirmMessage)) {
+        return;
+      }
+
+      let response;
+      if (normalizedProjectIds.length > 0 && normalizedSessionIds.length > 0) {
+        response = await deleteChatItems({
+          project_ids: normalizedProjectIds,
+          session_ids: normalizedSessionIds,
+        });
+      } else if (normalizedProjectIds.length === 1 && normalizedSessionIds.length === 0) {
+        response = await deleteChatProject(normalizedProjectIds[0]!);
+      } else if (normalizedProjectIds.length === 0 && normalizedSessionIds.length === 1) {
+        response = await deleteChatSession(normalizedSessionIds[0]!);
+      } else if (normalizedProjectIds.length > 0) {
+        response = await deleteChatItems({ project_ids: normalizedProjectIds });
+      } else {
+        response = await deleteChatItems({ session_ids: normalizedSessionIds });
+      }
+
+      applyChatSessionsSnapshot(response);
+      applyChatSnapshot(response.chat);
+      setActiveWorkspaceProjectId((current) => (current && !projectSet.has(current) ? current : null));
+      await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      await queryClient.invalidateQueries({ queryKey: ["chat"] });
     },
-    [openWorkspaceMutation],
+    [
+      activeChatSessionId,
+      activeProjectId,
+      applyChatSessionsSnapshot,
+      applyChatSnapshot,
+      chatSessions,
+      hasPendingAgentStep,
+      isChatBusy,
+      queryClient,
+      stopActiveChatTurn,
+    ],
+  );
+
+  const handleOpenProjectWorkspace = useCallback(
+    (projectId: string) => {
+      if (!projectId) {
+        return;
+      }
+      setActiveWorkspaceProjectId(projectId);
+      setSidebarView("workspace");
+    },
+    [],
   );
 
   const handleOpenDetail = useCallback((pk: number) => {
@@ -1405,12 +1478,12 @@ export default function App() {
 
   const handleExportGroup = useCallback(async (group: GroupItem) => {
     const payload = await exportGroup(group.pk);
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const blob = payload.blob;
     const url = URL.createObjectURL(blob);
     try {
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `${group.label.replace(/[^\w.-]+/g, "_") || `group-${group.pk}`}.json`;
+      anchor.download = payload.filename || `${group.label.replace(/[^\w.-]+/g, "_") || `group-${group.pk}`}.aiida`;
       anchor.click();
     } finally {
       URL.revokeObjectURL(url);
@@ -1448,7 +1521,7 @@ export default function App() {
 
   const handleConfirmCloneDraft = useCallback(
     async (draftPayload: SubmissionSubmitDraft) => {
-      if (!cloneDraft || cloneTurnId === null) {
+      if (!cloneDraft || cloneTurnId === null || cloneModalState.status !== "idle") {
         return;
       }
       setCloneModalState({ status: "submitting", processPk: null, processPks: [], errorText: null });
@@ -1474,17 +1547,20 @@ export default function App() {
         setCloneModalState({ status: "error", processPk: null, processPks: [], errorText });
       }
     },
-    [cloneDraft, cloneTurnId, queryClient],
+    [cloneDraft, cloneModalState.status, cloneTurnId, queryClient],
   );
 
   const handleCancelCloneDraft = useCallback(async () => {
+    if (cloneModalState.status !== "idle") {
+      return;
+    }
     setCloneModalState({ status: "cancelled", processPk: null, processPks: [], errorText: null });
     try {
       await cancelPendingSubmission();
     } catch (error) {
       console.error("Failed to clear pending submission", error);
     }
-  }, []);
+  }, [cloneModalState.status]);
 
   return (
     <main className="dashboard-shell h-screen overflow-hidden p-2">
@@ -1517,6 +1593,22 @@ export default function App() {
                 aria-label="Chat History"
               >
                 <History className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn(
+                  "h-9 w-9 rounded-xl text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+                  sidebarView === "workspace" &&
+                    "bg-white text-zinc-900 shadow-[0_10px_20px_-16px_rgba(15,23,42,0.45)] dark:bg-zinc-800 dark:text-zinc-100",
+                )}
+                onClick={() => {
+                  setActiveWorkspaceProjectId((current) => current ?? activeProjectId ?? null);
+                  setSidebarView("workspace");
+                }}
+                aria-label="Workspace Explorer"
+              >
+                <FolderOpen className="h-4 w-4" />
               </Button>
             </div>
             <div className="h-9 w-9" />
@@ -1559,23 +1651,17 @@ export default function App() {
                 onConsultFailedProcess={handleConsultFailedProcess}
                 onCloneProcess={handleCloneProcess}
               />
-            ) : (
+            ) : sidebarView === "history" ? (
               <HistorySidebar
                 projects={chatProjects}
                 sessions={chatSessions}
                 activeProjectId={activeProjectId}
                 activeSessionId={activeChatSessionId}
-                activeSession={activeChatSession}
-                activeWorkspace={activeWorkspace}
-                isWorkspaceLoading={openWorkspaceMutation.isPending}
                 isBusy={isChatBusy}
                 isDarkMode={theme === "dark"}
                 onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
                 onActivateSession={(sessionId) => {
                   void handleActivateChatSession(sessionId);
-                }}
-                onUpdateSessionTags={(sessionId, tags) => {
-                  void handleUpdateChatSessionTags(sessionId, tags);
                 }}
                 onRenameSession={(sessionId, title) => {
                   void handleRenameChatSession(sessionId, title);
@@ -1583,9 +1669,16 @@ export default function App() {
                 onCreateProject={({ name, rootPath }) => {
                   void handleCreateProject({ name, rootPath });
                 }}
-                onOpenWorkspace={(sessionId) => {
-                  void handleOpenWorkspace(sessionId);
+                onDeleteItems={({ projectIds, sessionIds }) => {
+                  void handleDeleteChatItems({ projectIds, sessionIds });
                 }}
+                onOpenProjectWorkspace={(projectId) => {
+                  handleOpenProjectWorkspace(projectId);
+                }}
+              />
+            ) : (
+              <WorkspaceExplorerSidebar
+                project={selectedWorkspaceProject}
               />
             )}
           </div>
@@ -1598,6 +1691,8 @@ export default function App() {
               models={models}
               selectedModel={selectedModel}
               composerResetVersion={composerResetVersion}
+              currentProjectName={activeChatSession?.project_label ?? null}
+              currentSessionName={activeChatSession?.title ?? null}
               isLoading={isChatBusy}
               activeTurnId={activeTurnId}
               onNewConversation={() => {

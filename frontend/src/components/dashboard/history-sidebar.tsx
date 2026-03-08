@@ -1,35 +1,42 @@
-import { ChevronDown, ChevronRight, FolderOpen, Layers3, Moon, Plus, Search, Sparkles, Sun, Tag } from "lucide-react";
+import { ChevronDown, ChevronRight, Moon, MoreVertical, Plus, Search, Sparkles, Square, SquareCheck, Sun, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { Panel } from "@/components/ui/panel";
 import { cn } from "@/lib/utils";
-import type {
-  ChatProject,
-  ChatSessionSummary,
-  ChatSessionWorkspaceResponse,
-} from "@/types/aiida";
+import type { ChatProject, ChatSessionSummary } from "@/types/aiida";
 
 type HistorySidebarProps = {
   projects: ChatProject[];
   sessions: ChatSessionSummary[];
   activeProjectId: string | null;
   activeSessionId: string | null;
-  activeSession: ChatSessionSummary | null;
-  activeWorkspace: ChatSessionWorkspaceResponse | null;
-  isWorkspaceLoading: boolean;
   isBusy: boolean;
   isDarkMode: boolean;
   onToggleTheme: () => void;
   onActivateSession: (sessionId: string) => void;
-  onUpdateSessionTags: (sessionId: string, tags: string[]) => void;
   onRenameSession: (sessionId: string, title: string) => void;
   onCreateProject: (payload: { name: string; rootPath: string }) => void;
-  onOpenWorkspace: (sessionId: string) => void;
+  onDeleteItems: (payload: { projectIds?: string[]; sessionIds?: string[] }) => void;
+  onOpenProjectWorkspace: (projectId: string) => void;
 };
 
 const DEFAULT_SESSION_TITLE = "New Conversation";
+
+type HistoryContextMenuState =
+  | {
+      kind: "project";
+      id: string;
+      x: number;
+      y: number;
+    }
+  | {
+      kind: "session";
+      id: string;
+      x: number;
+      y: number;
+    };
 
 function formatSessionTime(value: string): string {
   const parsed = new Date(value);
@@ -44,41 +51,34 @@ function formatSessionTime(value: string): string {
   });
 }
 
-function normalizeTagValue(value: string): string {
-  const trimmed = value.trim().replace(/\s+/g, "-");
-  if (!trimmed) {
-    return "";
-  }
-  return trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
-}
-
 export function HistorySidebar({
   projects,
   sessions,
   activeProjectId,
   activeSessionId,
-  activeSession,
-  activeWorkspace,
-  isWorkspaceLoading,
   isBusy,
   isDarkMode,
   onToggleTheme,
   onActivateSession,
-  onUpdateSessionTags,
   onRenameSession,
   onCreateProject,
-  onOpenWorkspace,
+  onDeleteItems,
+  onOpenProjectWorkspace,
 }: HistorySidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [tagFilter, setTagFilter] = useState("all");
-  const [tagDraft, setTagDraft] = useState("");
   const [isProjectFormOpen, setIsProjectFormOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const [projectPathDraft, setProjectPathDraft] = useState("");
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set());
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<HistoryContextMenuState | null>(null);
   const renameModeRef = useRef<"commit" | "cancel">("commit");
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!activeProjectId) {
@@ -97,6 +97,58 @@ export function HistorySidebar({
       setRenameDraft("");
     }
   }, [renamingSessionId, sessions]);
+
+  useEffect(() => {
+    const availableProjectIds = new Set(projects.map((project) => project.id));
+    setSelectedProjectIds((current) => {
+      const next = new Set([...current].filter((projectId) => availableProjectIds.has(projectId)));
+      if (next.size === current.size) {
+        return current;
+      }
+      return next;
+    });
+  }, [projects]);
+
+  useEffect(() => {
+    const availableSessionIds = new Set(sessions.map((session) => session.id));
+    setSelectedSessionIds((current) => {
+      const next = new Set([...current].filter((sessionId) => availableSessionIds.has(sessionId)));
+      if (next.size === current.size) {
+        return current;
+      }
+      return next;
+    });
+  }, [sessions]);
+
+  useEffect(() => {
+    if (selectedProjectIds.size > 0 || selectedSessionIds.size > 0) {
+      return;
+    }
+    setSelectionMode(false);
+  }, [selectedProjectIds, selectedSessionIds]);
+
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!contextMenuRef.current || !(event.target instanceof Node)) {
+        setContextMenu(null);
+        return;
+      }
+      if (!contextMenuRef.current.contains(event.target)) {
+        setContextMenu(null);
+      }
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+    window.addEventListener("mousedown", handlePointerDown);
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("mousedown", handlePointerDown);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
 
   const availableTags = useMemo(
     () =>
@@ -142,17 +194,90 @@ export function HistorySidebar({
       .filter(({ sessions: groupSessions }) => !hasFilters || groupSessions.length > 0);
   }, [filteredSessions, projects, searchQuery, tagFilter]);
 
-  const handleAddTag = () => {
-    if (!activeSession) {
-      return;
+  const selectedProjectCount = selectedProjectIds.size;
+  const selectedSessionCount = selectedSessionIds.size;
+  const totalSelectedCount = selectedProjectCount + selectedSessionCount;
+
+  const contextMenuProject = useMemo(
+    () =>
+      contextMenu?.kind === "project"
+        ? projects.find((project) => project.id === contextMenu.id) ?? null
+        : null,
+    [contextMenu, projects],
+  );
+  const contextMenuSession = useMemo(
+    () =>
+      contextMenu?.kind === "session"
+        ? sessions.find((session) => session.id === contextMenu.id) ?? null
+        : null,
+    [contextMenu, sessions],
+  );
+
+  const clampMenuPosition = (x: number, y: number) => {
+    if (typeof window === "undefined") {
+      return { x, y };
     }
-    const nextTag = normalizeTagValue(tagDraft);
-    if (!nextTag || activeSession.tags.includes(nextTag)) {
-      setTagDraft("");
-      return;
-    }
-    onUpdateSessionTags(activeSession.id, [...activeSession.tags, nextTag]);
-    setTagDraft("");
+    const width = 208;
+    const height = 132;
+    return {
+      x: Math.min(x, Math.max(8, window.innerWidth - width - 8)),
+      y: Math.min(y, Math.max(8, window.innerHeight - height - 8)),
+    };
+  };
+
+  const openProjectContextMenu = (projectId: string, x: number, y: number) => {
+    const position = clampMenuPosition(x, y);
+    setContextMenu({ kind: "project", id: projectId, ...position });
+  };
+
+  const openSessionContextMenu = (sessionId: string, x: number, y: number) => {
+    const position = clampMenuPosition(x, y);
+    setContextMenu({ kind: "session", id: sessionId, ...position });
+  };
+
+  const toggleProjectExpansion = (projectId: string, projectIsActive: boolean) => {
+    setExpandedProjects((current) => ({
+      ...current,
+      [projectId]: !(current[projectId] ?? (projectId === activeProjectId || projectIsActive)),
+    }));
+  };
+
+  const toggleProjectSelection = (projectId: string) => {
+    setSelectionMode(true);
+    setSelectedProjectIds((current) => {
+      const next = new Set(current);
+      if (next.has(projectId)) {
+        next.delete(projectId);
+      } else {
+        next.add(projectId);
+      }
+      return next;
+    });
+  };
+
+  const toggleSessionSelection = (sessionId: string) => {
+    setSelectionMode(true);
+    setSelectedSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+      }
+      return next;
+    });
+  };
+
+  const clearSelection = () => {
+    setSelectionMode(false);
+    setSelectedProjectIds(new Set());
+    setSelectedSessionIds(new Set());
+    setContextMenu(null);
+  };
+
+  const submitDeleteSelection = (projectIds: string[], sessionIds: string[]) => {
+    onDeleteItems({ projectIds, sessionIds });
+    setContextMenu(null);
   };
 
   const handleCreateProject = () => {
@@ -206,10 +331,9 @@ export function HistorySidebar({
 
   return (
     <aside className="flex h-full min-h-0 w-full flex-col gap-2 font-sans tracking-tight">
-      <header className="flex items-center justify-between">
+      <header className="flex items-center justify-between px-1.5 pt-1">
         <div>
           <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Projects</h1>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400">Browse chat sessions by workspace project.</p>
         </div>
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onToggleTheme} aria-label="Toggle color mode">
@@ -232,6 +356,19 @@ export function HistorySidebar({
           </div>
 
           <div className="flex items-center gap-2">
+            <Button
+              variant={selectionMode ? "default" : "outline"}
+              className="h-9 rounded-lg px-3"
+              onClick={() => {
+                if (selectionMode || totalSelectedCount > 0) {
+                  clearSelection();
+                  return;
+                }
+                setSelectionMode(true);
+              }}
+            >
+              {selectionMode || totalSelectedCount > 0 ? "Done" : "Select"}
+            </Button>
             <CommandPaletteSelect
               value={tagFilter}
               options={tagFilterOptions}
@@ -244,11 +381,13 @@ export function HistorySidebar({
             />
             <Button
               variant={isProjectFormOpen ? "outline" : "default"}
-              className="h-9 rounded-lg px-3"
+              size="icon"
+              className="h-9 w-9 shrink-0 rounded-lg"
               onClick={() => setIsProjectFormOpen((value) => !value)}
+              title="Create a new project"
+              aria-label="Create a new project"
             >
               <Plus className="h-4 w-4" />
-              Create New Project
             </Button>
           </div>
 
@@ -280,51 +419,33 @@ export function HistorySidebar({
           ) : null}
         </div>
 
-        {activeSession ? (
-          <section className="rounded-2xl border border-zinc-200/75 bg-zinc-50/60 p-3 dark:border-zinc-800/80 dark:bg-zinc-900/40">
-            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
-              <Layers3 className="h-3.5 w-3.5" />
-              Active Session
-            </div>
-            <div className="mt-2 space-y-2 text-sm text-zinc-600 dark:text-zinc-300">
-              <p>Project: {activeSession.project_label ?? "Unassigned"}</p>
-              <p className="break-all text-xs text-zinc-500 dark:text-zinc-400">{activeSession.workspace_path}</p>
-              <p>Attached nodes: {activeSession.node_count}</p>
-              <div className="flex flex-wrap gap-1.5">
-                {activeSession.tags.length > 0 ? (
-                  activeSession.tags.map((tag) => (
-                    <button
-                      key={tag}
-                      type="button"
-                      onClick={() => onUpdateSessionTags(activeSession.id, activeSession.tags.filter((value) => value !== tag))}
-                      className="rounded-full border border-zinc-200/80 bg-white px-2 py-1 text-[11px] text-zinc-600 transition-colors hover:border-zinc-300 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-950/50 dark:text-zinc-300 dark:hover:border-zinc-500 dark:hover:text-white"
-                    >
-                      {tag}
-                    </button>
-                  ))
-                ) : (
-                  <span className="text-xs text-zinc-400">No tags yet.</span>
-                )}
+        {selectionMode || totalSelectedCount > 0 ? (
+          <section className="rounded-2xl border border-zinc-200/75 bg-white/80 p-3 dark:border-zinc-800/80 dark:bg-zinc-950/45">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
+                  Batch Delete
+                </p>
+                <p className="mt-1 text-sm text-zinc-700 dark:text-zinc-200">
+                  {selectedProjectCount} project{selectedProjectCount === 1 ? "" : "s"} and {selectedSessionCount} session{selectedSessionCount === 1 ? "" : "s"} selected
+                </p>
               </div>
               <div className="flex items-center gap-2">
-                <div className="relative flex-1">
-                  <Tag className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
-                  <input
-                    type="text"
-                    placeholder="Add tag like #relaxation"
-                    className="h-9 w-full rounded-lg border border-zinc-200/65 bg-white pl-8 pr-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-200 dark:focus:border-zinc-600"
-                    value={tagDraft}
-                    onChange={(event) => setTagDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        handleAddTag();
-                      }
-                    }}
-                  />
-                </div>
-                <Button size="sm" className="h-9 rounded-lg" onClick={handleAddTag} disabled={isBusy}>
-                  Add
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-lg px-3"
+                  onClick={clearSelection}
+                >
+                  <X className="h-4 w-4" />
+                  Clear
+                </Button>
+                <Button
+                  className="h-8 rounded-lg px-3"
+                  onClick={() => submitDeleteSelection([...selectedProjectIds], [...selectedSessionIds])}
+                  disabled={isBusy || totalSelectedCount === 0}
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete Selected
                 </Button>
               </div>
             </div>
@@ -340,32 +461,96 @@ export function HistorySidebar({
             projectGroups.map(({ project, sessions: groupSessions }) => {
               const defaultExpanded = Boolean(searchQuery.trim()) || project.id === activeProjectId || project.active;
               const isExpanded = expandedProjects[project.id] ?? defaultExpanded;
+              const isProjectSelected = selectedProjectIds.has(project.id);
               return (
                 <section
                   key={project.id}
-                  className="overflow-hidden rounded-2xl border border-zinc-200/75 bg-white/70 dark:border-zinc-800/80 dark:bg-zinc-900/45"
+                  className={cn(
+                    "overflow-hidden rounded-2xl border border-zinc-200/75 bg-white/70 dark:border-zinc-800/80 dark:bg-zinc-900/45",
+                    isProjectSelected && "border-blue-300/90 bg-blue-50/60 dark:border-blue-700/80 dark:bg-blue-950/20",
+                  )}
                 >
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     className="flex w-full items-start justify-between gap-3 px-3 py-3 text-left"
-                    onClick={() =>
-                      setExpandedProjects((current) => ({
-                        ...current,
-                        [project.id]: !(current[project.id] ?? (project.id === activeProjectId || project.active)),
-                      }))
-                    }
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      openProjectContextMenu(project.id, event.clientX, event.clientY);
+                    }}
+                    onClick={() => {
+                      if (selectionMode) {
+                        toggleProjectSelection(project.id);
+                        return;
+                      }
+                      onOpenProjectWorkspace(project.id);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        if (selectionMode) {
+                          toggleProjectSelection(project.id);
+                          return;
+                        }
+                        onOpenProjectWorkspace(project.id);
+                      }
+                    }}
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        {isExpanded ? <ChevronDown className="h-4 w-4 text-zinc-500" /> : <ChevronRight className="h-4 w-4 text-zinc-500" />}
+                        {selectionMode || isProjectSelected ? (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              toggleProjectSelection(project.id);
+                            }}
+                            className="shrink-0 text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-300"
+                            aria-label={isProjectSelected ? `Deselect project ${project.name}` : `Select project ${project.name}`}
+                          >
+                            {isProjectSelected ? <SquareCheck className="h-4 w-4 text-blue-500" /> : <Square className="h-4 w-4" />}
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            toggleProjectExpansion(project.id, project.active);
+                          }}
+                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                          aria-label={isExpanded ? `Collapse project ${project.name}` : `Expand project ${project.name}`}
+                        >
+                          {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                        </button>
                         <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{project.name}</p>
                       </div>
                       <p className="mt-1 truncate pl-6 text-xs text-zinc-500 dark:text-zinc-400">{project.root_path}</p>
                     </div>
-                    <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                      {groupSessions.length}
-                    </span>
-                  </button>
+                    <div className="flex shrink-0 items-center gap-2">
+                      <span className="rounded-full bg-zinc-100 px-2 py-1 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                        {groupSessions.length}
+                      </span>
+                      <button
+                        type="button"
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          const rect = event.currentTarget.getBoundingClientRect();
+                          openProjectContextMenu(project.id, rect.right - 196, rect.bottom + 6);
+                        }}
+                        className="rounded-md p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                        aria-label={`Open menu for project ${project.name}`}
+                      >
+                        <MoreVertical className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
 
                   {isExpanded ? (
                     <div className="space-y-2 border-t border-zinc-200/70 px-3 py-3 dark:border-zinc-800/70">
@@ -379,18 +564,34 @@ export function HistorySidebar({
                           const isRenaming = session.id === renamingSessionId;
                           const isTitlePending = session.title_state === "pending";
                           const showPendingSkeleton = isTitlePending && session.title === DEFAULT_SESSION_TITLE;
+                          const isSessionSelected = selectedSessionIds.has(session.id);
                           return (
                             <div
                               key={session.id}
                               role="button"
                               tabIndex={0}
+                              onContextMenu={(event) => {
+                                event.preventDefault();
+                                openSessionContextMenu(session.id, event.clientX, event.clientY);
+                              }}
                               onClick={() => {
+                                if (selectionMode) {
+                                  toggleSessionSelection(session.id);
+                                  return;
+                                }
                                 if (isRenaming || isBusy || isActive) {
                                   return;
                                 }
                                 onActivateSession(session.id);
                               }}
                               onKeyDown={(event) => {
+                                if (selectionMode) {
+                                  if (event.key === "Enter" || event.key === " ") {
+                                    event.preventDefault();
+                                    toggleSessionSelection(session.id);
+                                  }
+                                  return;
+                                }
                                 if (isRenaming || isBusy || isActive) {
                                   return;
                                 }
@@ -404,17 +605,32 @@ export function HistorySidebar({
                                 "cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-300 dark:focus:ring-zinc-700",
                                 "border-zinc-200/75 bg-zinc-50/70 hover:border-zinc-300/85 hover:bg-white/90 dark:border-zinc-800/80 dark:bg-zinc-950/35 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/65",
                                 isActive && "border-zinc-300 bg-zinc-100 shadow-[0_10px_28px_-22px_rgba(15,23,42,0.7)] dark:border-zinc-700 dark:bg-zinc-800/65",
+                                isSessionSelected && "border-blue-300/90 bg-blue-50/70 dark:border-blue-700/80 dark:bg-blue-950/25",
                               )}
                             >
                               <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0">
                                   <div
-                                    className="min-w-0"
+                                    className="flex min-w-0 items-start gap-2"
                                     onDoubleClick={(event) => {
                                       event.stopPropagation();
                                       beginRenameSession(session);
                                     }}
                                   >
+                                    {selectionMode || isSessionSelected ? (
+                                      <button
+                                        type="button"
+                                        onClick={(event) => {
+                                          event.preventDefault();
+                                          event.stopPropagation();
+                                          toggleSessionSelection(session.id);
+                                        }}
+                                        className="mt-0.5 shrink-0 text-zinc-400 hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-300"
+                                        aria-label={isSessionSelected ? `Deselect session ${session.title}` : `Select session ${session.title}`}
+                                      >
+                                        {isSessionSelected ? <SquareCheck className="h-4 w-4 text-blue-500" /> : <Square className="h-4 w-4" />}
+                                      </button>
+                                    ) : null}
                                     {isRenaming ? (
                                       <input
                                         autoFocus
@@ -455,9 +671,28 @@ export function HistorySidebar({
                                   </div>
                                   <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">{formatSessionTime(session.updated_at)}</p>
                                 </div>
-                                <span className="shrink-0 rounded-full bg-zinc-100 px-2 py-1 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                                  {session.message_count} msgs
-                                </span>
+                                <div className="flex shrink-0 items-center gap-2">
+                                  <span className="rounded-full bg-zinc-100 px-2 py-1 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                                    {session.message_count} msgs
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onMouseDown={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                    }}
+                                    onClick={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                      const rect = event.currentTarget.getBoundingClientRect();
+                                      openSessionContextMenu(session.id, rect.right - 196, rect.bottom + 6);
+                                    }}
+                                    className="rounded-md p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                                    aria-label={`Open menu for session ${session.title}`}
+                                  >
+                                    <MoreVertical className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
                               </div>
 
                               <p className="mt-2 max-h-10 overflow-hidden text-sm text-zinc-600 dark:text-zinc-300">
@@ -494,45 +729,59 @@ export function HistorySidebar({
           )}
         </div>
 
-        {activeSession ? (
-          <section className="rounded-2xl border border-zinc-200/75 bg-zinc-50/60 p-3 dark:border-zinc-800/80 dark:bg-zinc-900/40">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">Workspace</p>
-                <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">Web mode lists files in the session folder.</p>
-              </div>
-              <Button
-                className="h-9 rounded-lg px-3"
-                onClick={() => onOpenWorkspace(activeSession.id)}
-                disabled={isWorkspaceLoading}
-              >
-                <FolderOpen className="h-4 w-4" />
-                Open Workspace Folder
-              </Button>
-            </div>
-            {activeWorkspace ? (
-              <div className="mt-3 space-y-2">
-                <p className="break-all text-xs text-zinc-500 dark:text-zinc-400">{activeWorkspace.workspace_path}</p>
-                <div className="max-h-36 space-y-1 overflow-y-auto rounded-xl border border-zinc-200/75 bg-white/80 p-2 dark:border-zinc-800/80 dark:bg-zinc-950/45">
-                  {activeWorkspace.entries.length === 0 ? (
-                    <p className="text-xs text-zinc-500 dark:text-zinc-400">Workspace is empty.</p>
-                  ) : (
-                    activeWorkspace.entries.map((entry) => (
-                      <div
-                        key={entry.relative_path}
-                        className="flex items-center justify-between gap-3 rounded-lg px-2 py-1 text-xs text-zinc-600 dark:text-zinc-300"
-                      >
-                        <span className="truncate font-medium">{entry.is_dir ? `${entry.name}/` : entry.name}</span>
-                        <span className="shrink-0 text-zinc-400 dark:text-zinc-500">
-                          {entry.is_dir ? "dir" : `${entry.size ?? 0} B`}
-                        </span>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
+        {contextMenu ? (
+          <div
+            ref={contextMenuRef}
+            className="fixed z-50 min-w-[196px] rounded-xl border border-zinc-200/85 bg-white/95 p-1.5 shadow-xl backdrop-blur dark:border-zinc-800/85 dark:bg-zinc-950/95"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            {contextMenu.kind === "project" && contextMenuProject ? (
+              <>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                  onClick={() => {
+                    toggleProjectSelection(contextMenuProject.id);
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>{selectedProjectIds.has(contextMenuProject.id) ? "Deselect Project" : "Select Project"}</span>
+                  {selectedProjectIds.has(contextMenuProject.id) ? <SquareCheck className="h-4 w-4 text-blue-500" /> : <Square className="h-4 w-4" />}
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-red-600 transition-colors hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-950/40"
+                  onClick={() => submitDeleteSelection([contextMenuProject.id], [])}
+                >
+                  <span>Delete Project</span>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </>
             ) : null}
-          </section>
+            {contextMenu.kind === "session" && contextMenuSession ? (
+              <>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                  onClick={() => {
+                    toggleSessionSelection(contextMenuSession.id);
+                    setContextMenu(null);
+                  }}
+                >
+                  <span>{selectedSessionIds.has(contextMenuSession.id) ? "Deselect Session" : "Select Session"}</span>
+                  {selectedSessionIds.has(contextMenuSession.id) ? <SquareCheck className="h-4 w-4 text-blue-500" /> : <Square className="h-4 w-4" />}
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-red-600 transition-colors hover:bg-red-50 dark:text-red-300 dark:hover:bg-red-950/40"
+                  onClick={() => submitDeleteSelection([], [contextMenuSession.id])}
+                >
+                  <span>Delete Session</span>
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </>
+            ) : null}
+          </div>
         ) : null}
       </Panel>
     </aside>

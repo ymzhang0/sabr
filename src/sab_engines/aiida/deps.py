@@ -19,11 +19,13 @@ class AiiDADeps(BaseSABRDeps):
     
     # Metadata for the current research session
     session_id: Optional[str] = None
+    app_state: Any = None
     
     # Dictionary to store intermediate AiiDA objects or PKs 
     # that need to be shared between different tools in the same loop
     registry: Dict[str, Any] = field(default_factory=dict)
     context_nodes: List[Dict[str, Any]] = field(default_factory=list)
+    intent_hints: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """

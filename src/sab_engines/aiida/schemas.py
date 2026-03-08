@@ -39,6 +39,11 @@ class FrontendChatProjectCreateRequest(BaseModel):
     root_path: str | None = None
 
 
+class FrontendChatDeleteRequest(BaseModel):
+    project_ids: list[str] = Field(default_factory=list)
+    session_ids: list[str] = Field(default_factory=list)
+
+
 class SubmissionDraftRequest(BaseModel):
     draft: dict[str, Any] | list[dict[str, Any]] = Field(default_factory=dict)
 

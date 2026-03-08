@@ -67,6 +67,22 @@ type SubmissionPortSpec = {
   code_paths?: string[];
 };
 
+type SubmissionBatchAggregationItem = {
+  id?: number | string;
+  label?: string | null;
+  structure_pk?: number | null;
+  diff?: Record<string, unknown>;
+};
+
+type SubmissionBatchAggregation = {
+  common?: Record<string, unknown>;
+  items?: SubmissionBatchAggregationItem[];
+  variable_paths?: string[];
+  item_count?: number;
+  common_count?: number;
+  variation_count?: number;
+};
+
 export type SubmissionValidationSummary = {
   status?: string;
   is_valid?: boolean;
@@ -94,6 +110,7 @@ export type SubmissionSubmitDraft = Record<string, unknown> | Array<Record<strin
 export type SubmissionDraftPayload = {
   process_label: string;
   inputs: Record<string, unknown>;
+  batch_aggregation?: SubmissionBatchAggregation | null;
   input_groups?: SubmissionInputGroup[];
   primary_inputs?: Record<string, SubmissionPrimaryInputField | unknown>;
   recommended_inputs?: Record<string, unknown>;
@@ -110,6 +127,7 @@ export type SubmissionDraftPayload = {
     all_inputs?: Record<string, unknown> | null;
     input_groups?: SubmissionInputGroup[] | null;
     structure_metadata?: SubmissionStructureMetadata[] | null;
+    batch_aggregation?: SubmissionBatchAggregation | null;
     symmetry?: string | null;
     num_atoms?: number | null;
     estimated_runtime?: unknown;
@@ -660,6 +678,14 @@ function coerceNodeEnvelopeValue(value: unknown): unknown {
     }
     return candidate;
   }
+  const pk = toPositiveInteger(record.pk);
+  if (pk !== null) {
+    return `PK ${pk}`;
+  }
+  const uuid = typeof record.uuid === "string" ? record.uuid.trim() : "";
+  if (uuid) {
+    return `UUID ${uuid}`;
+  }
   return value;
 }
 
@@ -685,6 +711,23 @@ function summarizeNodeMetadataEnvelope(value: unknown): string {
   return `Unstored ${type}`;
 }
 
+function isEffectivelyEmptyNodeMetadataEnvelope(value: unknown): boolean {
+  const record = asRecord(value);
+  if (!record || !isNodeMetadataEnvelope(record)) {
+    return false;
+  }
+  return Object.entries(record).every(([key, entryValue]) => {
+    const lowered = key.trim().toLowerCase();
+    if (!lowered) {
+      return true;
+    }
+    if (["type", "node_type", "full_type"].includes(lowered)) {
+      return true;
+    }
+    return isMissingValue(entryValue);
+  });
+}
+
 function flattenInputPorts(payload: unknown, prefix = "", out: Record<string, unknown> = {}): Record<string, unknown> {
   if (Array.isArray(payload)) {
     if (prefix) {
@@ -708,6 +751,9 @@ function flattenInputPorts(payload: unknown, prefix = "", out: Record<string, un
     }
     const path = prefix ? `${prefix}.${cleanKey} ` : cleanKey;
     if (isNodeMetadataEnvelope(value)) {
+      if (isEffectivelyEmptyNodeMetadataEnvelope(value)) {
+        return;
+      }
       out[path] = coerceNodeEnvelopeValue(value);
       return;
     }
@@ -2188,6 +2234,392 @@ function extractBatchJobRows(submissionDraft: SubmissionDraftPayload): BatchJobD
   });
 }
 
+function normalizeBatchAggregation(value: unknown): SubmissionBatchAggregation | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+
+  const common = asRecord(record.common) ?? {};
+  const items = Array.isArray(record.items)
+    ? record.items.reduce<SubmissionBatchAggregationItem[]>((accumulator, entry, index) => {
+        const item = asRecord(entry);
+        if (!item) {
+          return accumulator;
+        }
+        accumulator.push({
+          id:
+            typeof item.id === "string" || typeof item.id === "number"
+              ? item.id
+              : index + 1,
+          label:
+            typeof item.label === "string" && item.label.trim()
+              ? item.label.trim()
+              : null,
+          structure_pk: toPositiveInteger(item.structure_pk),
+          diff: asRecord(item.diff) ?? {},
+        });
+        return accumulator;
+      }, [])
+    : [];
+  const variablePaths = Array.isArray(record.variable_paths)
+    ? record.variable_paths
+        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+        .filter(Boolean)
+    : [];
+
+  if (Object.keys(common).length === 0 && items.length === 0 && variablePaths.length === 0) {
+    return null;
+  }
+
+  return {
+    common,
+    items,
+    variable_paths: variablePaths,
+    item_count: toPositiveInteger(record.item_count) ?? items.length,
+    common_count: toPositiveInteger(record.common_count) ?? Object.keys(flattenInputPorts(common)).length,
+    variation_count: toPositiveInteger(record.variation_count) ?? variablePaths.length,
+  };
+}
+
+function normalizeComparableValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => normalizeComparableValue(entry));
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return value;
+  }
+  return Object.keys(record)
+    .sort((left, right) => left.localeCompare(right))
+    .reduce<Record<string, unknown>>((accumulator, key) => {
+      accumulator[key] = normalizeComparableValue(record[key]);
+      return accumulator;
+    }, {});
+}
+
+function areComparableValuesEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(normalizeComparableValue(left)) === JSON.stringify(normalizeComparableValue(right));
+}
+
+function flattenComparableInputPorts(payload: unknown): Record<string, unknown> {
+  const flattened = flattenInputPorts(payload);
+  return Object.entries(flattened).reduce<Record<string, unknown>>((accumulator, [path, value]) => {
+    const normalizedPath = path.trim();
+    if (!normalizedPath) {
+      return accumulator;
+    }
+    accumulator[normalizedPath] = value;
+    return accumulator;
+  }, {});
+}
+
+function extractComparableSubmissionInputs(draft: Record<string, unknown>): Record<string, unknown> {
+  const requestWrapperKeys = new Set([
+    "workchain",
+    "workchain_label",
+    "workchain_entry_point",
+    "entry_point",
+    "structure_pk",
+    "code",
+    "protocol",
+    "overrides",
+  ]);
+  const visited = new Set<Record<string, unknown>>();
+
+  const unwrap = (node: unknown, depth = 0): Record<string, unknown> | null => {
+    const record = asRecord(node);
+    if (!record || depth > 8) {
+      return null;
+    }
+    if (visited.has(record)) {
+      return null;
+    }
+    visited.add(record);
+
+    const directInputs = asRecord(record.inputs);
+    if (directInputs) {
+      return unwrap(directInputs, depth + 1) ?? directInputs;
+    }
+
+    const builderInputs = asRecord(record.builder_inputs);
+    if (builderInputs) {
+      return unwrap(builderInputs, depth + 1) ?? builderInputs;
+    }
+
+    for (const key of ["builder", "draft", "submission", "payload", "result"]) {
+      const nested = asRecord(record[key]);
+      if (!nested) {
+        continue;
+      }
+      const extracted = unwrap(nested, depth + 1);
+      if (extracted) {
+        return extracted;
+      }
+    }
+
+    const hasWrapperMarkers = Object.keys(record).some((key) => requestWrapperKeys.has(key));
+    if (hasWrapperMarkers) {
+      const namespaceLike = Object.entries(record).some(
+        ([key, value]) => !requestWrapperKeys.has(key) && asRecord(value),
+      );
+      if (!namespaceLike) {
+        return null;
+      }
+    }
+
+    return record;
+  };
+
+  return unwrap(draft) ?? {};
+}
+
+function buildBatchAggregationFromDrafts(
+  drafts: Array<Record<string, unknown>>,
+  batchJobs: BatchJobDraft[],
+): SubmissionBatchAggregation | null {
+  if (drafts.length <= 1) {
+    return null;
+  }
+
+  const flatInputsByJob = drafts.map((draft) => flattenComparableInputPorts(extractComparableSubmissionInputs(draft)));
+  const allPaths = Array.from(
+    new Set(flatInputsByJob.flatMap((flatInputs) => Object.keys(flatInputs).map((path) => path.trim()).filter(Boolean))),
+  ).sort((left, right) => left.localeCompare(right));
+  if (allPaths.length === 0) {
+    return null;
+  }
+
+  const commonFlat: Record<string, unknown> = {};
+  const variablePaths: string[] = [];
+  allPaths.forEach((path) => {
+    if (
+      flatInputsByJob.every((flatInputs) => Object.prototype.hasOwnProperty.call(flatInputs, path)) &&
+      flatInputsByJob.slice(1).every((flatInputs) => areComparableValuesEqual(flatInputsByJob[0][path], flatInputs[path]))
+    ) {
+      commonFlat[path] = flatInputsByJob[0][path];
+      return;
+    }
+    variablePaths.push(path);
+  });
+
+  const common: Record<string, unknown> = {};
+  Object.entries(commonFlat).forEach(([path, value]) => {
+    setValueByPath(common, path, value, { createMissing: true });
+  });
+
+  return {
+    common,
+    items: flatInputsByJob.map((flatInputs, index) => {
+      const diff: Record<string, unknown> = {};
+      variablePaths.forEach((path) => {
+        if (!Object.prototype.hasOwnProperty.call(flatInputs, path)) {
+          return;
+        }
+        setValueByPath(diff, path, flatInputs[path], { createMissing: true });
+      });
+      return {
+        id: index + 1,
+        label: batchJobs[index]?.formula ?? `Task ${index + 1}`,
+        structure_pk: batchJobs[index]?.pk ?? null,
+        diff,
+      };
+    }),
+    variable_paths: variablePaths,
+    item_count: drafts.length,
+    common_count: Object.keys(commonFlat).length,
+    variation_count: variablePaths.length,
+  };
+}
+
+function resolveBatchAggregation(
+  submissionDraft: SubmissionDraftPayload,
+  batchJobs: BatchJobDraft[],
+): SubmissionBatchAggregation | null {
+  const backendAggregation =
+    normalizeBatchAggregation(submissionDraft.batch_aggregation) ??
+    normalizeBatchAggregation(submissionDraft.meta.batch_aggregation);
+  if (backendAggregation && batchJobs.length <= 1) {
+    return backendAggregation;
+  }
+  if (backendAggregation && (backendAggregation.items?.length ?? 0) === batchJobs.length) {
+    return backendAggregation;
+  }
+  const fallbackAggregation = buildBatchAggregationFromDrafts(extractBatchDrafts(submissionDraft), batchJobs);
+  return fallbackAggregation ?? backendAggregation;
+}
+
+function formatBatchPathLabel(path: string): string {
+  const normalizedPath = path.trim();
+  if (!normalizedPath) {
+    return "Parameter";
+  }
+  const leaf = normalizedPath.split(".").pop()?.trim() ?? normalizedPath;
+  return formatSettingKey(leaf);
+}
+
+function summarizeBatchResources(
+  commonInputs: Record<string, unknown>,
+  parallelSettings: Record<string, unknown> | null,
+): string {
+  const flattenedCommon = flattenComparableInputPorts(commonInputs);
+  const parallel = parallelSettings ?? {};
+  const hasExplicitResourceSetting =
+    Object.keys(flattenedCommon).some((path) => path.startsWith("metadata.options.resources.") || path === "metadata.options.queue_name") ||
+    [
+      parallel.num_machines,
+      parallel.tot_num_mpiprocs,
+      parallel.num_cores_per_machine,
+      parallel.num_mpiprocs_per_machine,
+      parallel.queue_name,
+    ].some((value) => !isMissingValue(value));
+  if (!hasExplicitResourceSetting) {
+    return "System selected";
+  }
+  const numMachines =
+    toPositiveInteger(flattenedCommon["metadata.options.resources.num_machines"]) ??
+    toPositiveInteger(parallel.num_machines) ??
+    1;
+  const totalCores =
+    toPositiveInteger(flattenedCommon["metadata.options.resources.tot_num_mpiprocs"]) ??
+    toPositiveInteger(parallel.tot_num_mpiprocs) ??
+    (() => {
+      const perMachine =
+        toPositiveInteger(flattenedCommon["metadata.options.resources.num_cores_per_machine"]) ??
+        toPositiveInteger(parallel.num_cores_per_machine) ??
+        toPositiveInteger(flattenedCommon["metadata.options.resources.num_mpiprocs_per_machine"]) ??
+        toPositiveInteger(parallel.num_mpiprocs_per_machine);
+      return perMachine ? perMachine * Math.max(numMachines, 1) : null;
+    })();
+  const queueName =
+    stringifyCompact(flattenedCommon["metadata.options.queue_name"] ?? parallel.queue_name) || "";
+
+  const parts = [`${numMachines} ${numMachines === 1 ? "node" : "nodes"} / ${totalCores ?? "auto"} cores`];
+  if (queueName) {
+    parts.push(`queue ${queueName}`);
+  }
+  return parts.join(" • ");
+}
+
+function summarizeBatchCommonEntries(entries: SubmissionAllInputEntry[]): string {
+  if (entries.length === 0) {
+    return "No shared parameters detected.";
+  }
+  const prioritizedLeaves = [
+    "code",
+    "pseudo_family",
+    "pseudo_family_label",
+    "pseudos",
+    "kpoints_distance",
+    "kpoints_mesh",
+    "mesh",
+    "protocol",
+    "ecutwfc",
+    "ecutrho",
+  ];
+  const prioritized = [...entries].sort((left, right) => {
+    const leftLeaf = left.path.split(".").pop()?.trim().toLowerCase() ?? "";
+    const rightLeaf = right.path.split(".").pop()?.trim().toLowerCase() ?? "";
+    const leftRank = prioritizedLeaves.indexOf(leftLeaf);
+    const rightRank = prioritizedLeaves.indexOf(rightLeaf);
+    if (leftRank !== rightRank) {
+      if (leftRank === -1) return 1;
+      if (rightRank === -1) return -1;
+      return leftRank - rightRank;
+    }
+    return left.path.localeCompare(right.path);
+  });
+  const sample = prioritized
+    .slice(0, 3)
+    .map((entry) => `${formatBatchPathLabel(entry.path)} = ${stringifyCompact(entry.value) || "Default"}`)
+    .filter(Boolean);
+  return sample.length > 0 ? sample.join(" • ") : `${entries.length} shared parameters`;
+}
+
+function hasVisibleBatchVariationValue(value: unknown): boolean {
+  if (isMissingValue(value)) {
+    return false;
+  }
+  if (!isNodeMetadataEnvelope(value)) {
+    return true;
+  }
+  const coerced = coerceNodeEnvelopeValue(value);
+  if (coerced === value) {
+    return !isEffectivelyEmptyNodeMetadataEnvelope(value);
+  }
+  return !isMissingValue(coerced);
+}
+
+function filterVisibleBatchVariationPaths(
+  candidatePaths: string[],
+  diffMaps: Array<Record<string, unknown>>,
+): string[] {
+  const dedupedPaths = Array.from(new Set(candidatePaths.map((path) => path.trim()).filter(Boolean)));
+  return dedupedPaths.filter((path) =>
+    diffMaps.some(
+      (diff) =>
+        Object.prototype.hasOwnProperty.call(diff, path) && hasVisibleBatchVariationValue(diff[path]),
+    ),
+  );
+}
+
+function normalizeBatchCommonDisplayValue(value: unknown): unknown | null {
+  if (isNodeMetadataEnvelope(value)) {
+    if (isEffectivelyEmptyNodeMetadataEnvelope(value)) {
+      return null;
+    }
+    return coerceNodeEnvelopeValue(value);
+  }
+
+  if (Array.isArray(value)) {
+    const normalizedItems = value
+      .map((entry) => normalizeBatchCommonDisplayValue(entry))
+      .filter((entry) => {
+        if (entry === null || entry === undefined) {
+          return false;
+        }
+        if (typeof entry === "string") {
+          return entry.trim() !== "";
+        }
+        if (Array.isArray(entry)) {
+          return entry.length > 0;
+        }
+        const record = asRecord(entry);
+        return !record || Object.keys(record).length > 0;
+      });
+    return normalizedItems.length > 0 ? normalizedItems : null;
+  }
+
+  const record = asRecord(value);
+  if (record) {
+    const normalizedRecord = Object.entries(record).reduce<Record<string, unknown>>((accumulator, [rawKey, childValue]) => {
+      const key = rawKey.trim();
+      if (!key || INTERNAL_METADATA_KEYS.has(key.toLowerCase())) {
+        return accumulator;
+      }
+      const normalizedChild = normalizeBatchCommonDisplayValue(childValue);
+      if (normalizedChild === null || normalizedChild === undefined) {
+        return accumulator;
+      }
+      if (typeof normalizedChild === "string" && normalizedChild.trim() === "") {
+        return accumulator;
+      }
+      if (Array.isArray(normalizedChild) && normalizedChild.length === 0) {
+        return accumulator;
+      }
+      const childRecord = asRecord(normalizedChild);
+      if (childRecord && Object.keys(childRecord).length === 0) {
+        return accumulator;
+      }
+      accumulator[key] = normalizedChild;
+      return accumulator;
+    }, {});
+    return Object.keys(normalizedRecord).length > 0 ? normalizedRecord : null;
+  }
+
+  return isMissingValue(value) ? null : value;
+}
+
 export function SubmissionModal({
   open,
   turnId,
@@ -2206,11 +2638,11 @@ export function SubmissionModal({
   const [draftState, setDraftState] = useState<Record<string, DraftFieldEditorValue>>({});
   const [draftStateErrors, setDraftStateErrors] = useState<Record<string, string>>({});
   const [expandedJsonFields, setExpandedJsonFields] = useState<Record<string, boolean>>({});
-  const [globalOverridePath, setGlobalOverridePath] = useState("");
-  const [globalOverrideValue, setGlobalOverrideValue] = useState("");
   const [codeSearchByPath, setCodeSearchByPath] = useState<Record<string, string>>({});
   const [selectedNamespace, setSelectedNamespace] = useState("");
   const [showValidationDetails, setShowValidationDetails] = useState(false);
+  const [showBatchCommonParameters, setShowBatchCommonParameters] = useState(false);
+  const [collapsedBatchCommonPaths, setCollapsedBatchCommonPaths] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (!open || mode === "inline") {
@@ -2447,10 +2879,6 @@ export function SubmissionModal({
     () => allDraftFields.filter((field) => field.isRecommended),
     [allDraftFields],
   );
-  const globalOverrideOptions = useMemo(
-    () => allDraftFields.filter((field) => field.kind !== "json"),
-    [allDraftFields],
-  );
   const validationSummary = useMemo(
     () => normalizeValidationSummary(submissionDraft?.meta.validation_summary, asRecord(submissionDraft?.meta.validation)),
     [submissionDraft],
@@ -2497,6 +2925,50 @@ export function SubmissionModal({
     [submissionDraft],
   );
   const isBatchDraft = batchJobs.length > 1;
+  const batchAggregation = useMemo(
+    () => (submissionDraft ? resolveBatchAggregation(submissionDraft, batchJobs) : null),
+    [batchJobs, submissionDraft],
+  );
+  const batchCommonSource = useMemo<Record<string, unknown>>(
+    () => (asRecord(batchAggregation?.common) ?? asRecord(submissionDraft?.inputs) ?? {}),
+    [batchAggregation?.common, submissionDraft?.inputs],
+  );
+  const batchCommonPaths = useMemo(
+    () => new Set(Object.keys(flattenComparableInputPorts(batchCommonSource))),
+    [batchCommonSource],
+  );
+  const batchCommonEntries = useMemo(
+    () =>
+      inspectorInputEntries.filter((entry) => {
+        const leaf = entry.path.split(".").pop()?.trim().toLowerCase() ?? "";
+        return batchCommonPaths.has(entry.path) && !INTERNAL_METADATA_KEYS.has(leaf);
+      }),
+    [batchCommonPaths, inspectorInputEntries],
+  );
+  const batchCommonDisplayTree = useMemo(
+    () => normalizeBatchCommonDisplayValue(batchCommonSource),
+    [batchCommonSource],
+  );
+  const batchVariationDiffs = useMemo(
+    () => (batchAggregation?.items ?? []).map((item) => flattenComparableInputPorts(item.diff ?? {})),
+    [batchAggregation],
+  );
+  const batchVariationPaths = useMemo(() => {
+    const backendPaths =
+      batchAggregation?.variable_paths && batchAggregation.variable_paths.length > 0
+        ? batchAggregation.variable_paths
+        : null;
+    if (backendPaths) {
+      return filterVisibleBatchVariationPaths(backendPaths, batchVariationDiffs);
+    }
+    const fromItems = (batchAggregation?.items ?? [])
+      .flatMap((item) => Object.keys(flattenComparableInputPorts(item.diff ?? {})))
+      .filter(Boolean);
+    return filterVisibleBatchVariationPaths(
+      Array.from(new Set(fromItems)).sort((left, right) => left.localeCompare(right)),
+      batchVariationDiffs,
+    );
+  }, [batchAggregation?.items, batchAggregation?.variable_paths, batchVariationDiffs]);
   const selectedBatchJobs = useMemo(
     () => batchJobs.filter((job) => selectedBatchIds.includes(job.id)),
     [batchJobs, selectedBatchIds],
@@ -2532,11 +3004,11 @@ export function SubmissionModal({
       setDraftState({});
       setDraftStateErrors({});
       setExpandedJsonFields({});
-      setGlobalOverridePath("");
-      setGlobalOverrideValue("");
       setCodeSearchByPath({});
       setSelectedNamespace("");
       setShowValidationDetails(false);
+      setShowBatchCommonParameters(false);
+      setCollapsedBatchCommonPaths({});
       prevTurnIdRef.current = turnId;
       return;
     }
@@ -2565,16 +3037,9 @@ export function SubmissionModal({
       setDraftStateErrors({});
       setExpandedJsonFields({});
       setCodeSearchByPath(nextCodeSearch);
-      const preferredOverride =
-        Object.values(nextDraftState).find((field) => field.isRecommended) ?? Object.values(nextDraftState)[0];
-      if (preferredOverride) {
-        setGlobalOverridePath(preferredOverride.path);
-        setGlobalOverrideValue(String(preferredOverride.value));
-      } else {
-        setGlobalOverridePath("");
-        setGlobalOverrideValue("");
-      }
       setShowValidationDetails(false);
+      setShowBatchCommonParameters(false);
+      setCollapsedBatchCommonPaths({});
     }
 
     prevTurnIdRef.current = turnId;
@@ -2608,6 +3073,27 @@ export function SubmissionModal({
     ? inferUiTypeFromPathAndValue(targetWorkdirPath, targetWorkdirValue)
     : "text";
   const selectedJobsForSummary = isBatchDraft && selectedBatchJobs.length > 0 ? selectedBatchJobs : batchJobs;
+  const batchCommonSummaryText = useMemo(
+    () => summarizeBatchCommonEntries(batchCommonEntries),
+    [batchCommonEntries],
+  );
+  const batchResourceSummary = useMemo(
+    () =>
+      summarizeBatchResources(
+        batchAggregation?.common ?? submissionDraft?.inputs ?? {},
+        asRecord(submissionDraft?.meta.parallel_settings),
+      ),
+    [batchAggregation?.common, submissionDraft?.inputs, submissionDraft?.meta.parallel_settings],
+  );
+  const batchMatrixRows = useMemo(
+    () =>
+      batchJobs.map((job, index) => ({
+        job,
+        diffByPath: batchVariationDiffs[index] ?? {},
+        item: batchAggregation?.items?.[index] ?? null,
+      })),
+    [batchAggregation?.items, batchJobs, batchVariationDiffs],
+  );
   const symmetrySummary = useMemo(() => {
     if (isBatchDraft) {
       const symmetryValues = selectedJobsForSummary
@@ -2676,6 +3162,7 @@ export function SubmissionModal({
   const isInlineMode = mode === "inline";
   const isExpanded = isInlineMode ? expanded : true;
   const canClose = state.status !== "submitting";
+  const isPreviewActionable = state.status === "idle";
 
   const clearDraftFieldError = (path: string) => {
     setDraftStateErrors((current) => {
@@ -2686,6 +3173,13 @@ export function SubmissionModal({
       delete next[path];
       return next;
     });
+  };
+
+  const toggleBatchCommonPathCollapsed = (path: string) => {
+    setCollapsedBatchCommonPaths((current) => ({
+      ...current,
+      [path]: !Boolean(current[path]),
+    }));
   };
 
   const updateDraftFieldValue = (path: string, nextValue: boolean | string) => {
@@ -2790,11 +3284,14 @@ export function SubmissionModal({
     options?: {
       isCodeField?: boolean;
       isInheritedCode?: boolean;
+      appearance?: "default" | "common-tree";
     },
   ): ReactNode => {
     const field = draftState[path];
     const isCodeField = Boolean(options?.isCodeField);
     const isInheritedCode = Boolean(options?.isInheritedCode);
+    const appearance = options?.appearance ?? "default";
+    const isCommonTree = appearance === "common-tree";
     if (!field) {
       return (
         <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">
@@ -2830,6 +3327,36 @@ export function SubmissionModal({
       ];
 
       if (hasSelectableOptions) {
+        if (isCommonTree) {
+          return (
+            <div className="min-w-0">
+              <CommandPaletteSelect
+                value={currentValue}
+                options={codeSelectOptions}
+                placeholder={
+                  submissionDraft?.meta.required_code_plugin
+                    ? `Select ${submissionDraft.meta.required_code_plugin} code`
+                    : "Select code label"
+                }
+                fallbackLabel={currentValue || undefined}
+                emptyLabel="No matching codes"
+                searchable={false}
+                ariaLabel={`Select code for ${path}`}
+                className="w-full"
+                triggerClassName={cn(
+                  "flex w-full items-center justify-between rounded-none border-0 border-b bg-transparent px-0 py-1 font-mono text-xs shadow-none",
+                  error
+                    ? "border-rose-300 text-rose-700 hover:bg-transparent dark:border-rose-700 dark:text-rose-300"
+                    : "border-slate-200 text-slate-700 hover:bg-transparent dark:border-slate-700 dark:text-slate-100",
+                )}
+                onChange={(nextValue) => updateDraftFieldValue(path, nextValue)}
+              />
+              {error ? (
+                <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
+              ) : null}
+            </div>
+          );
+        }
         return (
           <div className="min-w-0 space-y-1">
             {isInheritedCode ? (
@@ -2895,8 +3422,10 @@ export function SubmissionModal({
             value={currentValue}
             onChange={(event) => updateDraftFieldValue(path, event.currentTarget.value)}
             className={cn(
-              "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
-              compact ? "h-8" : "h-9",
+              isCommonTree
+                ? "w-full rounded-none border-0 border-b bg-transparent px-0 py-1 font-mono text-xs text-slate-700 outline-none transition-colors dark:text-slate-100"
+                : "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+              compact && !isCommonTree ? "h-8" : !isCommonTree ? "h-9" : "",
               error
                 ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
                 : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
@@ -2936,7 +3465,9 @@ export function SubmissionModal({
                     updateDraftFieldValue(path, serializeMeshTriplet(nextValues));
                   }}
                   className={cn(
-                    "w-14 rounded-md border px-1.5 py-1 text-center text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+                    isCommonTree
+                      ? "w-14 rounded-none border-0 border-b bg-transparent px-0 py-1 text-center font-mono text-xs text-blue-600 outline-none transition-colors dark:text-blue-300"
+                      : "w-14 rounded-md border px-1.5 py-1 text-center text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
                     error
                       ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
                       : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
@@ -2954,6 +3485,23 @@ export function SubmissionModal({
     }
 
     if (field.kind === "boolean" || uiType === "toggle") {
+      if (isCommonTree) {
+        return (
+          <button
+            type="button"
+            className={cn(
+              "font-mono text-xs font-semibold transition-colors",
+              Boolean(field.value)
+                ? "text-violet-600 hover:text-violet-700 dark:text-violet-300 dark:hover:text-violet-200"
+                : "text-violet-500 hover:text-violet-600 dark:text-violet-400 dark:hover:text-violet-300",
+            )}
+            onClick={() => updateDraftFieldValue(path, !Boolean(field.value))}
+            title="Click to toggle"
+          >
+            {Boolean(field.value) ? "true" : "false"}
+          </button>
+        );
+      }
       return (
         <button
           type="button"
@@ -2980,7 +3528,7 @@ export function SubmissionModal({
 
     if (field.kind === "json" || uiType === "dict") {
       const rawEntryValue = entryValueByPath[path];
-      if (isNodeMetadataEnvelope(rawEntryValue) && coerceNodeEnvelopeValue(rawEntryValue) === rawEntryValue) {
+      if (isNodeMetadataEnvelope(rawEntryValue) && isEffectivelyEmptyNodeMetadataEnvelope(rawEntryValue)) {
         return (
           <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">
             {summarizeNodeMetadataEnvelope(rawEntryValue)}
@@ -3067,8 +3615,15 @@ export function SubmissionModal({
           value={String(field.value)}
           onChange={(event) => updateDraftFieldValue(path, event.currentTarget.value)}
           className={cn(
-            "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
-            compact ? "h-8" : "h-9",
+            isCommonTree
+              ? cn(
+                  "w-full rounded-none border-0 border-b bg-transparent px-0 py-1 font-mono text-xs outline-none transition-colors",
+                  field.kind === "number"
+                    ? "text-blue-600 dark:text-blue-300"
+                    : "text-slate-700 dark:text-slate-100",
+                )
+              : "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
+            compact && !isCommonTree ? "h-8" : !isCommonTree ? "h-9" : "",
             error
               ? "border-rose-300 focus:border-rose-500 dark:border-rose-700"
               : "border-slate-300 focus:border-blue-500 dark:border-slate-700",
@@ -3078,6 +3633,150 @@ export function SubmissionModal({
         {error ? (
           <p className="mt-1 text-[11px] text-rose-600 dark:text-rose-300">{error}</p>
         ) : null}
+      </div>
+    );
+  };
+
+  const renderBatchCommonStaticValue = (value: unknown): ReactNode => {
+    if (typeof value === "number") {
+      return <span className="font-mono text-sm text-blue-600 dark:text-blue-300">{String(value)}</span>;
+    }
+    if (typeof value === "boolean") {
+      return (
+        <span className="font-mono text-sm font-semibold text-violet-600 dark:text-violet-300">
+          {value ? "true" : "false"}
+        </span>
+      );
+    }
+    if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) {
+      return <span className="font-mono text-sm text-slate-400 dark:text-slate-500">Default</span>;
+    }
+    return (
+      <span className="break-all font-mono text-sm text-slate-700 dark:text-slate-200">
+        {String(value)}
+      </span>
+    );
+  };
+
+  const renderBatchCommonLeafValue = (path: string, value: unknown): ReactNode => {
+    const uiType = inferUiTypeFromPathAndValue(path, entryValueByPath[path] ?? value);
+    const leafKey = path.split(".").pop()?.trim().toLowerCase() ?? "";
+    const isCodeField = codeFieldPaths.has(path) || leafKey === "code";
+    if (draftState[path]) {
+      return renderEditableFieldControl(path, uiType, true, {
+        isCodeField,
+        isInheritedCode: inheritedCodePaths.has(path),
+        appearance: "common-tree",
+      });
+    }
+    return renderBatchCommonStaticValue(value);
+  };
+
+  const renderBatchCommonTree = (value: unknown, path = "", _depth = 0): ReactNode => {
+    const normalizedValue = normalizeBatchCommonDisplayValue(value);
+    if (normalizedValue === null || normalizedValue === undefined) {
+      return null;
+    }
+
+    if (Array.isArray(normalizedValue)) {
+      const uiType = path ? inferUiTypeFromPathAndValue(path, entryValueByPath[path] ?? normalizedValue) : "dict";
+      if (path && uiType === "mesh" && draftState[path]) {
+        return renderBatchCommonLeafValue(path, normalizedValue);
+      }
+      const useNumbering = normalizedValue.some((entry) => Array.isArray(entry) || Boolean(asRecord(entry)));
+      return (
+        <div className="space-y-2">
+          {normalizedValue.map((entry, index) => (
+            <div key={`${path || "root"} -list-item- ${index} `} className="flex items-start gap-3">
+              <span className="w-4 shrink-0 pt-1 text-xs text-slate-400 dark:text-slate-500">
+                {useNumbering ? `${index + 1}.` : "\u2022"}
+              </span>
+              <div className="min-w-0 flex-1">
+                {Array.isArray(entry) || asRecord(entry)
+                  ? renderBatchCommonTree(entry, path ? `${path}.${index}` : String(index), _depth + 1)
+                  : renderBatchCommonStaticValue(entry)}
+              </div>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    const record = asRecord(normalizedValue);
+    if (!record) {
+      return path ? renderBatchCommonLeafValue(path, normalizedValue) : renderBatchCommonStaticValue(normalizedValue);
+    }
+
+    return (
+      <div className="space-y-3">
+        {Object.entries(record).map(([rawKey, childValue]) => {
+          const key = rawKey.trim();
+          if (!key) {
+            return null;
+          }
+          const childPath = path ? `${path}.${key}` : key;
+          const normalizedChild = normalizeBatchCommonDisplayValue(childValue);
+          if (normalizedChild === null || normalizedChild === undefined) {
+            return null;
+          }
+
+          const childUiType = inferUiTypeFromPathAndValue(childPath, entryValueByPath[childPath] ?? normalizedChild);
+          const isLeaf =
+            !Array.isArray(normalizedChild) &&
+            !asRecord(normalizedChild);
+          const isEditableArrayLeaf =
+            Array.isArray(normalizedChild) && childUiType === "mesh" && Boolean(draftState[childPath]);
+          const isCollapsed = Boolean(collapsedBatchCommonPaths[childPath]);
+
+          if (isLeaf || isEditableArrayLeaf) {
+            return (
+              <div
+                key={`${turnId} -batch-common-tree-leaf- ${childPath} `}
+                className="grid gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,220px)_1fr]"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-slate-500 dark:text-slate-400">
+                    {formatSettingKey(key)}
+                  </p>
+                  <p className="mt-0.5 truncate text-[11px] text-slate-400 dark:text-slate-500" title={`inputs.${childPath} `}>
+                    inputs.{childPath}
+                  </p>
+                </div>
+                <div className="min-w-0">
+                  {renderBatchCommonLeafValue(childPath, normalizedChild)}
+                </div>
+              </div>
+            );
+          }
+
+          return (
+            <div key={`${turnId} -batch-common-tree-group- ${childPath} `} className="space-y-2">
+              <button
+                type="button"
+                className="flex w-full items-start gap-2 text-left"
+                onClick={() => toggleBatchCommonPathCollapsed(childPath)}
+                aria-expanded={!isCollapsed}
+              >
+                <span className="mt-0.5 shrink-0 text-slate-400 dark:text-slate-500">
+                  {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                </span>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-slate-500 dark:text-slate-400">
+                    {formatSettingKey(key)}
+                  </p>
+                  <p className="mt-0.5 truncate text-[11px] text-slate-400 dark:text-slate-500" title={`inputs.${childPath} `}>
+                    inputs.{childPath}
+                  </p>
+                </div>
+              </button>
+              {!isCollapsed ? (
+                <div className="border-l border-[#e2e8f0] pl-6 dark:border-slate-700/80">
+                  {renderBatchCommonTree(normalizedChild, childPath, _depth + 1)}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
     );
   };
@@ -3198,9 +3897,15 @@ export function SubmissionModal({
                 {submissionDraft.process_label}
               </h2>
               <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
-                <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                  Structure: {primaryFields.structure?.pk ? `#${primaryFields.structure.pk} ` : "System selected"}
-                </span>
+                {isBatchDraft ? (
+                  <span className="inline-flex rounded-full bg-blue-100 px-2.5 py-0.5 font-semibold text-blue-700 dark:bg-blue-900/35 dark:text-blue-200">
+                    Batch: {batchJobs.length} Tasks
+                  </span>
+                ) : (
+                  <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
+                    Structure: {primaryFields.structure?.pk ? `#${primaryFields.structure.pk} ` : "System selected"}
+                  </span>
+                )}
                 <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
                   Symmetry: {symmetrySummary}
                 </span>
@@ -3212,6 +3917,11 @@ export function SubmissionModal({
                 </span>
                 {isBatchDraft ? (
                   <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
+                    Resources: {batchResourceSummary}
+                  </span>
+                ) : null}
+                {isBatchDraft ? (
+                  <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
                     {selectedBatchJobs.length}/{batchJobs.length} selected
                   </span>
                 ) : null}
@@ -3221,6 +3931,18 @@ export function SubmissionModal({
               {state.status === "submitted" ? (
                 <span className="inline-flex h-9 items-center rounded-md border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-medium text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
                   Submitted
+                </span>
+              ) : state.status === "cancelled" ? (
+                <span className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-slate-100 px-2.5 text-xs font-medium text-slate-600 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
+                  Cancelled
+                </span>
+              ) : state.status === "error" ? (
+                <span className="inline-flex h-9 items-center rounded-md border border-rose-200 bg-rose-50 px-2.5 text-xs font-medium text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+                  Archived
+                </span>
+              ) : state.status === "submitting" ? (
+                <span className="inline-flex h-9 items-center rounded-md border border-blue-200 bg-blue-50 px-2.5 text-xs font-medium text-blue-700 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300">
+                  Submitting
                 </span>
               ) : null}
               {isInlineMode && onToggleExpanded ? (
@@ -3242,7 +3964,7 @@ export function SubmissionModal({
               ) : null}
               {!isInlineMode ? (
                 <>
-                  {state.status !== "submitted" ? (
+                  {isPreviewActionable ? (
                     <Button
                       size="sm"
                       className="bg-blue-600 text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
@@ -3259,21 +3981,23 @@ export function SubmissionModal({
                           Submitting...
                         </span>
                       ) : isBatchDraft ? (
-                        "Launch All"
+                        "Confirm Batch"
                       ) : (
                         "Launch"
                       )}
                     </Button>
                   ) : null}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="border-slate-300 bg-white/80 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                    onClick={state.status === "submitted" ? onClose : onCancel}
-                    disabled={state.status === "submitting"}
-                  >
-                    {state.status === "submitted" ? "Close" : "Cancel"}
-                  </Button>
+                  {isPreviewActionable ? (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="border-slate-300 bg-white/80 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+                      onClick={onCancel}
+                      disabled={state.status === "submitting"}
+                    >
+                      Cancel
+                    </Button>
+                  ) : null}
                   <button
                     type="button"
                     className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
@@ -3291,12 +4015,14 @@ export function SubmissionModal({
 
         {!isExpanded ? (
           <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-            Expand this submission card to review grouped ports and edit K-mesh before launch.
+            {isBatchDraft
+              ? "Expand this batch card to review shared inputs and the variation matrix before confirmation."
+              : "Expand this submission card to review grouped ports and edit K-mesh before launch."}
           </p>
         ) : null}
         {isExpanded ? (
           <>
-            {!isProtocolBuilder ? (
+            {!isProtocolBuilder && !isBatchDraft ? (
               <div className="mt-4 grid gap-2 md:grid-cols-3">
                 {keyParameterEntries.map((entry) => (
                   <div
@@ -3320,102 +4046,100 @@ export function SubmissionModal({
             ) : null}
 
             {isBatchDraft ? (
-              <div className="mt-4">
+              <div className="mt-4 space-y-4">
+                <div className="rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50 via-white to-slate-50 px-4 py-4 dark:border-blue-900/50 dark:from-blue-950/20 dark:via-slate-950/30 dark:to-slate-950/40">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-blue-700/80 dark:text-blue-300/80">
+                        Batch Summary
+                      </p>
+                      <h3 className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">
+                        {batchJobs.length} linked tasks ready for submission
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                        Shared resources: {batchResourceSummary}
+                      </p>
+                    </div>
+                    <span className="inline-flex rounded-full bg-blue-600 px-3 py-1 text-xs font-semibold text-white shadow-sm dark:bg-blue-500">
+                      Batch: {batchJobs.length} Tasks
+                    </span>
+                  </div>
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
+                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                      {selectedBatchJobs.length}/{batchJobs.length} selected
+                    </span>
+                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                      {batchCommonEntries.length} shared parameters
+                    </span>
+                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                      {batchVariationPaths.length} varying fields
+                    </span>
+                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                      Time Est.: {runtimeSummary}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-slate-200/90 bg-white dark:border-slate-800 dark:bg-slate-950/30">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+                    onClick={() => setShowBatchCommonParameters((current) => !current)}
+                    aria-expanded={showBatchCommonParameters}
+                  >
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
+                        Common Parameters
+                      </p>
+                      <p className="mt-1 text-sm text-slate-700 dark:text-slate-200">
+                        {batchCommonSummaryText}
+                      </p>
+                    </div>
+                    <ChevronDown
+                      className={cn(
+                        "h-4 w-4 text-slate-400 transition-transform duration-200",
+                        showBatchCommonParameters ? "rotate-180" : "rotate-0",
+                      )}
+                    />
+                  </button>
+                  {showBatchCommonParameters ? (
+                    <div className="px-4 pb-4">
+                      {batchCommonEntries.length > 0 && batchCommonDisplayTree ? (
+                        <div className="minimal-scrollbar max-h-[360px] overflow-auto">
+                          {renderBatchCommonTree(batchCommonDisplayTree)}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-500 dark:text-slate-400">
+                          No shared parameters were inferred for this batch.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+
                 <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-900/35">
-                  <div className="flex items-center justify-between border-b border-slate-200/80 px-3 py-2 dark:border-slate-800">
-                    <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
-                      High-Throughput Task List
-                    </p>
+                  <div className="flex flex-col gap-1 border-b border-slate-200/80 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
+                        Variation Matrix
+                      </p>
+                      <p className="mt-1 text-sm text-slate-700 dark:text-slate-200">
+                        {batchVariationPaths.length > 0
+                          ? `${batchVariationPaths.length} varying fields across ${batchJobs.length} tasks`
+                          : "No variable inputs detected across the selected tasks."}
+                      </p>
+                    </div>
                     <span className="text-xs text-slate-500 dark:text-slate-400">
                       {selectedBatchJobs.length}/{batchJobs.length} selected
                     </span>
                   </div>
-                  {globalOverrideOptions.length > 0 ? (
-                    <div className="flex flex-wrap items-center gap-2 border-b border-slate-200/70 px-3 py-2 text-xs dark:border-slate-800">
-                      <span className="font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                        Apply To All
-                      </span>
-                      <CommandPaletteSelect
-                        value={globalOverridePath}
-                        options={globalOverrideOptions.map((field) => ({
-                          value: field.path,
-                          label: field.label,
-                          keywords: [field.path],
-                        }))}
-                        ariaLabel="Select field to override for all jobs"
-                        searchable={globalOverrideOptions.length > 8}
-                        className="min-w-[220px]"
-                        triggerClassName="flex w-full items-center justify-between rounded-md px-1.5 py-1 text-xs text-slate-700 dark:text-slate-100"
-                        onChange={(nextPath) => {
-                          setGlobalOverridePath(nextPath);
-                          const field = draftState[nextPath];
-                          if (field) {
-                            setGlobalOverrideValue(String(field.value));
-                          }
-                        }}
-                      />
-                      {draftState[globalOverridePath]?.kind === "boolean" ? (
-                        <label className="inline-flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-300">
-                          <input
-                            type="checkbox"
-                            checked={/^true$/i.test(globalOverrideValue)}
-                            onChange={(event) => {
-                              setGlobalOverrideValue(event.currentTarget.checked ? "true" : "false");
-                            }}
-                            className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
-                          />
-                          Enabled
-                        </label>
-                      ) : (
-                        <input
-                          value={globalOverrideValue}
-                          onChange={(event) => setGlobalOverrideValue(event.currentTarget.value)}
-                          className="min-w-[160px] rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:border-blue-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
-                          placeholder="Override value"
-                        />
+                  <div className="minimal-scrollbar max-h-[360px] overflow-auto">
+                    <table
+                      className={cn(
+                        "w-full text-left text-sm",
+                        batchVariationPaths.length > 0 ? "min-w-[760px]" : "min-w-[520px]",
                       )}
-                      <Button
-                        type="button"
-                        size="sm"
-                        className="h-7 bg-blue-600 px-2.5 text-[11px] text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
-                        onClick={() => {
-                          const targetPath = globalOverridePath.trim();
-                          if (!targetPath) {
-                            return;
-                          }
-                          setDraftState((current) => {
-                            const field = current[targetPath];
-                            if (!field) {
-                              return current;
-                            }
-                            const nextValue =
-                              field.kind === "boolean"
-                                ? /^(true|1|yes|on)$/i.test(globalOverrideValue.trim())
-                                : globalOverrideValue;
-                            return {
-                              ...current,
-                              [targetPath]: {
-                                ...field,
-                                value: nextValue,
-                              },
-                            };
-                          });
-                          setDraftStateErrors((current) => {
-                            if (!current[targetPath]) {
-                              return current;
-                            }
-                            const next = { ...current };
-                            delete next[targetPath];
-                            return next;
-                          });
-                        }}
-                      >
-                        Apply
-                      </Button>
-                    </div>
-                  ) : null}
-                  <div className="minimal-scrollbar max-h-[280px] overflow-auto">
-                    <table className="w-full min-w-[680px] text-left text-sm">
+                    >
                       <thead className="sticky top-0 bg-slate-100/95 text-[11px] uppercase tracking-[0.12em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
                         <tr>
                           <th className="px-3 py-2">
@@ -3433,20 +4157,29 @@ export function SubmissionModal({
                               className="h-3.5 w-3.5 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-700"
                             />
                           </th>
-                          <th className="px-3 py-2">PK</th>
-                          <th className="px-3 py-2">Formula</th>
-                          <th className="px-3 py-2">Symmetry</th>
-                          <th className="px-3 py-2">Estimated Time</th>
+                          <th className="px-3 py-2">Task</th>
+                          {batchVariationPaths.map((path) => (
+                            <th key={`${turnId} -batch-column - ${path} `} className="px-3 py-2 align-bottom">
+                              <div className="min-w-[130px]">
+                                <p className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                                  {formatBatchPathLabel(path)}
+                                </p>
+                                <p className="mt-0.5 text-[10px] normal-case tracking-normal text-slate-400 dark:text-slate-500">
+                                  {path}
+                                </p>
+                              </div>
+                            </th>
+                          ))}
                         </tr>
                       </thead>
                       <tbody>
-                        {batchJobs.map((job) => {
+                        {batchMatrixRows.map(({ job, diffByPath, item }, index) => {
                           const selected = selectedBatchIds.includes(job.id);
                           return (
                             <tr
-                              key={`${turnId} -batch - ${job.id} `}
+                              key={`${turnId} -batch-matrix - ${job.id} `}
                               className={cn(
-                                "border-t border-slate-200/70 text-slate-700 dark:border-slate-800 dark:text-slate-200",
+                                "border-t border-slate-200/70 align-top text-slate-700 dark:border-slate-800 dark:text-slate-200",
                                 selected ? "bg-white/60 dark:bg-slate-950/20" : "opacity-75",
                               )}
                             >
@@ -3466,25 +4199,60 @@ export function SubmissionModal({
                                 />
                               </td>
                               <td className="px-3 py-2">
-                                {job.pk ? (
-                                  <button
-                                    type="button"
-                                    className="font-mono text-sky-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-200"
-                                    onClick={() => onOpenDetail(job.pk!)}
-                                  >
-                                    #{job.pk}
-                                  </button>
-                                ) : (
-                                  <span className="text-slate-400 dark:text-slate-500">-</span>
-                                )}
+                                <div className="min-w-[180px]">
+                                  <p className="truncate font-semibold text-slate-800 dark:text-slate-100" title={job.formula}>
+                                    {job.formula}
+                                  </p>
+                                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500 dark:text-slate-400">
+                                    <span>Task {index + 1}</span>
+                                    {job.pk ? (
+                                      <button
+                                        type="button"
+                                        className="font-mono text-sky-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-200"
+                                        onClick={() => onOpenDetail(job.pk!)}
+                                      >
+                                        #{job.pk}
+                                      </button>
+                                    ) : null}
+                                    <span>{job.runtimeEstimate}</span>
+                                  </div>
+                                  {item?.label && item.label !== job.formula ? (
+                                    <p className="mt-1 truncate text-[10px] text-slate-400 dark:text-slate-500">
+                                      {item.label}
+                                    </p>
+                                  ) : null}
+                                </div>
                               </td>
-                              <td className="max-w-[220px] px-3 py-2" title={job.formula}>
-                                <span className="block truncate">{job.formula}</span>
-                              </td>
-                              <td className="max-w-[180px] px-3 py-2" title={job.symmetry}>
-                                <span className="block truncate">{job.symmetry}</span>
-                              </td>
-                              <td className="px-3 py-2">{job.runtimeEstimate}</td>
+                              {batchVariationPaths.length > 0 ? (
+                                batchVariationPaths.map((path) => {
+                                  const rawValue = diffByPath[path];
+                                  const displayValue = isNodeMetadataEnvelope(rawValue)
+                                    ? coerceNodeEnvelopeValue(rawValue)
+                                    : rawValue;
+                                  return (
+                                    <td
+                                      key={`${turnId} -batch-cell - ${job.id} - ${path} `}
+                                      className="max-w-[220px] px-3 py-2"
+                                    >
+                                      {Object.prototype.hasOwnProperty.call(diffByPath, path) ? (
+                                        <div className="break-all text-slate-700 dark:text-slate-200">
+                                          {renderValueNode(
+                                            displayValue,
+                                            `${turnId} -batch-cell-value - ${job.id} - ${path} `,
+                                            onOpenDetail,
+                                          )}
+                                        </div>
+                                      ) : (
+                                        <span className="text-slate-400 dark:text-slate-500">-</span>
+                                      )}
+                                    </td>
+                                  );
+                                })
+                              ) : (
+                                <td className="px-3 py-2 text-slate-500 dark:text-slate-400">
+                                  No variable values
+                                </td>
+                              )}
                             </tr>
                           );
                         })}
@@ -3548,32 +4316,33 @@ export function SubmissionModal({
               </>
             )}
 
-            <div className={cn("rounded-xl border border-slate-200/85 bg-slate-50/75 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/35", isProtocolBuilder ? "mt-4" : "mt-3")}>
-              <div className="flex flex-col gap-2">
-                {protocolHint ? (
-                  <div className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 font-mono text-[10px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300">
-                    <span className="font-semibold">Protocol Call: </span>
-                    {protocolHint}
-                  </div>
-                ) : null}
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
-                    Builder Port Hierarchy
-                  </p>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                      {recommendedDraftFields.length} recommended
-                    </span>
-                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                      {allDraftFields.length} editable ports
-                    </span>
-                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                      {groupedInputSections.length} spec groups
-                    </span>
+            {!isBatchDraft ? (
+              <div className={cn("rounded-xl border border-slate-200/85 bg-slate-50/75 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/35", isProtocolBuilder ? "mt-4" : "mt-3")}>
+                <div className="flex flex-col gap-2">
+                  {protocolHint ? (
+                    <div className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 font-mono text-[10px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300">
+                      <span className="font-semibold">Protocol Call: </span>
+                      {protocolHint}
+                    </div>
+                  ) : null}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
+                      Builder Port Hierarchy
+                    </p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
+                        {recommendedDraftFields.length} recommended
+                      </span>
+                      <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
+                        {allDraftFields.length} editable ports
+                      </span>
+                      <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
+                        {groupedInputSections.length} spec groups
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
-              <div className="mt-2 grid gap-2 lg:grid-cols-[240px_minmax(0,1fr)]">
+                <div className="mt-2 grid gap-2 lg:grid-cols-[240px_minmax(0,1fr)]">
                 <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-lg border border-slate-200/85 bg-white/90 p-2 dark:border-slate-800 dark:bg-slate-950/45">
                   <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                     Atomic Inputs
@@ -3759,8 +4528,9 @@ export function SubmissionModal({
                     </p>
                   )}
                 </div>
+                </div>
               </div>
-            </div>
+            ) : null}
 
             {!isBatchDraft && pkEntries.length > 0 ? (
               <div className="mt-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/30">
@@ -3812,7 +4582,7 @@ export function SubmissionModal({
             )}
 
             <div className="mt-5 border-t border-slate-200/80 pt-4 dark:border-slate-800">
-              {isInlineMode && state.status !== "submitted" ? (
+              {isInlineMode && isPreviewActionable ? (
                 <div className="mb-3 flex flex-wrap items-center gap-2">
                   <Button
                     size="sm"
@@ -3830,7 +4600,7 @@ export function SubmissionModal({
                         Submitting...
                       </span>
                     ) : isBatchDraft ? (
-                      "Launch All"
+                      "Confirm Batch"
                     ) : (
                       "Launch"
                     )}
@@ -3893,6 +4663,14 @@ export function SubmissionModal({
                 </div>
               ) : state.status === "cancelled" ? (
                 <p className="text-sm text-slate-600 dark:text-slate-300">Submission cancelled.</p>
+              ) : state.status === "error" ? (
+                <p className="text-sm text-slate-600 dark:text-slate-300">
+                  Submission attempt ended with an error. This preview has been archived.
+                </p>
+              ) : state.status === "submitting" ? (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Submission in progress. This preview is locked until the request finishes.
+                </p>
               ) : (
                 <p className="text-xs text-slate-500 dark:text-slate-400">
                   Review grouped inputs above and launch when ready.

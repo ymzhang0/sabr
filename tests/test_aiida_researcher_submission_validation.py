@@ -14,8 +14,19 @@ os.environ.setdefault("GOOGLE_API_KEY", "dummy")
 from src.sab_engines.aiida.agent import researcher  # noqa: E402
 
 
-def _ctx() -> SimpleNamespace:
-    return SimpleNamespace(deps=AiiDADeps())
+def _ctx(
+    *,
+    session_id: str | None = None,
+    app_state: object | None = None,
+    intent_hints: dict[str, object] | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        deps=AiiDADeps(
+            session_id=session_id,
+            app_state=app_state,
+            intent_hints=dict(intent_hints or {}),
+        )
+    )
 
 
 def test_extract_submission_inputs_ignores_request_wrapper_only_payload() -> None:
@@ -48,6 +59,50 @@ def test_extract_submission_inputs_prefers_nested_inputs_namespace() -> None:
 
     assert "base" in extracted
     assert "code" not in extracted
+
+
+def test_build_batch_input_aggregation_collapses_empty_structure_metadata_fields() -> None:
+    aggregation = researcher._build_batch_input_aggregation(
+        [
+            {
+                "inputs": {
+                    "structure": {
+                        "label": "",
+                        "pk": "",
+                        "uuid": "",
+                        "node_type": "StructureData",
+                    },
+                    "scf": {"kpoints_distance": 0.5},
+                }
+            },
+            {
+                "inputs": {
+                    "structure": {
+                        "label": "",
+                        "pk": "",
+                        "uuid": "",
+                        "node_type": "StructureData",
+                    },
+                    "scf": {"kpoints_distance": 0.5},
+                }
+            },
+        ],
+        raw_drafts=[
+            {"structure_pk": 11},
+            {"structure_pk": 22},
+        ],
+        structure_metadata=[
+            {"pk": 11, "formula": "Si"},
+            {"pk": 22, "formula": "Si"},
+        ],
+    )
+
+    assert aggregation is not None
+    assert aggregation["common"] == {"scf": {"kpoints_distance": 0.5}}
+    assert aggregation["variable_paths"] == ["structure"]
+    assert aggregation["variation_count"] == 1
+    assert aggregation["items"][0]["diff"] == {"structure": "Si (PK 11)"}
+    assert aggregation["items"][1]["diff"] == {"structure": "Si (PK 22)"}
 
 
 @pytest.mark.anyio
@@ -91,6 +146,77 @@ async def test_submit_new_workflow_validates_before_submission(monkeypatch: pyte
     assert str(result["submission_draft_tag"]).startswith("[SUBMISSION_DRAFT]")
     assert "summary_text" in result["validation_summary"]
     assert calls == ["draft", "validate"]
+
+
+@pytest.mark.anyio
+async def test_submit_new_workflow_blocks_single_preview_for_batch_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_draft(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("draft_workchain_builder should not be called for batch-only intent")
+
+    monkeypatch.setattr(researcher, "draft_workchain_builder", _fake_draft)
+
+    result = await researcher.submit_new_workflow(
+        _ctx(intent_hints={"expected_batch": True, "requested_structure_count": 7}),
+        workchain="quantumespresso.pw.bands",
+        structure_pk=11,
+        code="pw@localhost",
+    )
+
+    assert result["status"] == "SUBMISSION_BLOCKED"
+    assert "Batch submission is required" in result["error"]
+    assert "submit_new_batch_workflow" in result["next_step"]
+
+
+@pytest.mark.anyio
+async def test_submit_new_workflow_applies_bands_kpoints_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_draft(
+        workchain: str,
+        structure_pk: int,
+        code: str,
+        protocol: str,
+        overrides: dict | None = None,
+        protocol_kwargs: dict | None = None,
+    ):
+        captured["workchain"] = workchain
+        captured["structure_pk"] = structure_pk
+        captured["code"] = code
+        captured["protocol"] = protocol
+        captured["overrides"] = overrides
+        captured["protocol_kwargs"] = protocol_kwargs
+        return {
+            "status": "DRAFT_READY",
+            "builder": {"workchain": workchain},
+            "builder_inputs": {
+                "scf": {"kpoints_distance": overrides["scf"]["kpoints_distance"]},
+                "bands_kpoints_distance": overrides["bands_kpoints_distance"],
+            },
+        }
+
+    async def _fake_validate(_draft_data: dict):
+        return {"status": "VALIDATION_OK", "warnings": [], "errors": []}
+
+    monkeypatch.setattr(researcher, "draft_workchain_builder", _fake_draft)
+    monkeypatch.setattr(researcher, "validate_job", _fake_validate)
+
+    result = await researcher.submit_new_workflow(
+        _ctx(intent_hints={"kpoints_distance": 0.5}),
+        workchain="quantumespresso.pw.bands",
+        structure_pk=11,
+        code="pw@localhost",
+    )
+
+    assert result["status"] == "SUBMISSION_DRAFT"
+    assert captured["overrides"] == {
+        "scf": {"kpoints_distance": 0.5},
+        "bands_kpoints_distance": 0.5,
+    }
+    assert captured["protocol_kwargs"] is None
 
 
 @pytest.mark.anyio
@@ -219,6 +345,148 @@ async def test_submit_validated_workflow_submits_and_clears_pending(monkeypatch:
     second_attempt = await researcher.submit_validated_workflow(ctx)
     assert "error" in second_attempt
     assert "No validated workflow" in second_attempt["error"]
+
+
+@pytest.mark.anyio
+async def test_submit_validated_workflow_auto_assigns_current_session_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_draft(workchain: str, structure_pk: int, code: str, protocol: str):  # noqa: ARG001
+        return {"status": "DRAFT_READY", "builder": {"workchain": workchain}}
+
+    async def _fake_validate(draft_data: dict):  # noqa: ARG001
+        return {"status": "VALIDATION_OK", "warnings": []}
+
+    async def _fake_submit(draft_data: dict):
+        assert draft_data.get("status") == "DRAFT_READY"
+        return {"status": "SUBMITTED", "submitted_pks": [321]}
+
+    created_labels: list[str] = []
+    assigned: list[tuple[int, list[int]]] = []
+
+    monkeypatch.setattr(researcher, "draft_workchain_builder", _fake_draft)
+    monkeypatch.setattr(researcher, "validate_job", _fake_validate)
+    monkeypatch.setattr(researcher, "submit_job", _fake_submit)
+    monkeypatch.setattr(
+        researcher,
+        "get_chat_session_detail",
+        lambda _state, _session_id: {
+            "project_group_label": "Si_Research",
+            "session_group_label": "Si_Research/Chat_0307",
+        },
+    )
+    monkeypatch.setattr(researcher, "bridge_list_groups", lambda: [])
+    monkeypatch.setattr(
+        researcher,
+        "bridge_create_group",
+        lambda label: (
+            created_labels.append(label),
+            {"item": {"pk": 11 if label == "Si_Research" else 12, "label": label}},
+        )[1],
+    )
+    monkeypatch.setattr(
+        researcher,
+        "bridge_add_nodes_to_group",
+        lambda group_pk, node_pks: assigned.append((group_pk, list(node_pks))) or {"group": {"pk": group_pk}},
+    )
+
+    ctx = _ctx(session_id="Chat_0307", app_state=object())
+    await researcher.submit_new_workflow(
+        ctx,
+        workchain="quantumespresso.pw.base",
+        structure_pk=11,
+        code="pw@localhost",
+    )
+
+    submitted = await researcher.submit_validated_workflow(ctx)
+
+    assert submitted["status"] == "SUBMITTED"
+    assert submitted["auto_groups"] == {
+        "project": "Si_Research",
+        "session": "Si_Research/Chat_0307",
+    }
+    assert created_labels == ["Si_Research", "Si_Research/Chat_0307"]
+    assert assigned == [(11, [321]), (12, [321])]
+
+
+@pytest.mark.anyio
+async def test_submit_new_batch_workflow_builds_pending_batch_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_draft(
+        workchain: str,
+        structure_pk: int,
+        code: str,
+        protocol: str,
+        overrides: dict | None = None,
+        protocol_kwargs: dict | None = None,
+    ):
+        return {
+            "status": "DRAFT_READY",
+            "entry_point": workchain,
+            "protocol": protocol,
+            "code": code,
+            "structure_pk": structure_pk,
+            "overrides": overrides or {},
+            "builder_inputs": {
+                "structure": structure_pk,
+                "scf": {
+                    "kpoints_distance": ((overrides or {}).get("scf") or {}).get("kpoints_distance"),
+                },
+                "bands_kpoints_distance": (overrides or {}).get("bands_kpoints_distance"),
+            },
+        }
+
+    async def _fake_validate(draft_data: dict):
+        assert draft_data.get("status") == "DRAFT_READY"
+        return {"status": "VALIDATION_OK", "warnings": []}
+
+    captured_submit: dict[str, object] = {}
+
+    async def _fake_submit(draft_data: dict | list[dict]):
+        captured_submit["draft"] = draft_data
+        return {"status": "SUBMITTED_BATCH", "submitted_pks": [401, 402]}
+
+    monkeypatch.setattr(researcher, "draft_workchain_builder", _fake_draft)
+    monkeypatch.setattr(researcher, "validate_job", _fake_validate)
+    monkeypatch.setattr(researcher, "submit_job", _fake_submit)
+
+    ctx = _ctx()
+    drafted = await researcher.submit_new_batch_workflow(
+        ctx,
+        workchain="quantumespresso.pw.bands",
+        structure_pks=[11, 22],
+        code="pw@localhost",
+        protocol="moderate",
+        protocol_kwargs={"kpoints_distance": 0.5},
+    )
+
+    assert drafted["status"] == "SUBMISSION_DRAFT"
+    assert drafted["job_count"] == 2
+    assert drafted["validation_summary"]["is_valid"] is True
+    assert len(drafted["submission_draft"]["meta"]["draft"]) == 2
+    assert drafted["submission_draft"]["meta"]["validation_summary"]["job_count"] == 2
+    assert drafted["submission_draft"]["inputs"] == {
+        "scf": {"kpoints_distance": 0.5},
+        "bands_kpoints_distance": 0.5,
+    }
+    batch_aggregation = drafted["submission_draft"]["meta"]["batch_aggregation"]
+    assert batch_aggregation["common"] == {
+        "scf": {"kpoints_distance": 0.5},
+        "bands_kpoints_distance": 0.5,
+    }
+    assert batch_aggregation["variable_paths"] == ["structure"]
+    assert batch_aggregation["items"][0]["label"] == "Structure #11"
+    assert batch_aggregation["items"][0]["diff"] == {"structure": "Structure #11"}
+    assert batch_aggregation["items"][1]["diff"] == {"structure": "Structure #22"}
+
+    submitted = await researcher.submit_validated_workflow(ctx)
+
+    assert submitted["status"] == "SUBMITTED"
+    submitted_draft = captured_submit["draft"]
+    assert isinstance(submitted_draft, list)
+    assert len(submitted_draft) == 2
+    assert all(item.get("workchain") == "quantumespresso.pw.bands" for item in submitted_draft)
 
 
 @pytest.mark.anyio

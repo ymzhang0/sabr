@@ -196,6 +196,60 @@ def test_extract_preview_for_node_type_prefers_embedded_preview_info() -> None:
 
 
 @pytest.mark.anyio
+async def test_frontend_export_group_returns_archive_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(aiida_router.hub, "_current_profile", "codex-test-profile")
+    monkeypatch.setattr(
+        aiida_router,
+        "export_group_archive",
+        lambda pk: SimpleNamespace(  # noqa: ARG005
+            content=b"fake-aiida-archive",
+            headers={"content-disposition": 'attachment; filename="Si_batch.aiida"'},
+            media_type="application/octet-stream",
+        ),
+    )
+
+    response = await aiida_router.frontend_export_group(42)
+
+    assert response.body == b"fake-aiida-archive"
+    assert response.media_type == "application/octet-stream"
+    assert response.headers["content-disposition"] == 'attachment; filename="Si_batch.aiida"'
+
+
+@pytest.mark.anyio
+async def test_frontend_chat_project_workspace_returns_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = {
+        "project_id": "proj-1",
+        "project_name": "Si Research",
+        "workspace_path": "/tmp/si-research",
+        "relative_path": "results",
+        "entries": [
+            {
+                "name": "bands",
+                "path": "/tmp/si-research/results/bands",
+                "relative_path": "results/bands",
+                "is_dir": True,
+                "size": None,
+                "updated_at": "2026-03-08T00:00:00+00:00",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        aiida_router,
+        "list_chat_project_workspace_files",
+        lambda state, project_id, relative_path=None: payload,  # noqa: ARG005
+    )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=object()))
+    response = await aiida_router.frontend_chat_project_workspace(
+        request,
+        "proj-1",
+        relative_path="results",
+    )
+
+    assert response == payload
+
+
+@pytest.mark.anyio
 async def test_enrich_process_detail_payload_always_exposes_link_arrays() -> None:
     payload = {"summary": {"pk": None}}
 
@@ -332,9 +386,155 @@ async def test_submit_bridge_workchain_single_adds_submitted_pk(monkeypatch: pyt
 
 
 @pytest.mark.anyio
+async def test_frontend_create_chat_project_ensures_project_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = SimpleNamespace()
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    ensured: list[str] = []
+
+    monkeypatch.setattr(
+        aiida_router,
+        "create_chat_project",
+        lambda *_args, **_kwargs: {"id": "project-1", "group_label": "Test_multitask_Si_Thermal_Expansion"},
+    )
+    monkeypatch.setattr(aiida_router, "get_active_chat_project_id", lambda _state: "project-1")
+    monkeypatch.setattr(aiida_router, "list_chat_projects", lambda _state: [{"id": "project-1"}])
+
+    async def _fake_ensure_named_groups(labels: list[str]) -> dict[str, str]:
+        ensured.extend(labels)
+        return {label: label for label in labels}
+
+    monkeypatch.setattr(aiida_router, "_ensure_named_groups", _fake_ensure_named_groups)
+
+    response = await aiida_router.frontend_create_chat_project(
+        request,
+        aiida_router.FrontendChatProjectCreateRequest(name="Test_multitask_Si_Thermal_Expansion"),
+    )
+
+    assert response["project"]["id"] == "project-1"
+    assert ensured == ["Test_multitask_Si_Thermal_Expansion"]
+
+
+@pytest.mark.anyio
+async def test_frontend_create_chat_session_ensures_project_and_session_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = SimpleNamespace(chat_sessions_version=1)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    ensured: list[str] = []
+
+    monkeypatch.setattr(
+        aiida_router,
+        "create_chat_session",
+        lambda *_args, **_kwargs: {
+            "id": "chat-0307",
+            "project_group_label": "Test_multitask_Si_Thermal_Expansion",
+            "session_group_label": "Test_multitask_Si_Thermal_Expansion/chat-0307",
+        },
+    )
+    monkeypatch.setattr(aiida_router, "get_chat_snapshot", lambda _state: {"messages": []})
+    monkeypatch.setattr(aiida_router, "get_active_chat_session_id", lambda _state: "chat-0307")
+    monkeypatch.setattr(aiida_router, "get_active_chat_project_id", lambda _state: "project-1")
+    monkeypatch.setattr(aiida_router, "list_chat_projects", lambda _state: [{"id": "project-1"}])
+
+    async def _fake_ensure_named_groups(labels: list[str]) -> dict[str, str]:
+        ensured.extend(labels)
+        return {label: label for label in labels}
+
+    monkeypatch.setattr(aiida_router, "_ensure_named_groups", _fake_ensure_named_groups)
+
+    response = await aiida_router.frontend_create_chat_session(
+        request,
+        aiida_router.FrontendChatSessionCreateRequest(title="Session"),
+    )
+
+    assert response["session"]["id"] == "chat-0307"
+    assert ensured == [
+        "Test_multitask_Si_Thermal_Expansion",
+        "Test_multitask_Si_Thermal_Expansion/chat-0307",
+    ]
+
+
+@pytest.mark.anyio
+async def test_frontend_delete_chat_project_deletes_project_and_session_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = SimpleNamespace(chat_sessions_version=3)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    deleted_group_pks: list[int] = []
+
+    monkeypatch.setattr(
+        aiida_router,
+        "list_chat_projects",
+        lambda _state: [{"id": "project-1", "group_label": "Project One"}],
+    )
+    monkeypatch.setattr(
+        aiida_router,
+        "list_chat_sessions",
+        lambda _state: [{"id": "session-1", "project_id": "project-1", "session_group_label": "Project One/session-1"}],
+    )
+    monkeypatch.setattr(
+        aiida_router,
+        "delete_chat_items",
+        lambda *_args, **_kwargs: {"deleted_project_ids": ["project-1"], "deleted_session_ids": ["session-1"]},
+    )
+    monkeypatch.setattr(aiida_router, "get_chat_snapshot", lambda _state: {"session_id": None, "messages": [], "snapshot": {}})
+    monkeypatch.setattr(aiida_router, "_chat_sessions_payload", lambda _state: {"version": 4, "active_session_id": None, "active_project_id": None, "projects": [], "items": []})
+    monkeypatch.setattr(
+        aiida_router,
+        "list_groups",
+        lambda: [
+            {"pk": 11, "label": "Project One"},
+            {"pk": 12, "label": "Project One/session-1"},
+        ],
+    )
+    monkeypatch.setattr(aiida_router, "delete_group", lambda pk: deleted_group_pks.append(pk))
+
+    response = await aiida_router.frontend_delete_chat_project(request, "project-1")
+
+    assert response["deleted_project_ids"] == ["project-1"]
+    assert response["deleted_session_ids"] == ["session-1"]
+    assert deleted_group_pks == [11, 12]
+
+
+@pytest.mark.anyio
+async def test_frontend_delete_chat_items_supports_mixed_bulk_delete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = SimpleNamespace(chat_sessions_version=3)
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    monkeypatch.setattr(aiida_router, "list_chat_projects", lambda _state: [])
+    monkeypatch.setattr(
+        aiida_router,
+        "list_chat_sessions",
+        lambda _state: [{"id": "session-2", "project_id": "project-2", "session_group_label": "Project Two/session-2"}],
+    )
+    monkeypatch.setattr(
+        aiida_router,
+        "delete_chat_items",
+        lambda *_args, **_kwargs: {"deleted_project_ids": ["project-2"], "deleted_session_ids": ["session-2"]},
+    )
+    monkeypatch.setattr(aiida_router, "get_chat_snapshot", lambda _state: {"session_id": None, "messages": [], "snapshot": {}})
+    monkeypatch.setattr(aiida_router, "_chat_sessions_payload", lambda _state: {"version": 5, "active_session_id": None, "active_project_id": None, "projects": [], "items": []})
+
+    async def _fake_delete_named_groups(_labels: list[str]) -> dict[str, str]:
+        return {}
+
+    monkeypatch.setattr(aiida_router, "_delete_named_groups", _fake_delete_named_groups)
+
+    response = await aiida_router.frontend_delete_chat_items(
+        request,
+        aiida_router.FrontendChatDeleteRequest(project_ids=["project-2"], session_ids=["session-2"]),
+    )
+
+    assert response["deleted_project_ids"] == ["project-2"]
+    assert response["deleted_session_ids"] == ["session-2"]
+
+
+@pytest.mark.anyio
 async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch: pytest.MonkeyPatch) -> None:
     submitted = [901, 902, 903]
-    call_count = 0
+    captured_request: dict[str, object] = {}
 
     async def _fake_auto_assign_submission_groups(*_args: object, **_kwargs: object) -> None:
         return None
@@ -345,14 +545,23 @@ async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch:
         json: dict[str, object],
         headers: dict[str, str] | None = None,
     ):  # noqa: ARG001
-        nonlocal call_count
         assert method == "POST"
         assert path == "/submission/submit"
-        assert "draft" in json
+        captured_request["payload"] = json
         assert headers == {"X-SABR-Session-Id": "chat-0307"}
-        pk = submitted[call_count]
-        call_count += 1
-        return {"status": "SUBMITTED", "pk": pk}
+        return {
+            "status": "SUBMITTED_BATCH",
+            "total": 3,
+            "submitted_count": 3,
+            "failed_count": 0,
+            "submitted_pks": submitted,
+            "process_pks": submitted,
+            "responses": [
+                {"index": index, "response": {"status": "SUBMITTED", "pk": pk}}
+                for index, pk in enumerate(submitted)
+            ],
+            "failures": [],
+        }
 
     monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
     monkeypatch.setattr(
@@ -380,12 +589,31 @@ async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch:
 
     response = await aiida_router.submit_bridge_workchain(request, payload)
 
+    assert captured_request["payload"] == {
+        "draft": [
+            {"builder": {"structure_pk": 11}},
+            {"builder": {"structure_pk": 22}},
+            {"builder": {"structure_pk": 33}},
+        ]
+    }
     assert response["status"] == "SUBMITTED_BATCH"
     assert response["submitted_pks"] == submitted
     assert response["process_pks"] == submitted
     assert response["failures"] == []
     assert len(response["responses"]) == 3
     assert captured[aiida_router.PENDING_SUBMISSION_KEY] is None
+
+
+@pytest.mark.anyio
+async def test_submit_bridge_workchain_batch_alias_requires_list() -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    payload = aiida_router.SubmissionDraftRequest(draft={"builder": {"structure_pk": 11}})
+
+    with pytest.raises(aiida_router.HTTPException) as exc_info:
+        await aiida_router.submit_bridge_workchain_batch(request, payload)
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "Batch submission draft list is required"
 
 
 def test_build_active_submission_group_labels_uses_session_detail(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -686,3 +914,49 @@ async def test_frontend_clone_process_draft_enriches_worker_payload(monkeypatch:
     response = await aiida_router.frontend_clone_process_draft("321")
 
     assert response == enriched_payload
+
+
+@pytest.mark.anyio
+async def test_frontend_chat_session_batch_progress_returns_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        aiida_router,
+        "get_chat_session_detail",
+        lambda _state, session_id: {"id": session_id, "title": "Si 批量能带"},
+    )
+    monkeypatch.setattr(
+        aiida_router,
+        "get_chat_session_batch_progress",
+        lambda _state, _session_id: {
+            "label": "Si 批量能带",
+            "total": 7,
+            "done": 5,
+            "percent": 71,
+            "success": 5,
+            "running": 1,
+            "queued": 1,
+            "failed": 0,
+            "items": [],
+        },
+    )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    response = await aiida_router.frontend_chat_session_batch_progress(request, "session-1")
+
+    assert response["item"]["total"] == 7
+    assert response["item"]["running"] == 1
+
+
+@pytest.mark.anyio
+async def test_frontend_chat_session_batch_progress_returns_404_for_missing_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(aiida_router, "get_chat_session_detail", lambda _state, _session_id: None)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    with pytest.raises(aiida_router.HTTPException) as exc_info:
+        await aiida_router.frontend_chat_session_batch_progress(request, "missing-session")
+
+    assert exc_info.value.status_code == 404

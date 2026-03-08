@@ -29,11 +29,21 @@ import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
 import { cn } from "@/lib/utils";
-import { exportCodeConfig, exportComputerConfig, getInfrastructure, getNodeScript } from "@/lib/api";
+import {
+  exportCodeConfig,
+  exportComputerConfig,
+  getInfrastructure,
+  getNodeScript,
+} from "@/lib/api";
 import { QuickAddModal } from "@/components/dashboard/quick-add-modal";
 import { CodeSetupModal } from "@/components/dashboard/code-setup-modal";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { GroupItem, ProcessItem, InfrastructureComputer, InfrastructureExportResponse } from "@/types/aiida";
+import type {
+  GroupItem,
+  ProcessItem,
+  InfrastructureComputer,
+  InfrastructureExportResponse,
+} from "@/types/aiida";
 import { DataImportModal } from "@/components/dashboard/data-import-modal";
 
 const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
@@ -838,14 +848,25 @@ export function Sidebar({
     return () => window.removeEventListener("keydown", handleEscape);
   }, []);
 
+  const normalizedCurrentContextGroupLabel = useMemo(
+    () => String(currentContextGroupLabel || "").trim() || null,
+    [currentContextGroupLabel],
+  );
   const currentContextGroup = useMemo(
-    () => groups.find((group) => group.label === currentContextGroupLabel) ?? null,
-    [currentContextGroupLabel, groups],
+    () => groups.find((group) => String(group.label || "").trim() === normalizedCurrentContextGroupLabel) ?? null,
+    [normalizedCurrentContextGroupLabel, groups],
+  );
+  const archiveGroups = useMemo(
+    () =>
+      groups.filter(
+        (group) => String(group.label || "").trim() !== normalizedCurrentContextGroupLabel,
+      ),
+    [normalizedCurrentContextGroupLabel, groups],
   );
 
   const groupTree = useMemo(() => {
     const root: Record<string, any> = { children: {}, group: null, path: "" };
-    for (const group of groups) {
+    for (const group of archiveGroups) {
       const parts = group.label.split("/");
       let current = root;
       let pathSoFar = "";
@@ -862,7 +883,7 @@ export function Sidebar({
       }
     }
     return root;
-  }, [groups]);
+  }, [archiveGroups]);
 
   const toggleFolder = (path: string, event: React.MouseEvent) => {
     event.stopPropagation();
@@ -883,6 +904,14 @@ export function Sidebar({
             const isExpanded = expandedFolders.has(child.path);
             const hasChildren = Object.keys(child.children).length > 0;
             const group = child.group;
+            const childPath = String(child.path || "").trim();
+            const groupLabel = String(group?.label || "").trim();
+            if (
+              normalizedCurrentContextGroupLabel &&
+              (childPath === normalizedCurrentContextGroupLabel || groupLabel === normalizedCurrentContextGroupLabel)
+            ) {
+              return null;
+            }
             const isSelected = group && selectedGroupLabel === group.label;
 
             return (
@@ -1046,7 +1075,7 @@ export function Sidebar({
 
   return (
     <aside className="relative flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight">
-      <header className="flex items-center justify-between">
+      <header className="flex items-center justify-between px-1.5 pt-1">
         <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
           AiiDA Explorer
         </h1>
@@ -1112,43 +1141,6 @@ export function Sidebar({
 
         <div className="flex flex-col gap-3 shrink-0">
           <div className="flex flex-col gap-1">
-            <span className="pl-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
-              Current Context
-            </span>
-            <button
-              type="button"
-              onClick={onSelectCurrentContext}
-              disabled={!currentContextGroupLabel}
-              className={cn(
-                "flex items-center justify-between rounded-xl border px-3 py-2.5 text-left transition-all",
-                currentContextGroupLabel
-                  ? "border-zinc-200/75 bg-white/70 hover:border-zinc-300/85 hover:bg-white/85 dark:border-zinc-800/80 dark:bg-zinc-900/45 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/60"
-                  : "cursor-not-allowed border-dashed border-zinc-200/70 bg-zinc-50/50 text-zinc-400 dark:border-zinc-800/70 dark:bg-zinc-900/30 dark:text-zinc-500",
-                isCurrentContextSelected && currentContextGroupLabel
-                  ? "border-zinc-300 bg-zinc-100/80 shadow-[0_10px_24px_-20px_rgba(15,23,42,0.7)] dark:border-zinc-700 dark:bg-zinc-800/60"
-                  : null,
-              )}
-            >
-              <div className="flex min-w-0 items-center gap-2.5">
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                  <FolderOpen className="h-4 w-4" />
-                </div>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">Current Context</p>
-                  <p className="truncate text-[11px] text-zinc-500 dark:text-zinc-400">
-                    {currentContextGroupLabel ?? "No active session"}
-                  </p>
-                </div>
-              </div>
-              {currentContextGroup ? (
-                <span className="ml-3 shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 text-[11px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                  {currentContextGroup.count}
-                </span>
-              ) : null}
-            </button>
-          </div>
-
-          <div className="flex flex-col gap-1">
             <div className="flex items-center justify-between group/groupbtn">
               <button
                 onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
@@ -1185,6 +1177,45 @@ export function Sidebar({
                   <FolderOpen className="h-4 w-4" />
                   <span>All Groups</span>
                 </div>
+                {currentContextGroup ? (
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={onSelectCurrentContext}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onSelectCurrentContext();
+                      }
+                    }}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setContextMenuGroup({
+                        pk: currentContextGroup.pk,
+                        ...clampMenuPosition(event.clientX, event.clientY, { width: 176, height: 120 }),
+                      });
+                    }}
+                    className={cn(
+                      "flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors",
+                      "bg-blue-50/50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-200",
+                      isCurrentContextSelected
+                        ? "font-semibold ring-1 ring-blue-300/70 dark:ring-blue-700/70"
+                        : "font-semibold hover:bg-blue-100/60 dark:hover:bg-blue-950/35",
+                    )}
+                  >
+                    <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+                      <div className="h-3.5 w-3.5 shrink-0" />
+                      <span
+                        className="h-2.5 w-2.5 shrink-0 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.75)]"
+                        aria-hidden
+                      />
+                      <span className="truncate">{currentContextGroup.label}</span>
+                    </div>
+                    <span className="shrink-0 text-[10px] text-blue-600 dark:text-blue-300">
+                      {currentContextGroup.count}
+                    </span>
+                  </div>
+                ) : null}
                 {renderGroupTree(groupTree)}
               </div>
             )}

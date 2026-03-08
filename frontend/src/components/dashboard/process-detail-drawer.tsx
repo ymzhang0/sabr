@@ -1,5 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
+import JsonView from "@uiw/react-json-view";
+import { nordTheme } from "@uiw/react-json-view/nord";
+import { vscodeTheme } from "@uiw/react-json-view/vscode";
 import {
   ChevronDown,
   ChevronLeft,
@@ -182,6 +185,27 @@ function durationFromValue(raw: unknown): string | null {
   return null;
 }
 
+function extractProcessMeta(preview: Record<string, unknown> | null, fallbackState?: string | null): {
+  state: string | null;
+  duration: string | null;
+} {
+  const rawState = preview?.state ?? fallbackState ?? null;
+  const state =
+    typeof rawState === "string" && rawState.trim()
+      ? toDisplayStatus(rawState)
+      : fallbackState && fallbackState.trim()
+        ? toDisplayStatus(fallbackState)
+        : null;
+  const duration = durationFromValue(
+    preview?.execution_time_seconds ??
+      preview?.wall_time_seconds ??
+      preview?.duration ??
+      preview?.elapsed ??
+      null,
+  );
+  return { state, duration };
+}
+
 function getDurationLabel(node: ProcessTreeNode): string {
   const payload = node as Record<string, unknown>;
   const directDuration = durationFromValue(payload.duration ?? payload.elapsed ?? payload.runtime ?? payload.wall_time ?? payload.wallclock);
@@ -229,6 +253,135 @@ function formatPrimitivePreviewValue(value: unknown): string {
     return "undefined";
   }
   return JSON.stringify(value);
+}
+
+function StructurePreviewCard({ preview }: { preview: Record<string, unknown> }) {
+  const lattice = (preview.lattice && typeof preview.lattice === "object" && !Array.isArray(preview.lattice))
+    ? (preview.lattice as Record<string, number>)
+    : null;
+  const positions = Array.isArray(preview.positions) ? preview.positions : [];
+  const symmetry =
+    preview.symmetry && typeof preview.symmetry === "object" && !Array.isArray(preview.symmetry)
+      ? (preview.symmetry as Record<string, unknown>)
+      : null;
+  const [positionMode, setPositionMode] = useState<"cartesian" | "fractional">("cartesian");
+  const canShowFractional = positions.every((rawPosition) => {
+    const position = rawPosition as { fractional_position?: number[] };
+    return Array.isArray(position.fractional_position)
+      && position.fractional_position.length === 3
+      && position.fractional_position.every((value) => Number.isFinite(Number(value)));
+  });
+
+  useEffect(() => {
+    if (!canShowFractional && positionMode === "fractional") {
+      setPositionMode("cartesian");
+    }
+  }, [canShowFractional, positionMode]);
+
+  return (
+    <div className="space-y-3 rounded-xl border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
+      <div className="flex items-center gap-2 text-zinc-900 dark:text-zinc-100">
+        <Box className="h-4 w-4 text-blue-500" />
+        <h4 className="text-sm font-semibold">Structure Summary</h4>
+      </div>
+      <div className="grid grid-cols-2 gap-4 text-xs">
+        <div>
+          <p className="text-zinc-500">Formula</p>
+          <p className="font-medium text-blue-600 dark:text-blue-400">{String(preview.formula || "N/A")}</p>
+        </div>
+        <div>
+          <p className="text-zinc-500">Atoms</p>
+          <p className="font-medium">{String(preview.atom_count || "N/A")}</p>
+        </div>
+        <div>
+          <p className="text-zinc-500">Cell Volume</p>
+          <p className="font-medium">{preview.cell_volume ? `${preview.cell_volume} \u00C5\u00B3` : "N/A"}</p>
+        </div>
+        {symmetry && symmetry.number ? (
+          <div>
+            <p className="text-zinc-500">Space Group</p>
+            <p className="font-medium">{String(symmetry.symbol)} ({String(symmetry.number)})</p>
+          </div>
+        ) : null}
+      </div>
+
+      {lattice ? (
+        <div className="mt-2">
+          <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Cell Parameters</p>
+          <div className="grid grid-cols-3 gap-2 rounded-lg border border-zinc-100 bg-white p-2 dark:border-zinc-800/50 dark:bg-zinc-950">
+            {(["a", "b", "c", "alpha", "beta", "gamma"] as const).map((key) => (
+              <div key={key} className="text-center">
+                <span className="block text-[9px] uppercase text-zinc-400">{key}</span>
+                <span className="text-xs font-mono">
+                  {typeof lattice[key] === "number"
+                    ? `${lattice[key].toFixed(key.length === 1 ? 3 : 1)}${key.length === 1 ? "" : "\u00B0"}`
+                    : "N/A"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {positions.length > 0 ? (
+        <div className="mt-2">
+          <div className="mb-1 flex items-center justify-between gap-3">
+            <p className="text-[10px] uppercase tracking-wider text-zinc-500">Atomic Positions</p>
+            <div className="flex items-center gap-1 rounded-lg border border-zinc-200/70 bg-white/85 p-0.5 dark:border-zinc-800 dark:bg-zinc-950/80">
+              <button
+                type="button"
+                onClick={() => setPositionMode("cartesian")}
+                className={cn(
+                  "rounded-md px-2 py-1 text-[10px] font-medium transition-colors",
+                  positionMode === "cartesian"
+                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                    : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100",
+                )}
+              >
+                Absolute
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (canShowFractional) {
+                    setPositionMode("fractional");
+                  }
+                }}
+                disabled={!canShowFractional}
+                className={cn(
+                  "rounded-md px-2 py-1 text-[10px] font-medium transition-colors",
+                  positionMode === "fractional"
+                    ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                    : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100",
+                  !canShowFractional && "cursor-not-allowed opacity-40",
+                )}
+              >
+                Fractional
+              </button>
+            </div>
+          </div>
+          <div className="max-h-32 overflow-auto rounded-lg border border-zinc-100 bg-white p-2.5 font-mono text-[10px] dark:border-zinc-800/50 dark:bg-zinc-950">
+            {positions.slice(0, 10).map((rawPosition, i) => {
+              const position = rawPosition as { kind?: string; position?: number[]; fractional_position?: number[] };
+              const coords = positionMode === "fractional" && canShowFractional
+                ? (Array.isArray(position.fractional_position) ? position.fractional_position : [])
+                : (Array.isArray(position.position) ? position.position : []);
+              return (
+                <div key={i} className="flex gap-4 border-b border-zinc-50 py-0.5 last:border-0 dark:border-zinc-900">
+                  <span className="w-6 font-bold text-blue-600 dark:text-blue-400">{position.kind || "?"}</span>
+                  <span className="text-zinc-600 dark:text-zinc-400">
+                    {coords.map((coord) => Number(coord).toFixed(4)).join(",  ")}
+                  </span>
+                </div>
+              );
+            })}
+            {positions.length > 10 ? (
+              <p className="mt-1 text-[9px] italic text-zinc-400">... and {positions.length - 10} more sites</p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function StructuredValueView({
@@ -497,10 +650,43 @@ function BandsPlotPreview({
   const tickLabels = Array.isArray(plot.tick_labels) ? plot.tick_labels.map(formatBandTickLabel) : [];
   const xMin = typeof plot.x_min_lim === "number" ? plot.x_min_lim : (tickPositions[0] ?? 0);
   const xMax = typeof plot.x_max_lim === "number" ? plot.x_max_lim : (tickPositions[tickPositions.length - 1] ?? 1);
-  const yMin = typeof plot.y_min_lim === "number" ? plot.y_min_lim : -1;
-  const yMax = typeof plot.y_max_lim === "number" ? plot.y_max_lim : 1;
-  const dimensions = { width: 760, height: 320, xMin, xMax, yMin, yMax };
+  const rawYMin = typeof plot.y_min_lim === "number" ? plot.y_min_lim : -1;
+  const rawYMax = typeof plot.y_max_lim === "number" ? plot.y_max_lim : 1;
+  const [energyZeroInput, setEnergyZeroInput] = useState("0.00");
+  const [yMinInput, setYMinInput] = useState(rawYMin.toFixed(2));
+  const [yMaxInput, setYMaxInput] = useState(rawYMax.toFixed(2));
+  const [hasCustomRange, setHasCustomRange] = useState(false);
+  const [hoverPoint, setHoverPoint] = useState<{ x: number; y: number; plotX: number; plotY: number } | null>(null);
   const bandTypeIdx = Array.isArray(plot.band_type_idx) ? plot.band_type_idx : [];
+
+  useEffect(() => {
+    setEnergyZeroInput("0.00");
+    setYMinInput(rawYMin.toFixed(2));
+    setYMaxInput(rawYMax.toFixed(2));
+    setHasCustomRange(false);
+  }, [nodePk, rawYMin, rawYMax]);
+
+  const parsedEnergyZero = Number.parseFloat(energyZeroInput);
+  const energyZero = Number.isFinite(parsedEnergyZero) ? parsedEnergyZero : 0;
+  const autoYMin = rawYMin - energyZero;
+  const autoYMax = rawYMax - energyZero;
+
+  useEffect(() => {
+    if (hasCustomRange) {
+      return;
+    }
+    setYMinInput(autoYMin.toFixed(2));
+    setYMaxInput(autoYMax.toFixed(2));
+  }, [autoYMin, autoYMax, hasCustomRange]);
+
+  const parsedYMin = Number.parseFloat(yMinInput);
+  const parsedYMax = Number.parseFloat(yMaxInput);
+  const hasValidCustomRange = Number.isFinite(parsedYMin) && Number.isFinite(parsedYMax) && parsedYMax > parsedYMin;
+  const displayYMin = hasValidCustomRange ? parsedYMin : autoYMin;
+  const displayYMax = hasValidCustomRange ? parsedYMax : autoYMax;
+  const dimensions = { width: 760, height: 320, xMin, xMax, yMin: displayYMin, yMax: displayYMax };
+  const xRange = dimensions.xMax - dimensions.xMin || 1;
+  const yRange = dimensions.yMax - dimensions.yMin || 1;
 
   const renderedLines = paths.flatMap((segment: BandsPlotPath, segmentIndex) => {
     const xValues = Array.isArray(segment.x) ? segment.x.filter((value): value is number => typeof value === "number" && Number.isFinite(value)) : [];
@@ -511,16 +697,44 @@ function BandsPlotPreview({
       }
       const spinType = typeof bandTypeIdx[bandIndex] === "number" ? bandTypeIdx[bandIndex] : 0;
       const stroke = spinType === 1 ? "#0f766e" : "#2563eb";
+      const shiftedValues = bandValues.map((value) => Number(value) - energyZero);
       return [{
         key: `segment-${segmentIndex}-band-${bandIndex}`,
-        points: buildBandPolyline(xValues, bandValues, dimensions),
+        points: buildBandPolyline(xValues, shiftedValues, dimensions),
         stroke,
       }];
     });
   });
 
-  const zeroAxisVisible = yMin <= 0 && yMax >= 0;
-  const zeroAxisY = zeroAxisVisible ? dimensions.height - ((0 - yMin) / ((yMax - yMin) || 1)) * dimensions.height : null;
+  const zeroAxisVisible = displayYMin <= 0 && displayYMax >= 0;
+  const zeroAxisY = zeroAxisVisible ? dimensions.height - ((0 - displayYMin) / ((displayYMax - displayYMin) || 1)) * dimensions.height : null;
+  const hoverTooltipWidth = 112;
+  const hoverTooltipHeight = 34;
+  const hoverTooltipX = hoverPoint ? Math.min(Math.max(hoverPoint.x + 12, 8), dimensions.width - hoverTooltipWidth - 8) : 0;
+  const hoverTooltipY = hoverPoint ? Math.min(Math.max(hoverPoint.y - hoverTooltipHeight - 10, 8), dimensions.height - hoverTooltipHeight - 8) : 0;
+
+  const handlePlotPointerMove = (event: ReactMouseEvent<SVGRectElement>) => {
+    const svg = event.currentTarget.ownerSVGElement;
+    if (!svg) {
+      return;
+    }
+    const bounds = svg.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) {
+      return;
+    }
+    const relativeX = ((event.clientX - bounds.left) / bounds.width) * dimensions.width;
+    const relativeY = ((event.clientY - bounds.top) / bounds.height) * (dimensions.height + 42);
+    const plotX = Math.min(Math.max(relativeX, 0), dimensions.width);
+    const plotY = Math.min(Math.max(relativeY, 0), dimensions.height);
+    const xValue = dimensions.xMin + (plotX / dimensions.width) * xRange;
+    const yValue = dimensions.yMax - (plotY / dimensions.height) * yRange;
+    setHoverPoint({
+      x: plotX,
+      y: plotY,
+      plotX: xValue,
+      plotY: yValue,
+    });
+  };
 
   return (
     <div className="space-y-3 rounded-xl border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
@@ -541,6 +755,53 @@ function BandsPlotPreview({
           <p className="text-lg font-bold text-emerald-600 dark:text-emerald-400">{String(preview.num_bands || "N/A")}</p>
         </div>
       </div>
+      <div className="grid grid-cols-3 gap-3 rounded-xl border border-zinc-200/80 bg-white/90 p-3 text-xs dark:border-zinc-800 dark:bg-zinc-950/80">
+        <label className="space-y-1">
+          <span className="block text-zinc-500">Y Min</span>
+          <input
+            value={yMinInput}
+            onChange={(event) => {
+              setHasCustomRange(true);
+              setYMinInput(event.target.value);
+            }}
+            className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 font-mono text-zinc-700 outline-none transition focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:focus:border-zinc-600"
+          />
+        </label>
+        <label className="space-y-1">
+          <span className="block text-zinc-500">Y Max</span>
+          <input
+            value={yMaxInput}
+            onChange={(event) => {
+              setHasCustomRange(true);
+              setYMaxInput(event.target.value);
+            }}
+            className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 font-mono text-zinc-700 outline-none transition focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:focus:border-zinc-600"
+          />
+        </label>
+        <label className="space-y-1">
+          <span className="block text-zinc-500">Energy Zero</span>
+          <input
+            value={energyZeroInput}
+            onChange={(event) => setEnergyZeroInput(event.target.value)}
+            className="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 font-mono text-zinc-700 outline-none transition focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:focus:border-zinc-600"
+          />
+        </label>
+        <div className="col-span-3 flex items-center justify-between gap-3 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <span>{hasCustomRange && !hasValidCustomRange ? "Y range is invalid, using automatic range." : `Zero shifted by ${energyZero.toFixed(2)} eV`}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setHasCustomRange(false);
+              setEnergyZeroInput("0.00");
+              setYMinInput(rawYMin.toFixed(2));
+              setYMaxInput(rawYMax.toFixed(2));
+            }}
+            className="rounded-md px-2 py-1 text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+          >
+            Reset View
+          </button>
+        </div>
+      </div>
       {query.isError ? (
         <p className="text-sm text-rose-500">Failed to load band structure plot.</p>
       ) : query.isPending ? (
@@ -552,7 +813,6 @@ function BandsPlotPreview({
           <svg viewBox={`0 0 ${dimensions.width} ${dimensions.height + 42}`} className="h-auto w-full" role="img" aria-label="Band structure plot">
             <rect x="0" y="0" width={dimensions.width} height={dimensions.height} fill="transparent" />
             {tickPositions.map((tick, index) => {
-              const xRange = dimensions.xMax - dimensions.xMin || 1;
               const x = ((tick - dimensions.xMin) / xRange) * dimensions.width;
               return (
                 <g key={`tick-${index}`}>
@@ -571,6 +831,27 @@ function BandsPlotPreview({
             {zeroAxisY !== null ? (
               <line x1={0} y1={zeroAxisY} x2={dimensions.width} y2={zeroAxisY} stroke="#ef4444" strokeDasharray="4 4" strokeOpacity="0.45" />
             ) : null}
+            {hoverPoint ? (
+              <g pointerEvents="none">
+                <line x1={hoverPoint.x} y1={0} x2={hoverPoint.x} y2={dimensions.height} stroke="#f97316" strokeDasharray="3 4" strokeOpacity="0.65" />
+                <line x1={0} y1={hoverPoint.y} x2={dimensions.width} y2={hoverPoint.y} stroke="#f97316" strokeDasharray="3 4" strokeOpacity="0.4" />
+                <circle cx={hoverPoint.x} cy={hoverPoint.y} r="3.4" fill="#f97316" fillOpacity="0.9" />
+                <rect
+                  x={hoverTooltipX}
+                  y={hoverTooltipY}
+                  width={hoverTooltipWidth}
+                  height={hoverTooltipHeight}
+                  rx="8"
+                  fill="rgba(24, 24, 27, 0.92)"
+                />
+                <text x={hoverTooltipX + 10} y={hoverTooltipY + 14} className="fill-white text-[10px]">
+                  {`k ${hoverPoint.plotX.toFixed(3)}`}
+                </text>
+                <text x={hoverTooltipX + 10} y={hoverTooltipY + 26} className="fill-white text-[10px]">
+                  {`E ${hoverPoint.plotY.toFixed(3)} eV`}
+                </text>
+              </g>
+            ) : null}
             {renderedLines.map((line) => (
               <polyline
                 key={line.key}
@@ -583,15 +864,25 @@ function BandsPlotPreview({
               />
             ))}
             <text x="8" y="14" className="fill-zinc-500 text-[10px] dark:fill-zinc-400">
-              {typeof yMax === "number" ? yMax.toFixed(2) : ""}
+              {typeof displayYMax === "number" ? displayYMax.toFixed(2) : ""}
             </text>
             <text x="8" y={dimensions.height - 6} className="fill-zinc-500 text-[10px] dark:fill-zinc-400">
-              {typeof yMin === "number" ? yMin.toFixed(2) : ""}
+              {typeof displayYMin === "number" ? displayYMin.toFixed(2) : ""}
             </text>
+            <rect
+              x="0"
+              y="0"
+              width={dimensions.width}
+              height={dimensions.height}
+              fill="transparent"
+              className="cursor-crosshair"
+              onMouseMove={handlePlotPointerMove}
+              onMouseLeave={() => setHoverPoint(null)}
+            />
           </svg>
           <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-zinc-500 dark:text-zinc-400">
-            <span>{String(plot.yaxis_label || "Energy")}</span>
-            <span>{zeroAxisVisible ? "0 eV axis shown" : ""}</span>
+            <span>{String(plot.yaxis_label || "Energy")} {energyZero !== 0 ? "(shifted)" : ""}</span>
+            <span>{hoverPoint ? `k ${hoverPoint.plotX.toFixed(3)} · E ${hoverPoint.plotY.toFixed(3)} eV` : (zeroAxisVisible ? "0 eV axis shown" : "")}</span>
           </div>
         </div>
       )}
@@ -605,83 +896,12 @@ function NodePreviewContent({ node }: { node: PreviewableNode }) {
 
   const nodeType = node.node_type;
 
-  if (nodeType === "StructureData") {
-    const lattice = (preview.lattice && typeof preview.lattice === "object" && !Array.isArray(preview.lattice))
-      ? (preview.lattice as Record<string, number>)
-      : null;
-    const positions = Array.isArray(preview.positions) ? preview.positions : [];
-    const symmetry =
-      preview.symmetry && typeof preview.symmetry === "object" && !Array.isArray(preview.symmetry)
-        ? (preview.symmetry as Record<string, unknown>)
-        : null;
-    return (
-      <div className="space-y-3 rounded-xl border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
-        <div className="flex items-center gap-2 text-zinc-900 dark:text-zinc-100">
-          <Box className="h-4 w-4 text-blue-500" />
-          <h4 className="text-sm font-semibold">Structure Summary</h4>
-        </div>
-        <div className="grid grid-cols-2 gap-4 text-xs">
-          <div>
-            <p className="text-zinc-500">Formula</p>
-            <p className="font-medium text-blue-600 dark:text-blue-400">{String(preview.formula || "N/A")}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Atoms</p>
-            <p className="font-medium">{String(preview.atom_count || "N/A")}</p>
-          </div>
-          <div>
-            <p className="text-zinc-500">Cell Volume</p>
-            <p className="font-medium">{preview.cell_volume ? `${preview.cell_volume} \u00C5\u00B3` : "N/A"}</p>
-          </div>
-          {symmetry && symmetry.number ? (
-            <div>
-              <p className="text-zinc-500">Space Group</p>
-              <p className="font-medium">{String(symmetry.symbol)} ({String(symmetry.number)})</p>
-            </div>
-          ) : null}
-        </div>
+  if (isProcessLikeNodeType(nodeType)) {
+    return null;
+  }
 
-        {lattice ? (
-          <div className="mt-2">
-            <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Cell Parameters</p>
-            <div className="grid grid-cols-3 gap-2 rounded-lg border border-zinc-100 bg-white p-2 dark:border-zinc-800/50 dark:bg-zinc-950">
-              {(["a", "b", "c", "alpha", "beta", "gamma"] as const).map((key) => (
-                <div key={key} className="text-center">
-                  <span className="block text-[9px] uppercase text-zinc-400">{key}</span>
-                  <span className="text-xs font-mono">
-                    {typeof lattice[key] === "number"
-                      ? `${lattice[key].toFixed(key.length === 1 ? 3 : 1)}${key.length === 1 ? "" : "\u00B0"}`
-                      : "N/A"}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        ) : null}
-        {positions.length > 0 ? (
-          <div className="mt-2">
-            <p className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">Atomic Positions</p>
-            <div className="max-h-32 overflow-auto rounded-lg border border-zinc-100 bg-white p-2.5 font-mono text-[10px] dark:border-zinc-800/50 dark:bg-zinc-950">
-              {positions.slice(0, 10).map((rawPosition, i) => {
-                const position = rawPosition as { kind?: string; position?: number[] };
-                const coords = Array.isArray(position.position) ? position.position : [];
-                return (
-                  <div key={i} className="flex gap-4 border-b border-zinc-50 py-0.5 last:border-0 dark:border-zinc-900">
-                    <span className="w-6 font-bold text-blue-600 dark:text-blue-400">{position.kind || "?"}</span>
-                    <span className="text-zinc-600 dark:text-zinc-400">
-                      {coords.map((coord) => Number(coord).toFixed(4)).join(",  ")}
-                    </span>
-                  </div>
-                );
-              })}
-              {positions.length > 10 ? (
-                <p className="mt-1 text-[9px] italic text-zinc-400">... and {positions.length - 10} more sites</p>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-      </div>
-    );
+  if (nodeType === "StructureData") {
+    return <StructurePreviewCard preview={preview} />;
   }
 
   if (nodeType === "Dict") {
@@ -690,27 +910,34 @@ function NodePreviewContent({ node }: { node: PreviewableNode }) {
       : null;
     const keys = toStringList(preview.keys);
     const count = typeof preview.count === "number" ? preview.count : keys.length;
+    const jsonTheme =
+      typeof document !== "undefined" && document.documentElement.classList.contains("dark")
+        ? nordTheme
+        : vscodeTheme;
     return (
       <div className="space-y-3 rounded-xl border border-zinc-200/80 bg-zinc-50/50 p-4 dark:border-zinc-800 dark:bg-zinc-900/40">
         <div className="flex items-center gap-2 text-zinc-900 dark:text-zinc-100">
           <FileCode className="h-4 w-4 text-amber-500" />
           <h4 className="text-sm font-semibold">Dictionary Overview</h4>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <span className="rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
-            {count} key{count === 1 ? "" : "s"}
-          </span>
-          {keys.slice(0, 6).map((key) => (
-            <span
-              key={key}
-              className="rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-[11px] text-zinc-600 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300"
-            >
-              {key}
-            </span>
-          ))}
+        <div className="flex items-center justify-between gap-3 text-[11px] text-zinc-500 dark:text-zinc-400">
+          <span>{count} key{count === 1 ? "" : "s"}</span>
+          {keys.length > 0 ? <span className="truncate">Top keys: {keys.slice(0, 4).join(", ")}</span> : null}
         </div>
         {data ? (
-          <StructuredValueView value={data} />
+          <div className="max-h-[420px] overflow-auto rounded-xl border border-zinc-200/80 bg-white/85 p-2 dark:border-zinc-800 dark:bg-zinc-950/70">
+            <JsonView
+              value={data}
+              style={{
+                ...jsonTheme,
+                fontSize: 12,
+                fontFamily: '"JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Monaco, Consolas, monospace',
+              }}
+              collapsed={1}
+              displayDataTypes={false}
+              enableClipboard
+            />
+          </div>
         ) : preview.summary ? (
           <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3 text-sm text-zinc-600 dark:border-zinc-800 dark:bg-zinc-950/80 dark:text-zinc-300">
             {String(preview.summary)}
@@ -1233,6 +1460,9 @@ function InspectorPanel({ target, fallbackPreviewNode, onOpenNodeDetail, onAddCo
     preview: (summary?.preview as Record<string, unknown> | null | undefined) ?? fallbackPreviewNode?.preview ?? target.preview ?? null,
     preview_info: (summary?.preview_info as Record<string, unknown> | null | undefined) ?? fallbackPreviewNode?.preview_info ?? target.previewInfo ?? null,
   };
+  const normalizedPreview = normalizePreview(previewNode);
+  const processMeta = isProcessTarget ? extractProcessMeta(normalizedPreview, summaryState) : null;
+  const processMetaTone = getStatusTone(processMeta?.state ?? summaryState);
   const directInputs = detailQuery.data?.direct_inputs ?? detailQuery.data?.inputs ?? {};
   const directOutputs = detailQuery.data?.direct_outputs ?? detailQuery.data?.outputs ?? {};
   const hasStandaloneLinks = Object.keys(directInputs).length > 0 || Object.keys(directOutputs).length > 0;
@@ -1245,10 +1475,27 @@ function InspectorPanel({ target, fallbackPreviewNode, onOpenNodeDetail, onAddCo
     <div className="minimal-scrollbar h-full overflow-y-auto px-6 py-6">
       <div className="space-y-5">
         {(previewNode.preview_info || previewNode.preview) && (
-          <section>
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Content Preview</h3>
-            </div>
+          <section className="space-y-3">
+            {processMeta && (processMeta.state || processMeta.duration) ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {processMeta.state ? (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium dark:border-zinc-800 dark:bg-zinc-900/60",
+                      processMetaTone.textClassName,
+                    )}
+                  >
+                    <span className={cn("h-1.5 w-1.5 rounded-full", processMetaTone.dotClassName)} />
+                    {processMeta.state}
+                  </span>
+                ) : null}
+                {processMeta.duration ? (
+                  <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-mono text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+                    {processMeta.duration}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
             <NodePreviewContent node={previewNode} />
           </section>
         )}

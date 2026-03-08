@@ -1,5 +1,7 @@
+import copy
 import json
-from typing import Any
+from itertools import product
+from typing import Any, Mapping, Sequence
 
 from loguru import logger
 from pydantic_ai import Agent, RunContext
@@ -41,6 +43,12 @@ from src.sab_engines.aiida.agent.tools import (
     submit_job,
     switch_profile,
     validate_job,
+)
+from src.sab_engines.aiida.chat.service import get_chat_session_detail
+from src.sab_engines.aiida.frontend_bridge import (
+    add_nodes_to_group as bridge_add_nodes_to_group,
+    create_group as bridge_create_group,
+    list_groups as bridge_list_groups,
 )
 from src.sab_engines.aiida.presenters.workflow_view import enrich_submission_draft_payload
 from src.sab_core.logging_utils import log_event
@@ -517,6 +525,43 @@ def _find_first_matching_value(payload: Any, predicate: Any) -> Any:
     return None
 
 
+def _is_node_metadata_envelope(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    lowered_keys = {str(key).strip().lower() for key in value.keys() if str(key).strip()}
+    if not lowered_keys:
+        return False
+    if {"pk", "uuid"} & lowered_keys:
+        return True
+    if "type" in lowered_keys and "value" in lowered_keys:
+        return True
+    return bool({"node_type", "full_type"} & lowered_keys)
+
+
+def _coerce_node_envelope_value(value: dict[str, Any]) -> Any:
+    for candidate_key in ("value", "payload", "label", "name", "full_label", "code", "family"):
+        if candidate_key not in value:
+            continue
+        candidate = value.get(candidate_key)
+        if candidate is None:
+            continue
+        if isinstance(candidate, str) and not candidate.strip():
+            continue
+        return candidate
+
+    pk = _coerce_positive_int(value.get("pk"))
+    if pk is not None:
+        return f"PK {pk}"
+
+    uuid_value = value.get("uuid")
+    if isinstance(uuid_value, str):
+        uuid_text = uuid_value.strip()
+        if uuid_text:
+            return f"UUID {uuid_text}"
+
+    return None
+
+
 def _flatten_input_values(payload: Any, *, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
     flattened = out if isinstance(out, dict) else {}
     if isinstance(payload, dict):
@@ -525,6 +570,11 @@ def _flatten_input_values(payload: Any, *, prefix: str = "", out: dict[str, Any]
             if not key_text:
                 continue
             path = f"{prefix}.{key_text}" if prefix else key_text
+            if _is_node_metadata_envelope(value):
+                coerced = _coerce_node_envelope_value(value)
+                if not _is_empty_submission_value(coerced):
+                    flattened[path] = coerced
+                continue
             if isinstance(value, dict):
                 _flatten_input_values(value, prefix=path, out=flattened)
                 continue
@@ -854,6 +904,575 @@ def _normalize_recommended_inputs(
     return normalized
 
 
+def _normalize_structure_pk_list(structure_pks: Sequence[Any]) -> list[int]:
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for value in structure_pks:
+        parsed = _coerce_positive_int(value)
+        if parsed is None or parsed in seen:
+            continue
+        seen.add(parsed)
+        normalized.append(parsed)
+    return normalized
+
+
+def _get_intent_hints(ctx: RunContext[AiiDADeps]) -> dict[str, Any]:
+    raw_hints = getattr(ctx.deps, "intent_hints", None)
+    return dict(raw_hints) if isinstance(raw_hints, Mapping) else {}
+
+
+def _requested_kpoints_distance(ctx: RunContext[AiiDADeps]) -> float | None:
+    raw_value = _get_intent_hints(ctx).get("kpoints_distance")
+    if isinstance(raw_value, bool) or raw_value is None:
+        return None
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _intent_requires_batch(ctx: RunContext[AiiDADeps]) -> bool:
+    return bool(_get_intent_hints(ctx).get("expected_batch"))
+
+
+def _requested_structure_count(ctx: RunContext[AiiDADeps]) -> int | None:
+    raw_value = _get_intent_hints(ctx).get("requested_structure_count")
+    return _coerce_positive_int(raw_value)
+
+
+def _merge_nested_mapping(target: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    for raw_key, value in patch.items():
+        key = str(raw_key).strip()
+        if not key:
+            continue
+        if isinstance(value, Mapping) and isinstance(target.get(key), dict):
+            _merge_nested_mapping(target[key], value)
+            continue
+        target[key] = copy.deepcopy(value)
+    return target
+
+
+def _normalize_workchain_request_payload(
+    ctx: RunContext[AiiDADeps],
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    normalized = copy.deepcopy(dict(payload))
+    workchain = str(normalized.get("workchain") or normalized.get("entry_point") or "").strip().lower()
+    raw_overrides = normalized.get("overrides")
+    overrides = copy.deepcopy(dict(raw_overrides)) if isinstance(raw_overrides, Mapping) else {}
+    requested_kpoints_distance = _requested_kpoints_distance(ctx)
+
+    if workchain == "quantumespresso.pw.bands":
+        top_level_scf = normalized.pop("scf", None)
+        if isinstance(top_level_scf, Mapping):
+            scf_overrides = copy.deepcopy(dict(overrides.get("scf"))) if isinstance(overrides.get("scf"), Mapping) else {}
+            _merge_nested_mapping(scf_overrides, top_level_scf)
+            overrides["scf"] = scf_overrides
+
+        top_level_bands = normalized.pop("bands", None)
+        if isinstance(top_level_bands, Mapping):
+            top_level_bands_distance = top_level_bands.get("kpoints_distance")
+            if "bands_kpoints_distance" not in overrides and top_level_bands_distance is not None:
+                overrides["bands_kpoints_distance"] = copy.deepcopy(top_level_bands_distance)
+
+        explicit_generic_distance = normalized.pop("kpoints_distance", None)
+        explicit_bands_distance = normalized.pop("bands_kpoints_distance", None)
+        effective_distance = (
+            explicit_generic_distance
+            if explicit_generic_distance is not None
+            else explicit_bands_distance
+            if explicit_bands_distance is not None
+            else requested_kpoints_distance
+        )
+        if effective_distance is not None:
+            scf_overrides = copy.deepcopy(dict(overrides.get("scf"))) if isinstance(overrides.get("scf"), Mapping) else {}
+            scf_overrides.setdefault("kpoints_distance", copy.deepcopy(effective_distance))
+            overrides["scf"] = scf_overrides
+            overrides.setdefault("bands_kpoints_distance", copy.deepcopy(effective_distance))
+    elif requested_kpoints_distance is not None:
+        overrides.setdefault("kpoints_distance", requested_kpoints_distance)
+
+    if overrides:
+        normalized["overrides"] = overrides
+    elif "overrides" in normalized:
+        normalized["overrides"] = {}
+    return normalized
+
+
+def _batch_required_response(
+    ctx: RunContext[AiiDADeps],
+    *,
+    workchain: str,
+    attempted_structure_pk: int | None = None,
+) -> dict[str, Any]:
+    requested_count = _requested_structure_count(ctx)
+    count_hint = f"{requested_count} structures" if requested_count is not None else "multiple structures"
+    response = {
+        "error": "Batch submission is required for this request.",
+        "status": "SUBMISSION_BLOCKED",
+        "workchain": workchain,
+        "details": (
+            f"The current request asks for {count_hint}. "
+            "Do not collapse it into a single structure preview."
+        ),
+        "next_step": (
+            "Call submit_new_batch_workflow with the full structure_pks list "
+            "and shared overrides before presenting any [SUBMISSION_DRAFT]."
+        ),
+    }
+    if attempted_structure_pk is not None:
+        response["attempted_structure_pk"] = attempted_structure_pk
+    return response
+
+
+def _set_nested_draft_value(payload: dict[str, Any], path: str, value: Any) -> None:
+    segments = [segment for segment in str(path).split(".") if segment]
+    if not segments:
+        raise ValueError("Batch parameter path is required")
+
+    cursor = payload
+    for segment in segments[:-1]:
+        existing = cursor.get(segment)
+        if not isinstance(existing, dict):
+            existing = {}
+            cursor[segment] = existing
+        cursor = existing
+    cursor[segments[-1]] = copy.deepcopy(value)
+
+
+def _build_batch_axis_assignments(
+    structure_pks: list[int],
+    parameter_grid: Mapping[str, Sequence[Any]] | None,
+    *,
+    matrix_mode: str,
+) -> list[list[tuple[str, Any]]]:
+    axes: list[tuple[str, list[Any]]] = [("structure_pk", list(structure_pks))]
+    raw_parameter_grid = dict(parameter_grid or {})
+    for raw_key, raw_values in raw_parameter_grid.items():
+        key = str(raw_key or "").strip()
+        if not key:
+            raise ValueError("Batch parameter path is required")
+        if not isinstance(raw_values, Sequence) or isinstance(raw_values, (str, bytes, bytearray)):
+            raise ValueError(f"Batch parameter '{key}' must be an array")
+        values = list(raw_values)
+        if not values:
+            raise ValueError(f"Batch parameter '{key}' cannot be empty")
+        axes.append((key, values))
+
+    lengths = {len(values) for _path, values in axes}
+    if matrix_mode == "zip":
+        if len(lengths) > 1:
+            raise ValueError("Batch zip mode requires all axes to have the same length")
+        shared_length = next(iter(lengths))
+        return [[(path, values[index]) for path, values in axes] for index in range(shared_length)]
+
+    axis_paths = [path for path, _values in axes]
+    axis_values = [values for _path, values in axes]
+    return [list(zip(axis_paths, values)) for values in product(*axis_values)]
+
+
+def _expand_batch_draft_requests(
+    *,
+    workchain: str,
+    structure_pks: Sequence[Any],
+    code: str,
+    protocol: str,
+    overrides: Mapping[str, Any] | None = None,
+    protocol_kwargs: Mapping[str, Any] | None = None,
+    parameter_grid: Mapping[str, Sequence[Any]] | None = None,
+    matrix_mode: str = "product",
+) -> list[dict[str, Any]]:
+    normalized_structure_pks = _normalize_structure_pk_list(structure_pks)
+    if not normalized_structure_pks:
+        raise ValueError("At least one valid structure PK is required")
+
+    normalized_mode = str(matrix_mode or "product").strip().lower()
+    if normalized_mode not in {"product", "zip"}:
+        raise ValueError("matrix_mode must be 'product' or 'zip'")
+
+    base_payload: dict[str, Any] = {
+        "workchain": str(workchain).strip(),
+        "code": str(code).strip(),
+        "protocol": str(protocol or "moderate").strip() or "moderate",
+        "overrides": copy.deepcopy(dict(overrides or {})),
+    }
+    for key, value in dict(protocol_kwargs or {}).items():
+        cleaned_key = str(key).strip()
+        if not cleaned_key:
+            continue
+        base_payload[cleaned_key] = copy.deepcopy(value)
+
+    assignments = _build_batch_axis_assignments(
+        normalized_structure_pks,
+        parameter_grid,
+        matrix_mode=normalized_mode,
+    )
+    expanded: list[dict[str, Any]] = []
+    for job_assignments in assignments:
+        payload = copy.deepcopy(base_payload)
+        for path, value in job_assignments:
+            _set_nested_draft_value(payload, path, value)
+        expanded.append(payload)
+    return expanded
+
+
+def _build_batch_job_label(payload: Mapping[str, Any], index: int) -> str:
+    structure_pk = _coerce_positive_int(
+        _find_first_named_value(payload, {"structure_pk", "structure_id"})
+    )
+    if structure_pk is not None:
+        return f"Job {index + 1} (structure #{structure_pk})"
+    return f"Job {index + 1}"
+
+
+def _collect_common_mapping_values(items: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    normalized_items = [dict(item) for item in items if isinstance(item, Mapping)]
+    if not normalized_items:
+        return {}
+
+    common = copy.deepcopy(normalized_items[0])
+    for key in list(common.keys()):
+        for candidate in normalized_items[1:]:
+            if key not in candidate or candidate[key] != common[key]:
+                common.pop(key, None)
+                break
+    return common
+
+
+def _merge_pk_map_entries(job_payloads: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for payload in job_payloads:
+        meta = payload.get("meta") if isinstance(payload, Mapping) else None
+        raw_pk_map = meta.get("pk_map") if isinstance(meta, Mapping) else None
+        if not isinstance(raw_pk_map, list):
+            continue
+        for item in raw_pk_map:
+            if not isinstance(item, Mapping):
+                continue
+            pk = _coerce_positive_int(item.get("pk"))
+            path = str(item.get("path") or "").strip()
+            if pk is None or not path:
+                continue
+            dedupe_key = (pk, path)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            entries.append(
+                {
+                    "pk": pk,
+                    "path": path,
+                    "label": str(item.get("label") or "pk"),
+                }
+            )
+    return entries
+
+
+def _find_structure_metadata_entry(
+    structure_metadata: Sequence[Mapping[str, Any]],
+    structure_pk: int | None,
+) -> Mapping[str, Any]:
+    if structure_pk is None:
+        return {}
+    return next(
+        (
+            item
+            for item in structure_metadata
+            if isinstance(item, Mapping) and _coerce_positive_int(item.get("pk")) == structure_pk
+        ),
+        {},
+    )
+
+
+def _extract_structure_metadata_label(metadata_entry: Mapping[str, Any]) -> str:
+    if not isinstance(metadata_entry, Mapping):
+        return ""
+    for key in ("formula", "label"):
+        candidate = metadata_entry.get(key)
+        if candidate is None:
+            continue
+        label = str(candidate).strip()
+        if label and label.lower() != "none":
+            return label
+    return ""
+
+
+def _build_batch_structure_value(
+    structure_pk: int | None,
+    metadata_entry: Mapping[str, Any],
+) -> str | None:
+    label = _extract_structure_metadata_label(metadata_entry)
+    if label and structure_pk is not None:
+        normalized_label = label.lower()
+        if f"#{structure_pk}" in normalized_label or f"pk {structure_pk}" in normalized_label:
+            return label
+        return f"{label} (PK {structure_pk})"
+    if structure_pk is not None:
+        return f"PK {structure_pk}"
+    return label or None
+
+
+def _build_batch_input_aggregation(
+    job_payloads: Sequence[Mapping[str, Any]],
+    *,
+    raw_drafts: Sequence[Mapping[str, Any]],
+    structure_metadata: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    normalized_job_payloads = [dict(item) for item in job_payloads if isinstance(item, Mapping)]
+    if len(normalized_job_payloads) <= 1:
+        return None
+
+    flat_inputs_by_job: list[dict[str, Any]] = []
+    for payload in normalized_job_payloads:
+        inputs = payload.get("inputs")
+        flat_inputs_by_job.append(_flatten_input_values(inputs if isinstance(inputs, Mapping) else {}))
+
+    all_paths = sorted(
+        {
+            str(path).strip()
+            for flat_inputs in flat_inputs_by_job
+            for path in flat_inputs.keys()
+            if str(path).strip()
+        }
+    )
+    if not all_paths:
+        return None
+
+    common_flat: dict[str, Any] = {}
+    variable_paths: list[str] = []
+    for path in all_paths:
+        if all(path in flat_inputs for flat_inputs in flat_inputs_by_job):
+            first_value = flat_inputs_by_job[0][path]
+            if all(flat_inputs[path] == first_value for flat_inputs in flat_inputs_by_job[1:]):
+                common_flat[path] = copy.deepcopy(first_value)
+                continue
+        variable_paths.append(path)
+
+    structure_pks_by_job: list[int | None] = []
+    structure_values_by_job: list[str | None] = []
+    for index, payload in enumerate(normalized_job_payloads):
+        raw_draft = raw_drafts[index] if index < len(raw_drafts) else {}
+        structure_pk = _coerce_positive_int(
+            _find_first_named_value(raw_draft, {"structure_pk", "structure_id"})
+        ) or _coerce_positive_int(
+            _find_first_named_value(payload, {"structure_pk", "structure_id", "structure"})
+        )
+        metadata_entry = _find_structure_metadata_entry(structure_metadata, structure_pk)
+        structure_pks_by_job.append(structure_pk)
+        structure_values_by_job.append(_build_batch_structure_value(structure_pk, metadata_entry))
+
+    unique_structure_values = {
+        value for value in structure_values_by_job if isinstance(value, str) and value.strip()
+    }
+    if len(unique_structure_values) > 1:
+        variable_paths = [
+            path for path in variable_paths
+            if path != "structure" and not path.startswith("structure.")
+        ]
+        for path in list(common_flat.keys()):
+            if path == "structure" or path.startswith("structure."):
+                common_flat.pop(path, None)
+        variable_paths = ["structure", *variable_paths]
+
+    common: dict[str, Any] = {}
+    for path, value in common_flat.items():
+        _set_nested_draft_value(common, path, value)
+
+    items: list[dict[str, Any]] = []
+    for index, flat_inputs in enumerate(flat_inputs_by_job):
+        diff: dict[str, Any] = {}
+        structure_value = structure_values_by_job[index] if index < len(structure_values_by_job) else None
+        for path in variable_paths:
+            if path == "structure" and structure_value not in (None, ""):
+                _set_nested_draft_value(diff, path, structure_value)
+                continue
+            if path not in flat_inputs:
+                continue
+            _set_nested_draft_value(diff, path, flat_inputs[path])
+
+        raw_draft = raw_drafts[index] if index < len(raw_drafts) else {}
+        structure_pk = structure_pks_by_job[index] if index < len(structure_pks_by_job) else None
+        metadata_entry = _find_structure_metadata_entry(structure_metadata, structure_pk)
+        label = _extract_structure_metadata_label(metadata_entry)
+        if not label:
+            label = _build_batch_job_label(raw_draft or normalized_job_payloads[index], index)
+
+        item: dict[str, Any] = {
+            "id": index + 1,
+            "label": label,
+            "diff": diff,
+        }
+        if structure_pk is not None:
+            item["structure_pk"] = structure_pk
+        items.append(item)
+
+    return {
+        "common": common,
+        "items": items,
+        "item_count": len(items),
+        "common_count": len(common_flat),
+        "variation_count": len(variable_paths),
+        "variable_paths": variable_paths,
+    }
+
+
+def _build_batch_validation_summary(
+    validations: Sequence[Mapping[str, Any]],
+    *,
+    workchain: str,
+) -> dict[str, Any]:
+    job_summaries: list[dict[str, Any]] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    valid_jobs = 0
+
+    for index, validation in enumerate(validations):
+        normalized = _build_validation_summary(dict(validation))
+        label = _build_batch_job_label(validation, index)
+        if normalized.get("is_valid"):
+            valid_jobs += 1
+        for message in normalized.get("errors", []):
+            errors.append(f"[{label}] {message}")
+        for message in normalized.get("warnings", []):
+            warnings.append(f"[{label}] {message}")
+        job_summaries.append(
+            {
+                "index": index,
+                "label": label,
+                **normalized,
+            }
+        )
+
+    is_valid = valid_jobs == len(validations) and not errors
+    status = "VALIDATION_OK" if is_valid else "VALIDATION_FAILED"
+    summary_lines = [
+        f"Status: {status}",
+        f"WorkChain: {workchain}",
+        f"Jobs: {len(validations)}",
+        f"Valid jobs: {valid_jobs}",
+        f"Blocking errors: {len(errors)}",
+        f"Warnings: {len(warnings)}",
+    ]
+    if errors:
+        summary_lines.append(f"Top error: {errors[0]}")
+    elif warnings:
+        summary_lines.append(f"Top warning: {warnings[0]}")
+
+    return {
+        "status": status,
+        "is_valid": is_valid,
+        "job_count": len(validations),
+        "valid_job_count": valid_jobs,
+        "blocking_error_count": len(errors),
+        "warning_count": len(warnings),
+        "errors": errors,
+        "warnings": warnings,
+        "jobs": job_summaries,
+        "summary_text": "\n".join(summary_lines),
+    }
+
+
+def _build_batch_submission_draft_payload(
+    drafts: Sequence[Mapping[str, Any]],
+    *,
+    raw_drafts: Sequence[Mapping[str, Any]],
+    validation_payloads: Sequence[Mapping[str, Any]],
+    validation_summary: Mapping[str, Any],
+    fallback_process_label: str | None = None,
+) -> dict[str, Any]:
+    job_payloads = [
+        _build_submission_draft_payload(dict(draft), fallback_process_label=fallback_process_label)
+        for draft in drafts
+        if isinstance(draft, Mapping)
+    ]
+    if not job_payloads:
+        return _build_submission_draft_payload({}, fallback_process_label=fallback_process_label)
+
+    process_label = fallback_process_label or str(job_payloads[0].get("process_label") or "AiiDA Workflow")
+    primary_inputs = dict(job_payloads[0].get("primary_inputs") or {})
+    primary_inputs["structures"] = {
+        "label": "Structures",
+        "value": f"{len(job_payloads)} jobs",
+        "count": len(job_payloads),
+    }
+
+    advanced_settings = _collect_common_mapping_values(
+        [payload.get("advanced_settings", {}) for payload in job_payloads if isinstance(payload.get("advanced_settings"), dict)]
+    )
+    common_inputs = _collect_common_mapping_values(
+        [payload.get("inputs", {}) for payload in job_payloads if isinstance(payload.get("inputs"), dict)]
+    )
+    recommended_inputs = _collect_common_mapping_values(
+        [payload.get("recommended_inputs", {}) for payload in job_payloads if isinstance(payload.get("recommended_inputs"), dict)]
+    )
+    if not recommended_inputs:
+        recommended_inputs = advanced_settings
+
+    parallel_settings = _collect_common_mapping_values(
+        [
+            payload.get("meta", {}).get("parallel_settings", {})
+            for payload in job_payloads
+            if isinstance(payload.get("meta"), dict)
+            and isinstance(payload.get("meta", {}).get("parallel_settings"), dict)
+        ]
+    )
+    target_computers = [
+        payload.get("meta", {}).get("target_computer")
+        for payload in job_payloads
+        if isinstance(payload.get("meta"), dict)
+    ]
+    target_computer = target_computers[0] if target_computers and len(set(target_computers)) == 1 else None
+
+    structure_metadata: list[dict[str, Any]] = []
+    seen_structures: set[int] = set()
+    for index, draft in enumerate(raw_drafts):
+        structure_pk = _coerce_positive_int(
+            _find_first_named_value(draft, {"structure_pk", "structure_id"})
+        )
+        if structure_pk is None or structure_pk in seen_structures:
+            continue
+        seen_structures.add(structure_pk)
+        structure_metadata.append(
+            {
+                "pk": structure_pk,
+                "label": f"Structure #{structure_pk}",
+                "formula": None,
+                "symmetry": None,
+                "estimated_runtime": None,
+            }
+        )
+
+    batch_aggregation = _build_batch_input_aggregation(
+        job_payloads,
+        raw_drafts=raw_drafts,
+        structure_metadata=structure_metadata,
+    )
+
+    payload = {
+        "process_label": process_label,
+        "inputs": common_inputs,
+        "jobs": [copy.deepcopy(dict(item)) for item in raw_drafts],
+        "batch_aggregation": copy.deepcopy(batch_aggregation) if isinstance(batch_aggregation, dict) else None,
+        "primary_inputs": primary_inputs,
+        "recommended_inputs": recommended_inputs,
+        "advanced_settings": advanced_settings,
+        "meta": {
+            "draft": [copy.deepcopy(dict(item)) for item in raw_drafts],
+            "job_count": len(job_payloads),
+            "structure_pks": sorted(seen_structures),
+            "structure_metadata": structure_metadata,
+            "pk_map": _merge_pk_map_entries(job_payloads),
+            "target_computer": target_computer,
+            "parallel_settings": parallel_settings,
+            "workchain": process_label,
+            "batch_aggregation": copy.deepcopy(batch_aggregation) if isinstance(batch_aggregation, dict) else None,
+            "validation": {"jobs": [dict(item) for item in validation_payloads]},
+            "validation_summary": dict(validation_summary),
+        },
+    }
+    return enrich_submission_draft_payload(payload)
+
+
 def _build_submission_draft_payload(
     draft: dict[str, Any],
     *,
@@ -897,7 +1516,7 @@ def _format_submission_draft_tag(submission_draft: dict[str, Any]) -> str:
 
 def _cache_pending_submission(
     ctx: RunContext[AiiDADeps],
-    draft: dict[str, Any],
+    draft: dict[str, Any] | list[dict[str, Any]],
     validation: dict[str, Any],
     validation_summary: dict[str, Any],
     submission_draft: dict[str, Any] | None = None,
@@ -936,6 +1555,107 @@ def _clear_pending_submission(ctx: RunContext[AiiDADeps]) -> None:
     memory = getattr(ctx.deps, "memory", None)
     if memory:
         memory.set_kv(_PENDING_SUBMISSION_KEY, None)
+
+
+def _extract_submitted_pks(payload: Any) -> list[int]:
+    if isinstance(payload, bool) or payload is None:
+        return []
+
+    values: list[int] = []
+    seen: set[int] = set()
+
+    def _push(candidate: Any) -> None:
+        if isinstance(candidate, bool) or candidate is None:
+            return
+        try:
+            parsed = int(str(candidate).strip())
+        except (TypeError, ValueError):
+            return
+        if parsed <= 0 or parsed in seen:
+            return
+        seen.add(parsed)
+        values.append(parsed)
+
+    if isinstance(payload, dict):
+        for key in ("submitted_pks", "process_pks", "workflow_pks", "pks"):
+            raw_values = payload.get(key)
+            if not isinstance(raw_values, list):
+                continue
+            for item in raw_values:
+                _push(item)
+        for key in ("process_pk", "submitted_pk", "workflow_pk", "process_id", "process_node_pk", "pk", "id"):
+            _push(payload.get(key))
+        for key in ("submission", "result", "data"):
+            nested = payload.get(key)
+            if nested is None:
+                continue
+            for nested_pk in _extract_submitted_pks(nested):
+                _push(nested_pk)
+        return values
+
+    if isinstance(payload, list):
+        for item in payload:
+            for nested_pk in _extract_submitted_pks(item):
+                _push(nested_pk)
+        return values
+
+    _push(payload)
+    return values
+
+
+def _ensure_submission_group(label: str) -> dict[str, Any] | None:
+    cleaned_label = str(label or "").strip()
+    if not cleaned_label:
+        return None
+
+    existing = next(
+        (group for group in bridge_list_groups() if str(group.get("label") or "").strip() == cleaned_label),
+        None,
+    )
+    if existing:
+        return existing
+
+    response = bridge_create_group(cleaned_label)
+    group_payload = response.get("item") if isinstance(response, dict) else None
+    if isinstance(group_payload, dict):
+        return group_payload
+
+    return next(
+        (group for group in bridge_list_groups() if str(group.get("label") or "").strip() == cleaned_label),
+        None,
+    )
+
+
+def _auto_assign_submission_groups_for_session(
+    app_state: Any,
+    session_id: str | None,
+    submitted_pks: list[int],
+) -> dict[str, str] | None:
+    cleaned_session_id = str(session_id or "").strip()
+    normalized_pks = [pk for pk in submitted_pks if isinstance(pk, int) and pk > 0]
+    if app_state is None or not cleaned_session_id or not normalized_pks:
+        return None
+
+    session_detail = get_chat_session_detail(app_state, cleaned_session_id)
+    if not isinstance(session_detail, dict):
+        return None
+
+    project_group_label = str(session_detail.get("project_group_label") or "").strip()
+    session_group_label = str(session_detail.get("session_group_label") or "").strip()
+    if not project_group_label or not session_group_label:
+        return None
+
+    for label in (project_group_label, session_group_label):
+        group = _ensure_submission_group(label)
+        group_pk = int(group.get("pk") or 0) if isinstance(group, dict) else 0
+        if group_pk <= 0:
+            continue
+        bridge_add_nodes_to_group(group_pk, normalized_pks)
+
+    return {
+        "project": project_group_label,
+        "session": session_group_label,
+    }
 
 
 @aiida_researcher.system_prompt(dynamic=True)
@@ -1167,10 +1887,46 @@ async def submit_new_workflow(
     structure_pk: int,
     code: str,
     protocol: str = "moderate",
+    overrides: dict[str, Any] | None = None,
+    protocol_kwargs: dict[str, Any] | None = None,
 ):
     """Draft and validate a new WorkChain; do not submit until user confirmation."""
+    if _intent_requires_batch(ctx):
+        return _batch_required_response(
+            ctx,
+            workchain=workchain,
+            attempted_structure_pk=structure_pk,
+        )
+
     ctx.deps.log_step(f"Preparing workflow for validation: {workchain}")
-    draft = await draft_workchain_builder(workchain, structure_pk, code, protocol)
+    request_payload = _normalize_workchain_request_payload(
+        ctx,
+        {
+            "workchain": workchain,
+            "structure_pk": structure_pk,
+            "code": code,
+            "protocol": protocol,
+            "overrides": overrides or {},
+            **dict(protocol_kwargs or {}),
+        },
+    )
+    normalized_overrides = request_payload.get("overrides") if isinstance(request_payload.get("overrides"), Mapping) else {}
+    normalized_protocol_kwargs = {
+        str(key): value
+        for key, value in request_payload.items()
+        if key not in {"workchain", "entry_point", "structure_pk", "code", "protocol", "overrides"}
+    }
+    if not normalized_overrides and not normalized_protocol_kwargs:
+        draft = await draft_workchain_builder(workchain, structure_pk, code, protocol)
+    else:
+        draft = await draft_workchain_builder(
+            workchain,
+            int(request_payload["structure_pk"]),
+            str(request_payload["code"]),
+            str(request_payload.get("protocol") or protocol),
+            overrides=dict(normalized_overrides),
+            protocol_kwargs=normalized_protocol_kwargs or None,
+        )
     if isinstance(draft, dict) and draft.get("status") == "DRAFT_READY":
         validation = await validate_job(draft)
         if isinstance(validation, str):
@@ -1246,19 +2002,182 @@ async def submit_new_workflow(
 
 
 @aiida_researcher.tool
+async def submit_new_batch_workflow(
+    ctx: RunContext[AiiDADeps],
+    workchain: str,
+    structure_pks: list[int],
+    code: str,
+    protocol: str = "moderate",
+    overrides: dict[str, Any] | None = None,
+    protocol_kwargs: dict[str, Any] | None = None,
+    parameter_grid: dict[str, list[Any]] | None = None,
+    matrix_mode: str = "product",
+):
+    """Draft and validate a batch of WorkChains across structures or parameter grids; do not submit until confirmation."""
+    try:
+        raw_expanded_requests = _expand_batch_draft_requests(
+            workchain=workchain,
+            structure_pks=structure_pks,
+            code=code,
+            protocol=protocol,
+            overrides=overrides,
+            protocol_kwargs=protocol_kwargs,
+            parameter_grid=parameter_grid,
+            matrix_mode=matrix_mode,
+        )
+    except ValueError as exc:
+        return {
+            "error": "Failed to prepare batch workflow requests",
+            "details": str(exc),
+        }
+    expanded_requests = [_normalize_workchain_request_payload(ctx, request_payload) for request_payload in raw_expanded_requests]
+
+    ctx.deps.log_step(f"Preparing batch workflow for validation: {workchain} ({len(expanded_requests)} jobs)")
+
+    ready_drafts: list[dict[str, Any]] = []
+    ready_validations: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+
+    for index, request_payload in enumerate(expanded_requests):
+        raw_overrides = request_payload.get("overrides")
+        request_overrides = dict(raw_overrides) if isinstance(raw_overrides, Mapping) else {}
+        request_protocol_kwargs = {
+            str(key): value
+            for key, value in request_payload.items()
+            if key not in {"workchain", "entry_point", "structure_pk", "code", "protocol", "overrides"}
+        }
+        draft = await draft_workchain_builder(
+            workchain,
+            int(request_payload["structure_pk"]),
+            str(request_payload["code"]),
+            str(request_payload.get("protocol") or protocol),
+            overrides=request_overrides,
+            protocol_kwargs=request_protocol_kwargs or None,
+        )
+        if not isinstance(draft, dict) or draft.get("status") != "DRAFT_READY":
+            recovery_plan = _normalize_recovery_plan_for_agent(draft)
+            failures.append(
+                {
+                    "index": index,
+                    "label": _build_batch_job_label(request_payload, index),
+                    "stage": "draft",
+                    "request": request_payload,
+                    "details": draft,
+                    "recovery_plan": recovery_plan,
+                }
+            )
+            continue
+
+        validation = await validate_job(draft)
+        if not isinstance(validation, dict):
+            failures.append(
+                {
+                    "index": index,
+                    "label": _build_batch_job_label(request_payload, index),
+                    "stage": "validate",
+                    "request": request_payload,
+                    "details": validation,
+                }
+            )
+            continue
+
+        validation_summary = _build_validation_summary(validation)
+        if not validation_summary.get("is_valid", False):
+            recovery_plan = _normalize_recovery_plan_for_agent(validation) or _normalize_recovery_plan_for_agent(draft)
+            failures.append(
+                {
+                    "index": index,
+                    "label": _build_batch_job_label(request_payload, index),
+                    "stage": "validate",
+                    "request": request_payload,
+                    "draft": draft,
+                    "details": validation,
+                    "validation_summary": validation_summary,
+                    "recovery_plan": recovery_plan,
+                }
+            )
+            continue
+
+        ready_drafts.append(draft)
+        ready_validations.append(validation)
+
+    if failures:
+        recovery_plan = next(
+            (
+                failure.get("recovery_plan")
+                for failure in failures
+                if isinstance(failure.get("recovery_plan"), dict)
+            ),
+            None,
+        )
+        batch_validation_summary = _build_batch_validation_summary(
+            [*ready_validations, *[failure.get("details", {}) for failure in failures if isinstance(failure.get("details"), Mapping)]],
+            workchain=workchain,
+        )
+        return {
+            "status": "SUBMISSION_BLOCKED",
+            "workchain": workchain,
+            "job_count": len(expanded_requests),
+            "ready_job_count": len(ready_drafts),
+            "failed_job_count": len(failures),
+            "failures": failures,
+            "validation_summary": batch_validation_summary,
+            "recovery_plan": recovery_plan,
+            "next_step": _render_recovery_next_step(recovery_plan),
+        }
+
+    batch_validation_summary = _build_batch_validation_summary(ready_validations, workchain=workchain)
+    submission_draft = _build_batch_submission_draft_payload(
+        ready_drafts,
+        raw_drafts=expanded_requests,
+        validation_payloads=ready_validations,
+        validation_summary=batch_validation_summary,
+        fallback_process_label=workchain,
+    )
+    submission_draft_meta = submission_draft.get("meta")
+    if isinstance(submission_draft_meta, dict):
+        submission_draft_meta["batch_mode"] = str(matrix_mode or "product").strip().lower() or "product"
+        submission_draft_meta["draft_count"] = len(expanded_requests)
+        if parameter_grid:
+            submission_draft_meta["parameter_grid"] = dict(parameter_grid)
+
+    _cache_pending_submission(
+        ctx,
+        [dict(item) for item in expanded_requests],
+        {"jobs": ready_validations},
+        batch_validation_summary,
+        submission_draft=submission_draft,
+    )
+    return {
+        "status": "SUBMISSION_DRAFT",
+        "workchain": workchain,
+        "job_count": len(expanded_requests),
+        "submission_draft": submission_draft,
+        "submission_draft_tag": _format_submission_draft_tag(submission_draft),
+        "validation_summary": batch_validation_summary,
+        "validation": {"jobs": ready_validations},
+        "next_step": SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE,
+    }
+
+
+@aiida_researcher.tool
 async def submit_validated_workflow(ctx: RunContext[AiiDADeps]):
     """Submit the latest validated workflow only after explicit user confirmation."""
     pending = _get_pending_submission(ctx)
     if not isinstance(pending, dict):
         return {
-            "error": "No validated workflow is pending submission. Run submit_new_workflow first."
+            "error": "No validated workflow is pending submission. Run submit_new_workflow or submit_new_batch_workflow first."
         }
 
     draft = pending.get("draft")
     validation_summary = pending.get("validation_summary")
-    if not isinstance(draft, dict):
+    if not isinstance(draft, (dict, list)):
         return {
-            "error": "Pending draft is unavailable. Please run submit_new_workflow again."
+            "error": "Pending draft is unavailable. Please run submit_new_workflow or submit_new_batch_workflow again."
+        }
+    if isinstance(draft, list) and not draft:
+        return {
+            "error": "Pending batch draft is empty. Please run submit_new_batch_workflow again."
         }
     if isinstance(validation_summary, dict) and not validation_summary.get("is_valid", False):
         return {
@@ -1282,12 +2201,34 @@ async def submit_validated_workflow(ctx: RunContext[AiiDADeps]):
             "next_step": _render_recovery_next_step(recovery_plan),
         }
 
+    auto_groups = None
+    submitted_pks = _extract_submitted_pks(submission)
+    if submitted_pks:
+        try:
+            auto_groups = _auto_assign_submission_groups_for_session(
+                getattr(ctx.deps, "app_state", None),
+                getattr(ctx.deps, "session_id", None),
+                submitted_pks,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                log_event(
+                    "aiida.agent.submission.auto_group_failed",
+                    error=str(error),
+                    session_id=getattr(ctx.deps, "session_id", None),
+                    submitted_pks=submitted_pks,
+                )
+            )
+
     _clear_pending_submission(ctx)
-    return {
+    response = {
         "status": "SUBMITTED",
         "submission": submission,
         "validation_summary": validation_summary,
     }
+    if auto_groups:
+        response["auto_groups"] = auto_groups
+    return response
 
 
 @aiida_researcher.tool

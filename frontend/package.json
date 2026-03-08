@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.76.2",
+    "@uiw/react-json-view": "^2.0.0-alpha.41",
     "axios": "^1.8.4",
     "clsx": "^2.1.1",
     "lucide-react": "^0.511.0",

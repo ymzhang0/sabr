@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 import yaml
 from fastapi import APIRouter, File, Form, HTTPException, Path as ApiPath, Query, Request, UploadFile
+from fastapi.responses import Response
 from google import genai
 from loguru import logger
 from sse_starlette.sse import EventSourceResponse
@@ -25,13 +26,16 @@ from .chat import (
     cancel_chat_turn,
     create_chat_project,
     create_chat_session,
+    delete_chat_items,
     get_active_chat_project_id,
     get_active_chat_session_id,
     get_chat_history,
     get_chat_session_detail,
+    get_chat_session_batch_progress,
     get_chat_session_workspace_path,
     get_chat_snapshot,
     list_chat_projects,
+    list_chat_project_workspace_files,
     list_chat_session_workspace_files,
     list_chat_sessions,
     normalize_context_node_ids,
@@ -61,14 +65,14 @@ from .presenters.node_view import (
 from .presenters.workflow_view import (
     extract_submitted_pk as _extract_submitted_pk,
     enrich_submission_draft_payload,
-    format_batch_submission_response,
     format_single_submission_response,
+    format_worker_batch_submission_response,
 )
 from .service import (
     add_nodes_to_group,
     create_group,
     delete_group,
-    export_group,
+    export_group_archive,
     get_context_nodes,
     get_recent_nodes,
     list_groups,
@@ -82,6 +86,7 @@ from .infrastructure_manager import infrastructure_manager
 from .schemas import (
     FrontendChatRequest,
     FrontendStopChatRequest,
+    FrontendChatDeleteRequest,
     FrontendChatProjectCreateRequest,
     FrontendChatSessionCreateRequest,
     FrontendChatSessionTitleUpdateRequest,
@@ -366,6 +371,82 @@ def _build_active_submission_group_labels(state: Any) -> dict[str, str] | None:
     return {
         "project": project_group_label,
         "session": session_group_label,
+    }
+
+
+async def _ensure_named_groups(labels: list[str]) -> dict[str, str]:
+    ensured: dict[str, str] = {}
+    for raw_label in labels:
+        cleaned_label = str(raw_label or "").strip()
+        if not cleaned_label:
+            continue
+        await _ensure_submission_group(cleaned_label)
+        ensured[cleaned_label] = cleaned_label
+    return ensured
+
+
+async def _delete_named_groups(labels: list[str]) -> dict[str, str]:
+    deleted: dict[str, str] = {}
+    for raw_label in labels:
+        cleaned_label = str(raw_label or "").strip()
+        if not cleaned_label or cleaned_label in deleted:
+            continue
+        existing = next((group for group in list_groups() if str(group.get("label") or "").strip() == cleaned_label), None)
+        if not isinstance(existing, dict):
+            continue
+        try:
+            delete_group(int(existing.get("pk")))
+        except BridgeAPIError as exc:
+            if int(exc.status_code or 0) != 404:
+                raise
+        deleted[cleaned_label] = cleaned_label
+    return deleted
+
+
+def _collect_chat_group_labels_for_deletion(
+    state: Any,
+    *,
+    project_ids: list[str] | None = None,
+    session_ids: list[str] | None = None,
+) -> list[str]:
+    project_id_set = {str(project_id or "").strip() for project_id in project_ids or [] if str(project_id or "").strip()}
+    session_id_set = {str(session_id or "").strip() for session_id in session_ids or [] if str(session_id or "").strip()}
+    if not project_id_set and not session_id_set:
+        return []
+
+    labels: list[str] = []
+    seen: set[str] = set()
+    sessions = list_chat_sessions(state)
+    projects = list_chat_projects(state)
+
+    for project in projects:
+        if str(project.get("id") or "").strip() not in project_id_set:
+            continue
+        label = str(project.get("group_label") or "").strip()
+        if label and label not in seen:
+            seen.add(label)
+            labels.append(label)
+
+    for session in sessions:
+        session_id = str(session.get("id") or "").strip()
+        project_id = str(session.get("project_id") or "").strip()
+        if session_id not in session_id_set and project_id not in project_id_set:
+            continue
+        label = str(session.get("session_group_label") or "").strip()
+        if label and label not in seen:
+            seen.add(label)
+            labels.append(label)
+
+    return labels
+
+
+def _chat_delete_response(state: Any, deleted: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _chat_sessions_payload(state)
+    return {
+        **snapshot,
+        "chat": get_chat_snapshot(state),
+        "deleted_project_ids": deleted.get("deleted_project_ids") if isinstance(deleted, dict) else [],
+        "deleted_session_ids": deleted.get("deleted_session_ids") if isinstance(deleted, dict) else [],
     }
 
 
@@ -666,77 +747,40 @@ async def setup_profile(payload: ProfileSetupRequest):
         _raise_worker_http_error(exc)
 
 
-@router.post("/submission/submit", tags=[WORKER_PROXY_TAG])
-async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequest):
+async def _submit_bridge_workchain_impl(
+    request: Request,
+    payload: SubmissionDraftRequest,
+    *,
+    require_batch_list: bool = False,
+):
     if not payload.draft:
         raise HTTPException(status_code=422, detail="Submission draft is required")
 
     draft_payload = payload.draft
+    if require_batch_list and not isinstance(draft_payload, list):
+        raise HTTPException(status_code=422, detail="Batch submission draft list is required")
     worker_request_headers = _build_submission_request_headers(request.app.state)
     if isinstance(draft_payload, list):
         if len(draft_payload) == 0:
             raise HTTPException(status_code=422, detail="Submission draft list cannot be empty")
+        try:
+            raw = await request_json(
+                "POST",
+                "/submission/submit",
+                json={"draft": draft_payload},
+                headers=worker_request_headers,
+            )
+        except Exception as exc:
+            _raise_worker_http_error(exc)
 
-        submitted_pks: list[int] = []
-        responses: list[dict[str, Any]] = []
-        failures: list[dict[str, Any]] = []
-
-        for index, draft_item in enumerate(draft_payload):
-            if not isinstance(draft_item, dict) or not draft_item:
-                failures.append(
-                    {
-                        "index": index,
-                        "error": "Submission draft is required",
-                    }
-                )
-                continue
-            try:
-                raw = await request_json(
-                    "POST",
-                    "/submission/submit",
-                    json={"draft": draft_item},
-                    headers=worker_request_headers,
-                )
-                response = format_single_submission_response(raw)
-                response_pk = _extract_submitted_pk(response)
-                if response_pk is not None:
-                    submitted_pks.append(response_pk)
-                responses.append(
-                    {
-                        "index": index,
-                        "response": response,
-                    }
-                )
-            except BridgeOfflineError as exc:
-                failures.append(
-                    {
-                        "index": index,
-                        "status_code": 503,
-                        "error": str(exc),
-                    }
-                )
-            except BridgeAPIError as exc:
-                detail = exc.payload if isinstance(exc.payload, dict) else {"error": exc.message, "details": exc.payload}
-                failures.append(
-                    {
-                        "index": index,
-                        "status_code": max(400, int(exc.status_code or 502)),
-                        "detail": detail,
-                    }
-                )
-
+        batch_response = format_worker_batch_submission_response(raw)
+        submitted_pks = [
+            int(pk)
+            for pk in batch_response.get("submitted_pks", [])
+            if isinstance(pk, int) and pk > 0
+        ]
         if submitted_pks:
             _clear_pending_submission_memory(request.app.state)
-        elif failures:
-            raise HTTPException(
-                status_code=502,
-                detail={
-                    "error": "Batch submission failed",
-                    "failures": failures,
-                },
-            )
-
-        batch_response = format_batch_submission_response(submitted_pks, responses, failures)
         try:
             auto_groups = await _auto_assign_submission_groups(request.app.state, submitted_pks)
         except Exception as exc:  # noqa: BLE001
@@ -768,6 +812,16 @@ async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequ
     except BridgeAPIError as exc:
         detail = exc.payload if isinstance(exc.payload, dict) else {"error": exc.message, "details": exc.payload}
         raise HTTPException(status_code=max(400, int(exc.status_code or 502)), detail=detail) from exc
+
+
+@router.post("/submission/submit", tags=[WORKER_PROXY_TAG])
+async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequest):
+    return await _submit_bridge_workchain_impl(request, payload)
+
+
+@router.post("/submission/submit_batch", tags=[WORKER_PROXY_TAG])
+async def submit_bridge_workchain_batch(request: Request, payload: SubmissionDraftRequest):
+    return await _submit_bridge_workchain_impl(request, payload, require_batch_list=True)
 
 
 @router.get("/process/events", tags=[WORKER_PROXY_TAG])
@@ -1048,16 +1102,18 @@ async def frontend_export_group(pk: int):
     if not hub.current_profile:
         hub.start()
     try:
-        response = export_group(pk)
+        response = export_group_archive(pk)
     except Exception as exc:  # noqa: BLE001
         _raise_worker_http_error(exc)
-    if not isinstance(response, dict):
-        return {"group": None, "nodes": []}
-    group_payload = response.get("group")
-    return {
-        "group": _serialize_groups([group_payload])[0] if isinstance(group_payload, dict) else None,
-        "nodes": response.get("nodes") if isinstance(response.get("nodes"), list) else [],
-    }
+    headers: dict[str, str] = {}
+    content_disposition = response.headers.get("content-disposition")
+    if isinstance(content_disposition, str) and content_disposition.strip():
+        headers["Content-Disposition"] = content_disposition
+    return Response(
+        content=response.content,
+        media_type=response.media_type or "application/octet-stream",
+        headers=headers,
+    )
 
 
 @router.post("/frontend/archives/upload", tags=[FRONTEND_TAG])
@@ -1316,6 +1372,14 @@ async def frontend_chat_sessions(request: Request):
     return _chat_sessions_payload(state)
 
 
+@router.get("/frontend/chat/sessions/{session_id}/batch-progress", tags=[FRONTEND_TAG])
+async def frontend_chat_session_batch_progress(request: Request, session_id: str):
+    state = request.app.state
+    if get_chat_session_detail(state, session_id) is None:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    return {"item": get_chat_session_batch_progress(state, session_id)}
+
+
 @router.get("/frontend/chat/projects", tags=[FRONTEND_TAG])
 async def frontend_chat_projects(request: Request):
     state = request.app.state
@@ -1337,6 +1401,12 @@ async def frontend_create_chat_project(request: Request, payload: FrontendChatPr
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    project_group_label = str(project.get("group_label") or "").strip()
+    if project_group_label:
+        try:
+            await _ensure_named_groups([project_group_label])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(log_event("aiida.frontend.project_group.ensure_failed", error=str(exc), label=project_group_label))
     return {
         "project": project,
         "active_project_id": get_active_chat_project_id(state),
@@ -1355,6 +1425,14 @@ async def frontend_create_chat_session(request: Request, payload: FrontendChatSe
         archive_session_id=payload.archive_session_id,
         project_id=payload.project_id,
     )
+    labels = [
+        str(session.get("project_group_label") or "").strip(),
+        str(session.get("session_group_label") or "").strip(),
+    ]
+    try:
+        await _ensure_named_groups(labels)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(log_event("aiida.frontend.session_groups.ensure_failed", error=str(exc), labels=labels))
     return {
         "session": session,
         "chat": get_chat_snapshot(state),
@@ -1363,6 +1441,57 @@ async def frontend_create_chat_session(request: Request, payload: FrontendChatSe
         "projects": list_chat_projects(state),
         "version": int(getattr(state, "chat_sessions_version", 0)),
     }
+
+
+@router.delete("/frontend/chat/projects/{project_id}", tags=[FRONTEND_TAG])
+async def frontend_delete_chat_project(request: Request, project_id: str):
+    state = request.app.state
+    labels = _collect_chat_group_labels_for_deletion(state, project_ids=[project_id])
+    deleted = delete_chat_items(state, project_ids=[project_id])
+    if project_id not in set(deleted.get("deleted_project_ids") or []):
+        raise HTTPException(status_code=404, detail="Chat project not found")
+    try:
+        await _delete_named_groups(labels)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(log_event("aiida.frontend.project_groups.delete_failed", error=str(exc), labels=labels))
+    return _chat_delete_response(state, deleted)
+
+
+@router.delete("/frontend/chat/sessions/{session_id}", tags=[FRONTEND_TAG])
+async def frontend_delete_chat_session(request: Request, session_id: str):
+    state = request.app.state
+    labels = _collect_chat_group_labels_for_deletion(state, session_ids=[session_id])
+    deleted = delete_chat_items(state, session_ids=[session_id])
+    if session_id not in set(deleted.get("deleted_session_ids") or []):
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    try:
+        await _delete_named_groups(labels)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(log_event("aiida.frontend.session_groups.delete_failed", error=str(exc), labels=labels))
+    return _chat_delete_response(state, deleted)
+
+
+@router.post("/frontend/chat/delete", tags=[FRONTEND_TAG])
+async def frontend_delete_chat_items(request: Request, payload: FrontendChatDeleteRequest):
+    state = request.app.state
+    project_ids = [str(value or "").strip() for value in payload.project_ids if str(value or "").strip()]
+    session_ids = [str(value or "").strip() for value in payload.session_ids if str(value or "").strip()]
+    if not project_ids and not session_ids:
+        raise HTTPException(status_code=400, detail={"error": "No project_ids or session_ids provided"})
+
+    labels = _collect_chat_group_labels_for_deletion(
+        state,
+        project_ids=project_ids,
+        session_ids=session_ids,
+    )
+    deleted = delete_chat_items(state, project_ids=project_ids, session_ids=session_ids)
+    if not (deleted.get("deleted_project_ids") or deleted.get("deleted_session_ids")):
+        raise HTTPException(status_code=404, detail="No matching chat items found")
+    try:
+        await _delete_named_groups(labels)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(log_event("aiida.frontend.chat_groups.bulk_delete_failed", error=str(exc), labels=labels))
+    return _chat_delete_response(state, deleted)
 
 
 @router.post("/frontend/chat/sessions/{session_id}/activate", tags=[FRONTEND_TAG])
@@ -1441,6 +1570,22 @@ async def frontend_chat_session_workspace(
         raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
     if payload is None:
         raise HTTPException(status_code=404, detail="Chat session not found")
+    return payload
+
+
+@router.get("/frontend/chat/projects/{project_id}/workspace", tags=[FRONTEND_TAG])
+async def frontend_chat_project_workspace(
+    request: Request,
+    project_id: str,
+    relative_path: str | None = Query(default=None),
+):
+    state = request.app.state
+    try:
+        payload = list_chat_project_workspace_files(state, project_id, relative_path=relative_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Chat project not found")
     return payload
 
 

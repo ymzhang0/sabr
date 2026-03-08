@@ -228,6 +228,7 @@ export function SubmissionCard({
   onInspectInputPk,
   onOpenDetail,
 }: SubmissionCardProps) {
+  const isActionable = state.status === "idle";
   const pkEntries = normalizePkMapEntries(submissionDraft.meta.pk_map);
   const targetComputer =
     typeof submissionDraft.meta.target_computer === "string" && submissionDraft.meta.target_computer.trim()
@@ -348,33 +349,32 @@ export function SubmissionCard({
           </div>
         ) : state.status === "cancelled" ? (
           <p className="text-sm text-blue-700/85 dark:text-blue-200/85">Submission cancelled.</p>
-        ) : (
+        ) : state.status === "error" ? (
+          <p className="text-sm text-rose-700 dark:text-rose-300">
+            Submission attempt failed. This preview has been archived.
+          </p>
+        ) : state.status === "submitting" ? (
+          <p className="text-sm text-blue-700 dark:text-blue-300">Submitting. This preview is locked.</p>
+        ) : isActionable ? (
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               className="bg-blue-600 text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
               onClick={onConfirm}
-              disabled={state.status === "submitting"}
             >
-              {state.status === "submitting" ? (
-                <span className="inline-flex items-center gap-1">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Submitting...
-                </span>
-              ) : (
-                "Confirm & Submit"
-              )}
+              Confirm & Submit
             </Button>
             <Button
               variant="outline"
               size="sm"
               className="border-blue-300/80 bg-white/70 text-blue-700 hover:bg-blue-100 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-100 dark:hover:bg-blue-900/50"
               onClick={onCancel}
-              disabled={state.status === "submitting"}
             >
               Cancel
             </Button>
           </div>
+        ) : (
+          <p className="text-sm text-zinc-600 dark:text-zinc-300">This submission preview has been archived.</p>
         )}
         {state.status === "error" && state.errorText ? (
           <p className="mt-2 text-xs text-rose-600 dark:text-rose-300">{state.errorText}</p>

@@ -10,6 +10,7 @@ from .workflow_view import (
     extract_submitted_pk,
     format_batch_submission_response,
     format_single_submission_response,
+    format_worker_batch_submission_response,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "extract_submitted_pk",
     "format_single_submission_response",
     "format_batch_submission_response",
+    "format_worker_batch_submission_response",
 ]

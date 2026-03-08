@@ -73,8 +73,20 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
         "'submit_validated_workflow'."
     ),
     (
+        "For multiple structures or parameter sweeps, use 'submit_new_batch_workflow' to prepare one batch "
+        "SUBMISSION_DRAFT instead of repeating 'submit_new_workflow' per structure."
+    ),
+    (
         "For standard workflow preparation requests, do not start with custom scripts. "
         "Use submit_new_workflow first, and only use run_aiida_code_script after explicit builder/tool failure."
+    ),
+    (
+        "Do not downgrade multi-structure or parameter-sweep requests into a single submission preview. "
+        "If the user asks for multiple structures, you MUST end with submit_new_batch_workflow or explain why batch preparation is blocked."
+    ),
+    (
+        "For quantumespresso.pw.bands, when the user specifies one kpoints distance, apply it to both "
+        "SCF and bands sampling before presenting the draft."
     ),
     (
         "Builder failure rule: if protocol-based builder creation (e.g. get_builder_from_protocol / draft-builder) "
@@ -105,6 +117,10 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
     (
         "Custom script import safety: avoid hard dependency on aiida_pseudo.* modules unless confirmed installed "
         "in worker; discover pseudo families via worker bridge/group labels when possible."
+    ),
+    (
+        "Custom script ORM safety: prefer aiida.orm APIs plus helper functions such as get_default_user()/list_users(). "
+        "Do not rely on backend.users.get_default(), backend.users.all(), or cached backend.default_user semantics."
     ),
     (
         "Worker Python environments may not provide 'pip' or 'pkg_resources'. In custom scripts, do not shell out "

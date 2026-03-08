@@ -38,7 +38,8 @@ def test_update_chat_session_manual_title_marks_title_ready() -> None:
     updated = chat_service.update_chat_session(state, session["id"], title="Si能带任务")
 
     assert updated is not None
-    assert updated["title"] == "Si能带任务"
+    assert updated["title"] == "Si"
+    assert updated["session_slug"] == "si"
     assert updated["auto_title"] is False
     assert updated["title_state"] == "ready"
 
@@ -98,7 +99,8 @@ def test_title_prompt_prefers_pinned_node_context() -> None:
 
     assert "Silicon" in prompt or "Si" in prompt
     assert "#101" in prompt
-    assert "首条用户指令：帮我看看这个结构" in prompt
+    assert "First user request: 帮我看看这个结构" in prompt
+    assert "ASCII only" in prompt
 
 
 def test_should_schedule_deep_summary_after_sixth_user_turn() -> None:
@@ -149,6 +151,68 @@ def test_inject_context_priority_instruction_adds_primary_scope() -> None:
     assert "Treat these PKs as the primary subjects" in scoped
     assert "USER REQUEST" in scoped
     assert intent in scoped
+
+
+def test_extract_intent_hints_detects_batch_and_kpoints_distance() -> None:
+    hints = chat_service._extract_intent_hints(
+        "生成 7 个等间距的 Si 结构并执行能带计算，kpoints distance设置为0.5。"
+    )
+
+    assert hints["expected_batch"] is True
+    assert hints["requested_structure_count"] == 7
+    assert hints["kpoints_distance"] == 0.5
+
+
+def test_summarize_chat_session_batch_progress_counts_terminal_and_active_jobs() -> None:
+    summary = chat_service._summarize_chat_session_batch_progress(
+        session_id="session-1",
+        title="Si Thermal Expansion",
+        session_group_label="Test/session-1",
+        nodes=[
+            {"pk": 11, "label": "bands-1", "type": "WorkChainNode", "process_state": "finished", "exit_status": 0},
+            {"pk": 12, "label": "bands-2", "type": "WorkChainNode", "process_state": "running", "exit_status": None},
+            {"pk": 13, "label": "bands-3", "type": "WorkChainNode", "process_state": "created", "exit_status": None},
+            {"pk": 14, "label": "bands-4", "type": "WorkChainNode", "process_state": "finished", "exit_status": 301},
+            {"pk": 15, "label": "Si primitive", "type": "StructureData", "process_state": "N/A", "exit_status": None},
+        ],
+    )
+
+    assert summary is not None
+    assert summary["total"] == 4
+    assert summary["done"] == 2
+    assert summary["percent"] == 50
+    assert summary["success"] == 1
+    assert summary["running"] == 1
+    assert summary["queued"] == 1
+    assert summary["failed"] == 1
+
+
+def test_get_chat_session_batch_progress_reads_session_group(monkeypatch) -> None:
+    state = _make_chat_state()
+    session = chat_service.create_chat_session(state, title="Si Thermal Expansion", activate=True)
+    captured: dict[str, object] = {}
+
+    def _fake_inspect_group(group_label: str, *, limit: int = 500):
+        captured["group_label"] = group_label
+        captured["limit"] = limit
+        return {
+            "nodes": [
+                {"pk": 21, "label": "bands-1", "type": "WorkChainNode", "process_state": "finished", "exit_status": 0},
+                {"pk": 22, "label": "bands-2", "type": "WorkChainNode", "process_state": "waiting", "exit_status": None},
+            ]
+        }
+
+    monkeypatch.setattr(chat_service, "inspect_group", _fake_inspect_group)
+
+    summary = chat_service.get_chat_session_batch_progress(state, session["id"])
+
+    assert summary is not None
+    assert summary["label"] == "Si Thermal Expansion"
+    assert summary["total"] == 2
+    assert summary["success"] == 1
+    assert summary["queued"] == 1
+    assert captured["limit"] == 500
+    assert captured["group_label"] == "Default Project/si-thermal-expansion"
 
 
 def test_serialize_chat_history_keeps_payload() -> None:
@@ -250,6 +314,34 @@ def test_build_chat_message_payload_reads_pending_submission_from_memory() -> No
     assert payload["submission_draft"]["meta"]["validation_summary"]["status"] == "VALIDATION_OK"
 
 
+def test_build_chat_message_payload_blocks_single_draft_for_batch_intent() -> None:
+    pending = {
+        "draft": {
+            "builder": {
+                "structure_pk": 19,
+                "metadata": {"options": {"resources": {"num_machines": 1}}},
+            }
+        },
+        "validation_summary": {"status": "VALIDATION_OK", "is_valid": True},
+    }
+    deps = SimpleNamespace(
+        get_registry_value=lambda key: pending if key == "aiida_pending_submission" else None,
+        intent_hints={"expected_batch": True, "requested_structure_count": 7},
+    )
+    output = SimpleNamespace(data_payload={"source": "agent"})
+
+    payload = chat_service._build_chat_message_payload(
+        output,
+        deps,
+        tool_calls=None,
+    )
+
+    assert payload is not None
+    assert "submission_draft" not in payload
+    assert payload["status"] == "SUBMISSION_BLOCKED"
+    assert payload["recovery_plan"]["issues"][0]["type"] == "batch_draft_required"
+
+
 def test_build_chat_message_payload_extracts_submission_draft_from_answer_text() -> None:
     output = SimpleNamespace(data_payload={"source": "agent"})
     deps = SimpleNamespace(get_registry_value=lambda _key: None)
@@ -274,6 +366,20 @@ def test_build_chat_message_payload_extracts_submission_draft_from_answer_text()
     assert payload["type"] == "SUBMISSION_DRAFT"
     assert payload["submission_draft"]["process_label"] == "PwBaseWorkChain"
     assert payload["submission_draft"]["meta"]["pk_map"][0]["pk"] == 21
+
+
+def test_strip_submission_draft_tail_removes_raw_submission_block() -> None:
+    answer_text = (
+        "Validation complete.\n\n"
+        "[SUBMISSION_DRAFT]\n"
+        "{\n"
+        '  "process_label": "PwBaseWorkChain"\n'
+        "}\n"
+    )
+
+    stripped = chat_service._strip_submission_draft_tail(answer_text)
+
+    assert stripped == "Validation complete."
 
 
 def test_build_chat_message_payload_extracts_submission_draft_from_output_payload() -> None:
@@ -741,7 +847,7 @@ def test_create_chat_session_creates_default_project_workspace(tmp_path) -> None
     assert session["project_label"] == "Default Project"
     workspace_path = Path(session["workspace_path"])
     assert workspace_path.exists()
-    assert workspace_path.name == session["id"]
+    assert workspace_path.name == "workspace-session"
     assert workspace_path.parent.name == "sessions"
 
 
@@ -770,6 +876,55 @@ def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path)
     assert Path(session["workspace_path"]).parent.parent == Path(project["root_path"])
 
 
+def test_delete_chat_items_removes_session_workspace_and_reassigns_active_session(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.SABR_PROJECTS_ROOT
+    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    try:
+        older = chat_service.create_chat_session(state, title="Older", activate=True)
+        newer = chat_service.create_chat_session(state, title="Newer", activate=True)
+        older_workspace = Path(older["workspace_path"])
+        newer_workspace = Path(newer["workspace_path"])
+
+        deleted = chat_service.delete_chat_items(state, session_ids=[newer["id"]])
+    finally:
+        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+
+    assert deleted["deleted_session_ids"] == [newer["id"]]
+    assert deleted["deleted_project_ids"] == []
+    assert newer_workspace.exists() is False
+    assert older_workspace.exists() is True
+    assert chat_service.get_active_chat_session_id(state) == older["id"]
+
+
+def test_delete_chat_items_removes_project_and_child_sessions(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.SABR_PROJECTS_ROOT
+    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    try:
+        doomed_project = chat_service.create_chat_project(state, name="To Delete", activate=True)
+        doomed_session = chat_service.create_chat_session(state, title="Delete me", activate=True, project_id=doomed_project["id"])
+        survivor_project = chat_service.create_chat_project(state, name="Keep", activate=True)
+        survivor_session = chat_service.create_chat_session(state, title="Keep me", activate=True, project_id=survivor_project["id"])
+        doomed_root = Path(doomed_project["root_path"])
+
+        deleted = chat_service.delete_chat_items(state, project_ids=[doomed_project["id"]])
+    finally:
+        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+
+    remaining_projects = {project["id"] for project in chat_service.list_chat_projects(state)}
+    remaining_sessions = {session["id"] for session in chat_service.list_chat_sessions(state)}
+
+    assert deleted["deleted_project_ids"] == [doomed_project["id"]]
+    assert deleted["deleted_session_ids"] == [doomed_session["id"]]
+    assert doomed_project["id"] not in remaining_projects
+    assert doomed_session["id"] not in remaining_sessions
+    assert survivor_project["id"] in remaining_projects
+    assert survivor_session["id"] in remaining_sessions
+    assert chat_service.get_active_chat_session_id(state) == survivor_session["id"]
+    assert doomed_root.exists() is False
+
+
 def test_list_chat_session_workspace_files_returns_saved_entries(tmp_path) -> None:
     state = _make_chat_state()
     original_root = chat_service.settings.SABR_PROJECTS_ROOT
@@ -786,3 +941,33 @@ def test_list_chat_session_workspace_files_returns_saved_entries(tmp_path) -> No
     assert payload is not None
     assert payload["relative_path"] == "plots"
     assert payload["entries"][0]["name"] == "band-structure.png"
+
+
+def test_create_chat_session_uses_english_slug_for_group_and_workspace(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.SABR_PROJECTS_ROOT
+    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    try:
+        session = chat_service.create_chat_session(state, title="Si Bands Study", activate=True)
+    finally:
+        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+
+    assert session["title"] == "Si Bands Study"
+    assert session["session_slug"] == "si-bands-study"
+    assert session["session_group_label"] == "Default Project/si-bands-study"
+    assert Path(session["workspace_path"]).name == "si-bands-study"
+
+
+def test_create_chat_session_with_non_english_title_falls_back_to_default_english_name(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.SABR_PROJECTS_ROOT
+    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    try:
+        session = chat_service.create_chat_session(state, title="硅热膨胀", activate=True)
+    finally:
+        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+
+    assert session["title"] == "New Conversation"
+    assert session["session_slug"] == "new-conversation"
+    assert session["session_group_label"] == "Default Project/new-conversation"
+    assert Path(session["workspace_path"]).name == "new-conversation"

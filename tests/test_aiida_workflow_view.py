@@ -161,6 +161,32 @@ def test_enrich_submission_draft_treats_node_envelopes_as_single_editable_inputs
     assert "kpoints_distance" in brillouin_paths
 
 
+def test_format_worker_batch_submission_response_preserves_worker_metadata() -> None:
+    raw = {
+        "status": "SUBMITTED_BATCH",
+        "total": 2,
+        "submitted_count": 2,
+        "failed_count": 0,
+        "submitted_pks": [101, 102],
+        "responses": [
+            {"index": 0, "response": {"pk": 101}},
+            {"index": 1, "response": {"pk": 102}},
+        ],
+        "failures": [],
+        "batch_context": {"matrix_mode": "product"},
+    }
+
+    formatted = workflow_view.format_worker_batch_submission_response(raw)
+
+    assert formatted["status"] == "SUBMITTED_BATCH"
+    assert formatted["submitted_pks"] == [101, 102]
+    assert formatted["process_pks"] == [101, 102]
+    assert formatted["total"] == 2
+    assert formatted["submitted_count"] == 2
+    assert formatted["failed_count"] == 0
+    assert formatted["batch_context"] == {"matrix_mode": "product"}
+
+
 def test_enrich_submission_draft_prefers_builder_inputs_over_raw_node_envelopes() -> None:
     payload = {
         "process_label": "ExampleWorkChain",

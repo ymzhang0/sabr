@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from src.sab_engines.aiida.client import (
+    BridgeBinaryResponse,
     BridgeAPIError,
     BridgeOfflineError,
     aiida_worker_client,
+    request_content_sync,
     request_json_sync,
 )
 
@@ -156,6 +159,26 @@ def get_context_nodes(node_ids: list[int]) -> list[dict[str, Any]]:
     return payload if isinstance(payload, list) else []
 
 
+def inspect_group(group_label: str, *, limit: int = 500) -> dict[str, Any] | None:
+    cleaned_label = str(group_label or "").strip()
+    if not cleaned_label:
+        return None
+
+    try:
+        payload = request_json_sync(
+            "GET",
+            f"/management/groups/{quote(cleaned_label, safe='')}",
+            params={"limit": max(1, int(limit))},
+            timeout=8.0,
+        )
+    except (BridgeOfflineError, BridgeAPIError):
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+    return payload if isinstance(payload, dict) else None
+
+
 def create_group(label: str) -> dict[str, Any]:
     return request_json_sync("POST", "/management/groups/create", json={"label": str(label)}, timeout=8.0)
 
@@ -178,8 +201,8 @@ def add_nodes_to_group(pk: int, node_pks: list[int]) -> dict[str, Any]:
     )
 
 
-def export_group(pk: int) -> dict[str, Any]:
-    return request_json_sync("GET", f"/management/groups/{int(pk)}/export", timeout=10.0)
+def export_group_archive(pk: int) -> BridgeBinaryResponse:
+    return request_content_sync("GET", f"/management/groups/{int(pk)}/export", timeout=120.0)
 
 
 def soft_delete_node(pk: int, *, deleted: bool = True) -> dict[str, Any]:
