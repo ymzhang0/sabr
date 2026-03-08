@@ -75,16 +75,16 @@ These are the canonical root endpoints used by the current ARIS bridge:
 
 ## Local Layout
 
-- Canonical brain repo: `/Users/yimingzhang/Developer/aris`
-- Canonical worker repo: `/Users/yimingzhang/Developer/aiida-worker`
+- Canonical brain repo: `/Users/yimingzhang/Developer/aris-workspace/aris`
+- Canonical worker repo: `/Users/yimingzhang/Developer/aris-workspace/aiida-worker`
 - Shared workspace-level operational files: `/Users/yimingzhang/Developer/ops`
-- Canonical runtime root: `/Users/yimingzhang/Developer/aris/runtime`
+- Canonical runtime root: `/Users/yimingzhang/Developer/aris-workspace/aris/runtime`
 
-Backlog and product ideas should go in `/Users/yimingzhang/Developer/aris/todo`, not in this README.
+Backlog and product ideas should go in `/Users/yimingzhang/Developer/aris-workspace/aris/todo`, not in this README.
 
 ## Local Operations
 
 - PM2 process names use the ARIS convention: `aris-api`, `aris-web`, `aris-tunnel`.
-- The current PM2 ecosystem file lives at `/Users/yimingzhang/Developer/aris/ecosystem.config.js`.
-- A legacy `/Users/yimingzhang/Developer/sabr` symlink may still exist and point at `/Users/yimingzhang/Developer/aris` while local scripts are being updated.
+- The current PM2 ecosystem file lives at `/Users/yimingzhang/Developer/aris-workspace/aris/ecosystem.config.js`.
+- Legacy compatibility symlinks may still exist at `/Users/yimingzhang/Developer/aris`, `/Users/yimingzhang/Developer/aiida-worker`, and `/Users/yimingzhang/Developer/sabr` while local scripts are being updated.
 - The Cloudflare tunnel resource still uses `sabr-aiida-tunnel` until the external deployment artifact is migrated separately.
