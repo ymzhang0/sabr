@@ -24,7 +24,7 @@ Task: Implement "Research Skill Engine" for High-Throughput Workflows
 
 1. Skill Definition (Backend):
 
-Create a SkillRegistry in the SABR backend. Each skill (e.g., SuperconSkill) should link to:
+Create a SkillRegistry in the ARIS backend. Each skill (e.g., SuperconSkill) should link to:
 
 A specific AiiDA WorkChain.
 

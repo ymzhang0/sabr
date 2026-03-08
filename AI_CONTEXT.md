@@ -1,7 +1,7 @@
 # ARIS Architecture & Code Review Context
 
 ## Overview
-This document serves as context transfer for agents working across different machines, preserving the review of the ARIS architecture. ARIS is the canonical Brain-side name for this codebase; legacy SABR paths remain as compatibility layers during the migration.
+This document serves as context transfer for agents working across different machines, preserving the review of the ARIS architecture. ARIS is the canonical Brain-side name for this codebase; legacy `sab_*` module paths remain only as compatibility layers during the migration.
 
 ## 1. Core Architecture: Brain-Body Split
 ARIS operates as the **Brain**. It communicates with the AiiDA-Worker (**Body**) entirely via REST APIs.

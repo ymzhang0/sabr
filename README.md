@@ -1,160 +1,90 @@
 # ARIS: Agentic Research Intelligence System
 
-ARIS is the evolving successor to the SABR codebase: an agentic scientific research framework designed around a strict Brain/Body split and optimized for the **AiiDA** ecosystem.
+ARIS is an agentic scientific research framework built around a strict Brain/Body split and optimized for the AiiDA ecosystem. The current codebase evolved from a legacy implementation, but `aris_core` and `aris_apps` are now the canonical implementation surfaces.
 
-Built on top of **PydanticAI**, ARIS uses a cyclic reasoning workflow that lets the orchestration layer diagnose failures, inspect worker state, and revise simulation parameters iteratively.
+The Brain-side repo lives in `aris/`. The worker remains a separate repo in `../aiida-worker`, with a separate Python environment and no direct code import dependency from ARIS into worker internals.
 
-## 🚀 Key Features
+## Key Features
 
-- **Cyclic Reasoning**: Powered by PydanticAI, the agent can loop through "Think-Tool-Observe" cycles to self-correct and retry failed tasks.
-- **Strict Type Safety**: Every response is validated against Pydantic models, ensuring the UI always receives structured, reliable data.
-- **Engine Decoupling**: The canonical core (`aris_core`) is isolated from app-specific integrations (for example `aris_apps.aiida`), allowing future support for other scientific domains.
-- **Oxford-Style UI**: A sophisticated, dark-themed dashboard built with **NiceGUI**, featuring a real-time thinking terminal and structured insights.
+- Brain/Body split: ARIS orchestrates reasoning and UI workflows; AiiDA-Worker owns `aiida-core`, profiles, submissions, and database access.
+- Typed integration boundary: worker responses are normalized into stable JSON payloads before they reach the frontend.
+- Engine isolation: `aris_core` stays platform-level, while AiiDA-specific behavior lives under `aris_apps.aiida`.
+- Runtime isolation: mutable memories, projects, uploads, and caches live under `runtime/` instead of the source tree.
+- Compatibility migration: legacy `sab_core` and `sab_engines` imports still exist as shims while the rename completes.
 
-Legacy `sab_core` / `sab_engines` imports remain available as compatibility layers during the refactor, but new implementation work should target `aris_core` and `aris_apps`.
+## ARIS <-> AiiDA-Worker Protocol
 
-The canonical local repo folder is now `aris/`. A temporary `sabr -> aris` symlink may remain on disk so older local scripts keep working during the migration window.
+The ARIS brain talks to AiiDA-Worker over HTTP/JSON. ARIS should not import worker Python modules directly.
 
-## 🏗️ ARIS ⇌ AiiDA-Worker Communication Protocol (v1.0)
+### Base Configuration
 
-This protocol defines the communication standards between **ARIS (Brain/Control)** and **AiiDA-Worker (Body/Execution)**. It follows a "Thin Client - Fat Server" architecture, ensuring that the Brain can orchestrate complex scientific workflows without having `aiida-core` installed locally.
+- Protocol: `HTTP/1.1`
+- Content type: `application/json`
+- Default ARIS port: `8000`
+- Default worker port: `8001`
+- Authentication: trusted internal connection today; header-based auth can be layered on top later
 
----
+### Root Compatibility Endpoints
 
-## 1. Transport & Base Configuration
-* **Protocol**: HTTP/1.1
-* **Content-Type**: `application/json`
-* **Ports**:
-    * **ARIS (Brain)**: `:8000`
-    * **AiiDA-Worker (Bridge)**: `:8001`
-* **Authentication**: Internal trusted connection (future support for `X-ARIS-Token` headers).
+These are the canonical root endpoints used by the current ARIS bridge:
 
----
-
-## 2. Core API Endpoints
-
-### 2.1 System & Environment Introspection
-Used by the Brain to identify the state and capabilities of the current "Muscle" environment.
-
-| Method | Path | Description | Example Response |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/system/status` | Fetch worker health, active profile, and daemon status. | `{"status": "online", "profile": "default", "daemon": "running"}` |
-| `GET` | `/system/plugins` | List all installed AiiDA WorkChain/Calculation entry points. | `["core.arithmetic.add_multiply", "plugin_name.workflow_name", ...]` |
-| `GET` | `/system/resources` | List available Computers and Codes. | `{"computers": [...], "codes": [...]}` |
-
-### 2.2 Deep Introspection (Workflow Spec)
-Used by the Agent to understand the "instruction manual" of a specific plugin.
-
-* **Endpoint**: `GET /spec/{entry_point}`
-* **Logic**: Recursively parses the `WorkChain` spec ports.
-* **Payload Structure**:
-    ```json
-    {
-      "entry_point": "plugin_name.workflow_name",
-      "inputs": {
-        "structure": { "type": "StructureData", "required": true, "help": "Input structure" },
-        "parameters": { "type": "Dict", "required": false }
-      },
-      "outputs": { ... }
-    }
-    ```
-
-### 2.3 Task Lifecycle
-All validation and submission logic are closed-loop on the Worker side.
-
-* **Validation**: `POST /submission/validate`
-    * Accepts a full input dictionary; returns AiiDA's internal validation results.
-* **Submission**: `POST /submission/submit`
-    * The Brain sends parameters; the Worker handles `Code` loading, `DataNode` conversion, and executes `submit()`.
-
-### 2.4 Monitoring & Data Extraction
-Used by the Brain to fetch results and make high-level decisions.
-
-| Method | Path | Description |
+| Method | Path | Purpose |
 | :--- | :--- | :--- |
-| `GET` | `/process/{pk}` | Get process state and full hierarchical `ProcessTree`. |
-| `GET` | `/process/{pk}/logs` | Extract stdout, stderr, and AiiDA report logs. |
-| `GET` | `/data/node/{pk}` | Generic node serialization (JSON-safe). |
-| `GET` | `/data/bands/{pk}` | Specialized extraction for BandStructure data. |
+| `GET` | `/status` | Worker status payload for bridge compatibility |
+| `GET` | `/plugins` | Installed AiiDA workflow entry points |
+| `GET` | `/system/info` | Profile, daemon, and environment summary |
+| `GET` | `/resources` | Computers and codes visible to the worker |
 
----
+### Submission Endpoints
 
-## 3. Error Handling
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/submission/spec/{entry_point}` | Inspect normalized workflow input spec |
+| `POST` | `/submission/validate` | Validate direct or protocol-driven workflow payloads |
+| `POST` | `/submission/validate-job` | Validate job-style submission payloads |
+| `POST` | `/submission/submit` | Submit direct workflow inputs or builder drafts |
+| `POST` | `/submission/draft-builder` | Build a protocol-driven draft payload |
+| `POST` | `/submission/submit-builder` | Submit a builder payload directly |
+| `POST` | `/submission/generate-script` | Generate a submission script from a builder payload |
 
-All APIs must follow standard HTTP status codes and return a consistent error structure:
+### Process and Data Endpoints
 
-```json
-{
-  "code": 400,
-  "error": "InputValidationError",
-  "message": "The key 'kpoints' is required but not provided.",
-  "traceback": "..." 
-}
-```
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/process/events` | SSE stream for live process updates |
+| `GET` | `/process/{identifier}` | Process summary and provenance payload |
+| `GET` | `/process/{identifier}/clone-draft` | Draft submission cloned from an existing process |
+| `GET` | `/process/{identifier}/logs` | Process logs |
+| `GET` | `/management/nodes/{pk}` | Generic node summary payload |
+| `GET` | `/management/nodes/{pk}/script` | Script/archive payload for a node |
+| `GET` | `/data/bands/{pk}` | Band structure plotting payload |
+| `GET` | `/data/remote/{pk}/files` | Remote folder listing |
+| `GET` | `/data/repository/{pk}/files` | Node repository listing |
 
-## 4. Serialization Conventions (Dehydration)
+### Registry and Management Endpoints
 
-To maintain a "Thin Client," the Worker must return "Dehydrated" JSON:
+| Method | Path | Purpose |
+| :--- | :--- | :--- |
+| `GET` | `/registry/list` | List registered analysis scripts |
+| `POST` | `/registry/register` | Register or update a stored analysis script |
+| `GET` | `/registry/workchains/{entry_point}/spec` | Alias for workflow spec inspection |
+| `POST` | `/execute/{script_name}` | Execute a registered analysis script |
+| `POST` | `/management/run-python` | Managed Python execution helper |
+| `GET` | `/management/infrastructure` | Infrastructure summary for worker setup |
+| `POST` | `/management/infrastructure/setup` | Provision infrastructure resources |
 
-* **Node Identification**: All AiiDA objects (Code, Computer, Group) are referenced via PK (Integer) or UUID (String).
+## Local Layout
 
-* **Type Flattening**: Complex AiiDA BaseType objects are automatically converted to native Python types (e.g., Float -> float).
+- Canonical brain repo: `/Users/yimingzhang/Developer/aris`
+- Canonical worker repo: `/Users/yimingzhang/Developer/aiida-worker`
+- Shared workspace-level operational files: `/Users/yimingzhang/Developer/ops`
+- Canonical runtime root: `/Users/yimingzhang/Developer/aris/runtime`
 
-* **Large Files**: Files under /data/remote are not transferred directly; the API returns file lists or provides streaming endpoints.
-
-## 5. Implementation Roadmap
-
-* **Worker Side**: Implement these paths using fastapi.APIRouter by reusing the migrated logic in the tools/ package.
-
-* **ARIS Side**: Maintain a bridge client that encapsulates these HTTP calls, providing clean methods like `get_spec()` and `submit_job()` for the agent layer.
+Backlog and product ideas should go in `/Users/yimingzhang/Developer/aris/todo`, not in this README.
 
 ## Local Operations
 
-- PM2 process names now use the ARIS convention: `aris-api`, `aris-web`, `aris-tunnel`.
+- PM2 process names use the ARIS convention: `aris-api`, `aris-web`, `aris-tunnel`.
 - The current PM2 ecosystem file lives at `/Users/yimingzhang/Developer/aris/ecosystem.config.js`.
-- A legacy `/Users/yimingzhang/Developer/sabr` symlink may still exist and point at `/Users/yimingzhang/Developer/aris`.
-- The Cloudflare tunnel command still targets `sabr-aiida-tunnel` for compatibility with the existing external tunnel resource.
-
-方案一：桌面端“伪装” (Electron) —— 最推荐
-
-如果你希望在 Mac 或 Windows 桌面上有一个独立的图标，点开就是一个漂亮的窗口，Electron 是标准答案（VS Code、Slack 都是这么做的）。
-
-做法：用 Electron 把你的前端项目包起来。它本质上是一个自带 Chromium 内核的容器。
-
-优点：
-
-零成本迁移：你现在的 Web 代码几乎不用改，直接塞进去就能跑。
-
-系统集成：可以有自己的右键菜单、托盘图标（显示红绿灯状态）、系统原生通知。
-
-离线缓存：可以把静态资源留在本地，启动速度比网页快得多。
-
-挑战：它只是个“壳”，你的 aiida-worker 后端还是得在后台跑着（或者由 Electron 在启动时顺便拉起 Python 进程）。
-
-方案二：VS Code 扩展 (First-class Citizen) —— 最专业
-
-既然你已经在用 VS Code 开发，且代码就在 Workspace 里，为什么不把它做成一个 VS Code 插件？
-
-做法：利用 VS Code 的 Webview API，把你现在的任务查看器集成到左侧侧边栏或独立面板。
-
-优点：
-
-沉浸式体验：你一边改代码，侧边栏直接看 AiiDA 任务进度，不用在浏览器和编辑器之间切来切去。
-
-上下文关联：你可以实现“右键点击代码里的结构文件 -> 直接提交 AiiDA 任务”这种骚操作。
-
-地位：对于计算化学/物理学家来说，VS Code 插件就是最强“App”。
-
-方案三：跨平台移动端 (Flutter / React Native) —— 最极客
-
-如果你想在手机上像刷朋友圈一样刷 AiiDA 任务，那就得走移动端开发路径。
-
-做法：使用 React Native。由于你前端可能已经是 React 体系，迁移逻辑会顺手一些。
-
-架构：
-
-手机端：只负责显示和简单的指令发送（App）。
-
-服务器端：你的 aiida-worker 挂在实验室服务器上，通过 API 与手机通信。
-
-场景：躺在床上看计算收敛了没，收敛了就点一下手机屏幕，自动提交下一个任务。
+- A legacy `/Users/yimingzhang/Developer/sabr` symlink may still exist and point at `/Users/yimingzhang/Developer/aris` while local scripts are being updated.
+- The Cloudflare tunnel resource still uses `sabr-aiida-tunnel` until the external deployment artifact is migrated separately.
