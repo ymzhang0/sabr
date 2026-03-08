@@ -176,11 +176,13 @@ def _get_cors_origins() -> list[str]:
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://aris.yiming-zhang.com",
+    }
+    legacy = {
         "https://sabr.yiming-zhang.com",
     }
     raw = settings.ARIS_FRONTEND_ORIGINS or ""
     values = {item.strip() for item in raw.split(",") if item.strip()}
-    return sorted(values | required)
+    return sorted(values | required | legacy)
 
 
 app.add_middleware(
@@ -259,6 +261,7 @@ if __name__ == "__main__":
 
     runtime_log_level = str(args.log_level).upper()
     os.environ["ARIS_LOG_LEVEL"] = runtime_log_level
+    # Keep the legacy env name synchronized while compatibility shims remain.
     os.environ["SABR_LOG_LEVEL"] = runtime_log_level
     setup_logging(default_level=runtime_log_level)
     logger.info(

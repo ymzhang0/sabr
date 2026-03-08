@@ -28,6 +28,7 @@ module.exports = {
         {
             name: "aris-tunnel",
             script: "cloudflared",
+            // External tunnel resources still use the historical tunnel identifier.
             args: "tunnel run sabr-aiida-tunnel",
             autorestart: true
         }
