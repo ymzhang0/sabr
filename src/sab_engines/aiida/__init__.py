@@ -1,1 +1,1 @@
-"""AiiDA bridge integration modules for SABR."""
+"""Legacy SABR compatibility surface for the ARIS AiiDA bridge."""
