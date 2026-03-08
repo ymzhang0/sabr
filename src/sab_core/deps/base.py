@@ -1,3 +1,3 @@
-from src.aris_core.deps.base import BaseSABRDeps
+from src.aris_core.deps.base import BaseARISDeps, BaseSABRDeps
 
-__all__ = ["BaseSABRDeps"]
+__all__ = ["BaseARISDeps", "BaseSABRDeps"]

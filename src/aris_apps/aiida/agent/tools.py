@@ -1,4 +1,4 @@
-"""AiiDA worker proxy tools used by the SABR AiiDA agent.
+"""AiiDA worker proxy tools used by the ARIS AiiDA agent.
 
 Thin-client rule: all domain operations are delegated to aiida-worker HTTP APIs.
 """

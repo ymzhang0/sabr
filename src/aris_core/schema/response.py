@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-class SABRResponse(BaseModel):
+class ARISResponse(BaseModel):
     answer: str = Field(description="Natural language summary of the result.")
     thought_process: List[str] = Field(description="Step-by-step logic summary.")
     data_payload: Optional[Dict[str, Any]] = Field(
@@ -31,4 +31,7 @@ class SABRResponse(BaseModel):
         return value
 
 
-__all__ = ["SABRResponse"]
+SABRResponse = ARISResponse
+
+
+__all__ = ["ARISResponse", "SABRResponse"]

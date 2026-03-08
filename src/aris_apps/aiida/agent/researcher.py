@@ -52,7 +52,7 @@ from src.aris_apps.aiida.frontend_bridge import (
 )
 from src.aris_apps.aiida.presenters.workflow_view import enrich_submission_draft_payload
 from src.aris_core.logging import log_event
-from src.aris_core.schema.response import SABRResponse
+from src.aris_core.schema.response import ARISResponse
 
 _PENDING_SUBMISSION_KEY = "aiida_pending_submission"
 _KNOWN_PARALLEL_KEYS = {
@@ -176,7 +176,7 @@ logger.info(
 aiida_researcher = Agent(
     f"google-gla:{settings.DEFAULT_MODEL}",
     deps_type=AiiDADeps,
-    output_type=SABRResponse,
+    output_type=ARISResponse,
     system_prompt=build_system_prompt(
         extra_instructions=_build_startup_skill_overlay(_STARTUP_SPECIALIZED_SKILLS),
     ),

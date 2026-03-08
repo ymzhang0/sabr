@@ -23,11 +23,14 @@ class ActionEntry(BaseModel):
     success: bool
 
 
-class SABRMemoryState(BaseModel):
+class ARISMemoryState(BaseModel):
     summary: str = ""
     turns: List[MemoryEntry] = Field(default_factory=list)
     action_history: List[ActionEntry] = Field(default_factory=list)
     kv_store: Dict[str, Any] = Field(default_factory=dict)
+
+
+SABRMemoryState = ARISMemoryState
 
 
 def _default_storage_path() -> str:
@@ -49,21 +52,33 @@ class JSONMemory:
     future ARIS layout.
     """
 
-    def __init__(self, namespace: str = "default", storage_path: str | None = None):
+    def __init__(
+        self,
+        namespace: str = "default",
+        storage_path: str | None = None,
+        legacy_namespaces: Optional[List[str]] = None,
+    ):
         resolved_storage_path = storage_path or _default_storage_path()
         self.file_path = os.path.join(resolved_storage_path, f"history_{namespace}.json")
+        self._legacy_file_paths = [
+            os.path.join(resolved_storage_path, f"history_{legacy_namespace}.json")
+            for legacy_namespace in (legacy_namespaces or [])
+            if str(legacy_namespace or "").strip() and str(legacy_namespace).strip() != namespace
+        ]
         os.makedirs(resolved_storage_path, exist_ok=True)
         self.state = self._load()
 
-    def _load(self) -> SABRMemoryState:
-        if os.path.exists(self.file_path):
+    def _load(self) -> ARISMemoryState:
+        for candidate_path in (self.file_path, *self._legacy_file_paths):
+            if not os.path.exists(candidate_path):
+                continue
             try:
-                with open(self.file_path, "r", encoding="utf-8") as handle:
+                with open(candidate_path, "r", encoding="utf-8") as handle:
                     data = json.load(handle)
-                    return SABRMemoryState.model_validate(data)
+                    return ARISMemoryState.model_validate(data)
             except Exception:  # noqa: BLE001
-                pass
-        return SABRMemoryState()
+                continue
+        return ARISMemoryState()
 
     def save(self) -> None:
         with open(self.file_path, "w", encoding="utf-8") as handle:
@@ -88,13 +103,14 @@ class JSONMemory:
         return self.state.kv_store.get(key, default)
 
     def clear(self) -> None:
-        self.state = SABRMemoryState()
+        self.state = ARISMemoryState()
         if os.path.exists(self.file_path):
             os.remove(self.file_path)
 
 
 __all__ = [
     "ActionEntry",
+    "ARISMemoryState",
     "JSONMemory",
     "MemoryEntry",
     "SABRMemoryState",

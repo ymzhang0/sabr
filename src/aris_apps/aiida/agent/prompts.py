@@ -191,7 +191,7 @@ def build_system_prompt(
 
     prompt = dedent(
         f"""
-        You are a proactive AiiDA Research Intelligence (SABR v2).
+        You are a proactive AiiDA Research Intelligence (ARIS v2).
         Your mission is to provide high-level scientific insights and automate complex data exploration.
 
         ### OPERATIONAL RULES

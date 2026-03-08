@@ -1,16 +1,17 @@
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
-from src.aris_core.deps.base import BaseSABRDeps
+
+from src.aris_core.deps.base import BaseARISDeps
 
 DEFAULT_DEPS_CLASS = "AiiDADeps"
 
 
 @dataclass
-class AiiDADeps(BaseSABRDeps):
+class AiiDADeps(BaseARISDeps):
     """
     AiiDA-specific dependency injection object.
     
-    This class extends the core BaseSABRDeps to provide the AiiDA agent 
+    This class extends the core BaseARISDeps to provide the AiiDA agent
     with necessary context such as archive paths and database profiles.
     """
     

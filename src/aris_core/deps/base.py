@@ -10,7 +10,7 @@ from src.aris_core.memory import JSONMemory
 
 
 @dataclass
-class BaseSABRDeps:
+class BaseARISDeps:
     """Generic dependencies that every science agent needs."""
 
     memory: Optional[JSONMemory] = None
@@ -29,5 +29,7 @@ class BaseSABRDeps:
             except Exception:  # noqa: BLE001
                 logger.warning(log_event("aiida.agent.step.callback_failed", step=message))
 
+BaseSABRDeps = BaseARISDeps
 
-__all__ = ["BaseSABRDeps"]
+
+__all__ = ["BaseARISDeps", "BaseSABRDeps"]

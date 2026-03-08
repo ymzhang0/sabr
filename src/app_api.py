@@ -104,8 +104,9 @@ async def lifespan(app: FastAPI):
     
     # Initialize Global Memory
     memory = JSONMemory(
-        namespace="sabr_v2_global",
-        storage_path=settings.ARIS_MEMORY_DIR
+        namespace="aris_v2_global",
+        storage_path=settings.ARIS_MEMORY_DIR,
+        legacy_namespaces=["sabr_v2_global"],
         )
     state["memory"] = memory
     app.state.memory = memory

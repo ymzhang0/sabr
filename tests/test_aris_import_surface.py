@@ -12,10 +12,10 @@ from src.aris_apps.aiida.api.router import router as aiida_router
 from src.aris_apps.aiida.chat import get_chat_snapshot
 from src.aris_apps.aiida.client import get_aiida_worker_client
 from src.aris_core.config import Settings, settings
-from src.aris_core.deps import BaseSABRDeps
-from src.aris_core.memory import JSONMemory
+from src.aris_core.deps import BaseARISDeps, BaseSABRDeps
+from src.aris_core.memory import ARISMemoryState, JSONMemory, SABRMemoryState
 from src.aris_core.protocols import Executor, Perceptor
-from src.aris_core.schema import Action, Observation, SABRResponse
+from src.aris_core.schema import ARISResponse, Action, Observation, SABRResponse
 
 
 def test_aris_core_surface_is_available() -> None:
@@ -29,12 +29,18 @@ def test_aris_core_surface_is_available() -> None:
     assert Path(settings.ARIS_PRESETS_FILE).as_posix().endswith("config/apps/aiida/presets.yaml")
     assert Path(settings.ARIS_AIIDA_SETTINGS_FILE).as_posix().endswith("config/apps/aiida/settings.yaml")
     assert Path(settings.ARIS_SCRIPT_ARCHIVE_DIR).as_posix().endswith("runtime/scripts")
-    assert BaseSABRDeps.__name__ == "BaseSABRDeps"
+    assert BaseARISDeps.__name__ == "BaseARISDeps"
+    assert BaseARISDeps is BaseSABRDeps
     assert JSONMemory.__name__ == "JSONMemory"
+    assert ARISMemoryState.__name__ == "ARISMemoryState"
+    assert ARISMemoryState is SABRMemoryState
     assert Executor.__name__ == "Executor"
     assert Perceptor.__name__ == "Perceptor"
     assert Observation(raw="ok").source == "default"
     assert Action(name="noop").payload == {}
+    assert ARISResponse.__name__ == "ARISResponse"
+    assert ARISResponse is SABRResponse
+    assert ARISResponse(answer="ok", thought_process=[]).is_successful is True
     assert SABRResponse(answer="ok", thought_process=[]).is_successful is True
 
 
@@ -61,6 +67,20 @@ def test_json_memory_defaults_to_runtime_settings(tmp_path) -> None:
         assert Path(memory.file_path).parent == tmp_path
     finally:
         settings.ARIS_MEMORY_DIR = original_dir
+
+
+def test_json_memory_loads_legacy_namespace_state(tmp_path) -> None:
+    legacy_memory = JSONMemory(namespace="sabr_v2_global", storage_path=str(tmp_path))
+    legacy_memory.set_kv("migrated", True)
+
+    migrated_memory = JSONMemory(
+        namespace="aris_v2_global",
+        storage_path=str(tmp_path),
+        legacy_namespaces=["sabr_v2_global"],
+    )
+
+    assert migrated_memory.file_path.endswith("history_aris_v2_global.json")
+    assert migrated_memory.get_kv("migrated") is True
 
 
 def test_legacy_runtime_env_values_are_normalized_to_runtime_root(monkeypatch) -> None:
