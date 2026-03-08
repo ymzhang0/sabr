@@ -19,8 +19,6 @@ _MODULE = sys.modules[__name__]
 for _alias in (
     "aris_core.logging.core",
     "src.aris_core.logging.core",
-    "sab_core.logging_utils",
-    "src.sab_core.logging_utils",
 ):
     sys.modules.setdefault(_alias, _MODULE)
 
@@ -60,8 +58,8 @@ class _RingLogBuffer:
             return self._version, lines
 
 
-def _get_compat_env_value(primary_name: str, *legacy_names: str) -> str | None:
-    for env_name in (primary_name, *legacy_names):
+def _get_env_value(*env_names: str) -> str | None:
+    for env_name in env_names:
         value = os.getenv(env_name)
         if value is None:
             continue
@@ -71,8 +69,8 @@ def _get_compat_env_value(primary_name: str, *legacy_names: str) -> str | None:
     return None
 
 
-def _get_compat_env_int(primary_name: str, *legacy_names: str, default: int) -> int:
-    raw_value = _get_compat_env_value(primary_name, *legacy_names)
+def _get_env_int(*env_names: str, default: int) -> int:
+    raw_value = _get_env_value(*env_names)
     if raw_value is None:
         return default
     try:
@@ -82,7 +80,7 @@ def _get_compat_env_int(primary_name: str, *legacy_names: str, default: int) -> 
 
 
 _LOG_BUFFER = _RingLogBuffer(
-    maxlen=max(100, _get_compat_env_int("ARIS_LOG_BUFFER_SIZE", "SABR_LOG_BUFFER_SIZE", default=600))
+    maxlen=max(100, _get_env_int("ARIS_LOG_BUFFER_SIZE", default=600))
 )
 
 
@@ -337,10 +335,6 @@ class ARISRichHandler(RichHandler):
         except Exception:
             super().emit(record)
 
-
-SABRRichHandler = ARISRichHandler
-
-
 class InterceptHandler(logging.Handler):
     """Route stdlib logging records into Loguru with original call-site metadata."""
 
@@ -364,28 +358,28 @@ def setup_logging(default_level: str = "INFO") -> str:
     Configure unified logging for Loguru + stdlib logging + Uvicorn loggers.
 
     Environment variables:
-    - ARIS_LOG_LEVEL / SABR_LOG_LEVEL: global level for app logs.
-    - ARIS_ACCESS_LOG_LEVEL / SABR_ACCESS_LOG_LEVEL: level for uvicorn access logs.
-    - ARIS_HTTPX_LOG_LEVEL / SABR_HTTPX_LOG_LEVEL: level for httpx/httpcore logs.
+    - ARIS_LOG_LEVEL: global level for app logs.
+    - ARIS_ACCESS_LOG_LEVEL: level for uvicorn access logs.
+    - ARIS_HTTPX_LOG_LEVEL: level for httpx/httpcore logs.
     """
     global_level = _normalize_level(
-        _get_compat_env_value("ARIS_LOG_LEVEL", "SABR_LOG_LEVEL", "ARIS_DEBUG_LEVEL", "SABR_DEBUG_LEVEL"),
+        _get_env_value("ARIS_LOG_LEVEL", "ARIS_DEBUG_LEVEL"),
         fallback=_normalize_level(default_level),
     )
     access_level = _normalize_level(
-        _get_compat_env_value("ARIS_ACCESS_LOG_LEVEL", "SABR_ACCESS_LOG_LEVEL"),
+        _get_env_value("ARIS_ACCESS_LOG_LEVEL"),
         fallback="WARNING",
     )
     httpx_level = _normalize_level(
-        _get_compat_env_value("ARIS_HTTPX_LOG_LEVEL", "SABR_HTTPX_LOG_LEVEL"),
+        _get_env_value("ARIS_HTTPX_LOG_LEVEL"),
         fallback="WARNING",
     )
     alembic_level = _normalize_level(
-        _get_compat_env_value("ARIS_ALEMBIC_LOG_LEVEL", "SABR_ALEMBIC_LOG_LEVEL"),
+        _get_env_value("ARIS_ALEMBIC_LOG_LEVEL"),
         fallback="WARNING",
     )
     watchfiles_level = _normalize_level(
-        _get_compat_env_value("ARIS_WATCHFILES_LOG_LEVEL", "SABR_WATCHFILES_LOG_LEVEL"),
+        _get_env_value("ARIS_WATCHFILES_LOG_LEVEL"),
         fallback="WARNING",
     )
 

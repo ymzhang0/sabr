@@ -1,7 +1,7 @@
 """Tests for schema models."""
 
-from sab_core.schema.observation import Observation
-from sab_core.schema.action import Action
+from src.aris_core.schema.observation import Observation
+from src.aris_core.schema.action import Action
 
 
 def test_observation_minimal() -> None:

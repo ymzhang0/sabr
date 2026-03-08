@@ -8,8 +8,6 @@ _LEGACY_RUNTIME_PATHS = (
     "default",
     "data/memories",
     "data/projects",
-    "src/sab_engines/aiida/data/memories",
-    "src/sab_engines/aiida/data/scripts",
     "engines/aiida/data/memories",
 )
 

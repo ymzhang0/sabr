@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 
-from src.sab_engines.aiida.bridge_service import AiiDABridgeService
+from src.aris_apps.aiida.bridge_service import AiiDABridgeService
 
 
 def test_refresh_avoids_repeated_missing_status_probe() -> None:

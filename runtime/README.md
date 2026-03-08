@@ -6,8 +6,8 @@ Use this directory for mutable local state such as:
 - uploads and caches
 - generated script archives
 
-Legacy paths under `data/`, `src/sab_engines/aiida/data/`, and `engines/aiida/data/`
-are still supported during the migration window, but new runtime state should move here.
+Legacy paths under `data/` and `engines/aiida/data/` are still supported during
+the migration window, but new runtime state should move here.
 
 Historical `.env` values that still point at the old default data directories are
 normalized back to `runtime/` during settings load so the canonical layout wins

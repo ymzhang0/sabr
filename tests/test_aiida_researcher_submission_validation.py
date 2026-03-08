@@ -7,11 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.sab_engines.aiida.deps import AiiDADeps
+from src.aris_apps.aiida.deps import AiiDADeps
 
 os.environ.setdefault("GOOGLE_API_KEY", "dummy")
 
-from src.sab_engines.aiida.agent import researcher  # noqa: E402
+from src.aris_apps.aiida.agent import researcher  # noqa: E402
 
 
 def _ctx(

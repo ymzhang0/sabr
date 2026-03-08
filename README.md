@@ -10,8 +10,6 @@ The Brain-side repo lives in `aris/`. The worker remains a separate repo in `../
 - Typed integration boundary: worker responses are normalized into stable JSON payloads before they reach the frontend.
 - Engine isolation: `aris_core` stays platform-level, while AiiDA-specific behavior lives under `aris_apps.aiida`.
 - Runtime isolation: mutable memories, projects, uploads, and caches live under `runtime/` instead of the source tree.
-- Compatibility migration: legacy `sab_core` and `sab_engines` imports still exist as shims while the rename completes.
-
 ## ARIS <-> AiiDA-Worker Protocol
 
 The ARIS brain talks to AiiDA-Worker over HTTP/JSON. ARIS should not import worker Python modules directly.
@@ -86,5 +84,5 @@ Backlog and product ideas should go in `/Users/yimingzhang/Developer/aris-worksp
 
 - PM2 process names use the ARIS convention: `aris-api`, `aris-web`, `aris-tunnel`.
 - The current PM2 ecosystem file lives at `/Users/yimingzhang/Developer/aris-workspace/aris/ecosystem.config.js`.
-- Legacy compatibility symlinks may still exist at `/Users/yimingzhang/Developer/aris`, `/Users/yimingzhang/Developer/aiida-worker`, and `/Users/yimingzhang/Developer/sabr` while local scripts are being updated.
-- The Cloudflare tunnel resource still uses `sabr-aiida-tunnel` until the external deployment artifact is migrated separately.
+- Legacy compatibility symlinks may still exist at `/Users/yimingzhang/Developer/aris` and `/Users/yimingzhang/Developer/aiida-worker` while local scripts are being updated.
+- The Cloudflare tunnel defaults to `aris-aiida-tunnel`. If your deployed Cloudflare resource still has an older name, set `ARIS_TUNNEL_NAME` before starting PM2.

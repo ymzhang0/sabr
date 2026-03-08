@@ -1,9 +1,9 @@
 """Tests for Protocol compliance (Perceptor, Executor)."""
 
-from sab_core.schema.observation import Observation
-from sab_core.schema.action import Action
-from sab_core.protocols.perception import Perceptor
-from sab_core.protocols.executor import Executor
+from src.aris_core.schema.observation import Observation
+from src.aris_core.schema.action import Action
+from src.aris_core.protocols.perception import Perceptor
+from src.aris_core.protocols.executor import Executor
 
 
 def test_perceptor_protocol() -> None:

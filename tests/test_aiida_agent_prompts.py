@@ -1,4 +1,4 @@
-from src.sab_engines.aiida.agent.prompts import (
+from src.aris_apps.aiida.agent.prompts import (
     SUBMISSION_DRAFT_REQUIRED_RULE,
     build_system_prompt,
 )

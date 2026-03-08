@@ -12,7 +12,7 @@ reporter = NiceGUIReporter(app_state)
 
 @ui.page("/")
 def index():
-    ui.label("SAB System Monitor").classes("text-h4 q-mb-md")
+    ui.label("ARIS System Monitor").classes("text-h4 q-mb-md")
 
     with ui.card().classes("w-64"):
         ui.label("System Status").classes("text-subtitle1")
@@ -34,7 +34,7 @@ def index():
 
 
 def run() -> None:
-    ui.run(title="SAB Dashboard", port=8080)
+    ui.run(title="ARIS Dashboard", port=8080)
 
 
 if __name__ in {"__main__", "__mp_main__"}:

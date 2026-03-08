@@ -8,7 +8,6 @@ src/aris_apps/aiida/
 ├── agent/            # Researcher agent, prompts, and worker-backed tools
 ├── chat/             # Chat session orchestration and workspace state
 ├── presenters/       # Frontend-facing payload shaping
-├── ui/               # Legacy NiceGUI compatibility surface
 ├── client.py         # Canonical worker client facade
 ├── bridge_client.py  # Low-level HTTP request helpers
 ├── bridge_service.py # Bridge snapshot/status service
@@ -23,5 +22,4 @@ src/aris_apps/aiida/
 └── static/           # Canonical app static assets
 ```
 
-Legacy compatibility imports remain under `src/sab_engines/aiida/` during the
-ARIS transition, but new implementation work should land here.
+New implementation work should land here.

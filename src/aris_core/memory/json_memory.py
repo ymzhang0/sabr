@@ -29,10 +29,6 @@ class ARISMemoryState(BaseModel):
     action_history: List[ActionEntry] = Field(default_factory=list)
     kv_store: Dict[str, Any] = Field(default_factory=dict)
 
-
-SABRMemoryState = ARISMemoryState
-
-
 def _default_storage_path() -> str:
     try:
         from src.aris_core.config import settings
@@ -56,28 +52,20 @@ class JSONMemory:
         self,
         namespace: str = "default",
         storage_path: str | None = None,
-        legacy_namespaces: Optional[List[str]] = None,
     ):
         resolved_storage_path = storage_path or _default_storage_path()
         self.file_path = os.path.join(resolved_storage_path, f"history_{namespace}.json")
-        self._legacy_file_paths = [
-            os.path.join(resolved_storage_path, f"history_{legacy_namespace}.json")
-            for legacy_namespace in (legacy_namespaces or [])
-            if str(legacy_namespace or "").strip() and str(legacy_namespace).strip() != namespace
-        ]
         os.makedirs(resolved_storage_path, exist_ok=True)
         self.state = self._load()
 
     def _load(self) -> ARISMemoryState:
-        for candidate_path in (self.file_path, *self._legacy_file_paths):
-            if not os.path.exists(candidate_path):
-                continue
+        if os.path.exists(self.file_path):
             try:
-                with open(candidate_path, "r", encoding="utf-8") as handle:
+                with open(self.file_path, "r", encoding="utf-8") as handle:
                     data = json.load(handle)
                     return ARISMemoryState.model_validate(data)
             except Exception:  # noqa: BLE001
-                continue
+                pass
         return ARISMemoryState()
 
     def save(self) -> None:
@@ -113,5 +101,4 @@ __all__ = [
     "ARISMemoryState",
     "JSONMemory",
     "MemoryEntry",
-    "SABRMemoryState",
 ]

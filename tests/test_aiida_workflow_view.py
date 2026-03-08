@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.sab_engines.aiida.presenters import workflow_view
+from src.aris_apps.aiida.presenters import workflow_view
 
 
 def test_enrich_submission_draft_keeps_cutoffs_under_parameters() -> None:
@@ -222,7 +222,7 @@ def test_enrich_submission_draft_prefers_builder_inputs_over_raw_node_envelopes(
 
 
 def test_query_available_codes_uses_bridge_resources_fallback(monkeypatch) -> None:
-    from src.sab_engines.aiida import client as aiida_client
+    from src.aris_apps.aiida import client as aiida_client
 
     def fake_request_json_sync(method: str, path: str, **kwargs):
         _ = kwargs

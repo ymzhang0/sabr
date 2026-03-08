@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.sab_engines.aiida import router as aiida_router
-from src.sab_engines.aiida.presenters import node_view as aiida_node_view
-from src.sab_engines.aiida.router import (
+from src.aris_apps.aiida import router as aiida_router
+from src.aris_apps.aiida.presenters import node_view as aiida_node_view
+from src.aris_apps.aiida.router import (
     _coerce_chat_metadata,
     _extract_folder_preview,
     _serialize_processes,

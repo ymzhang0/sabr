@@ -91,9 +91,7 @@ type RecoveryPlanState = {
 const SUBMISSION_DRAFT_TAG = "[SUBMISSION_DRAFT]";
 const SUBMISSION_DRAFT_JSON_GLOBAL_REGEX = /(?:\[SUBMISSION_DRAFT\])\s*(?:```(?:json)?\s*)?(\{[\s\S]*?\})(?:\s*```)?/gis;
 const CONTEXT_NODE_DRAG_MIME = "application/x-aris-context-node";
-const LEGACY_CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-aris-resource-attachment";
-const LEGACY_RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
 
 const FRIENDLY_TOOL_STEP_MAP: Record<string, string> = {
   inspect_process: "Inspecting process details...",
@@ -1384,9 +1382,7 @@ function normalizeDroppedContextNode(raw: unknown): FocusNode | null {
 }
 
 function parseDroppedContextNode(event: DragEvent<HTMLElement>): FocusNode | null {
-  const rawPayload =
-    event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME) ||
-    event.dataTransfer.getData(LEGACY_CONTEXT_NODE_DRAG_MIME);
+  const rawPayload = event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME);
   if (rawPayload) {
     try {
       const parsed = JSON.parse(rawPayload);
@@ -1449,9 +1445,7 @@ function normalizeDroppedResourceAttachment(raw: unknown): ResourceAttachment | 
 }
 
 function parseDroppedResourceAttachment(event: DragEvent<HTMLElement>): ResourceAttachment | null {
-  const rawPayload =
-    event.dataTransfer.getData(RESOURCE_ATTACHMENT_DRAG_MIME) ||
-    event.dataTransfer.getData(LEGACY_RESOURCE_ATTACHMENT_DRAG_MIME);
+  const rawPayload = event.dataTransfer.getData(RESOURCE_ATTACHMENT_DRAG_MIME);
   if (!rawPayload) {
     return null;
   }

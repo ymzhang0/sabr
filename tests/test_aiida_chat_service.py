@@ -3,7 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.sab_engines.aiida.chat import service as chat_service
+from src.aris_apps.aiida.chat import service as chat_service
 
 
 class _Memory:

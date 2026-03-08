@@ -106,8 +106,7 @@ async def lifespan(app: FastAPI):
     memory = JSONMemory(
         namespace="aris_v2_global",
         storage_path=settings.ARIS_MEMORY_DIR,
-        legacy_namespaces=["sabr_v2_global"],
-        )
+    )
     state["memory"] = memory
     app.state.memory = memory
     
@@ -177,12 +176,9 @@ def _get_cors_origins() -> list[str]:
         "http://127.0.0.1:5173",
         "https://aris.yiming-zhang.com",
     }
-    legacy = {
-        "https://sabr.yiming-zhang.com",
-    }
     raw = settings.ARIS_FRONTEND_ORIGINS or ""
     values = {item.strip() for item in raw.split(",") if item.strip()}
-    return sorted(values | required | legacy)
+    return sorted(values | required)
 
 
 app.add_middleware(
@@ -250,9 +246,7 @@ if __name__ == "__main__":
         "--log-level",
         default=_get_compat_env_value(
             "ARIS_LOG_LEVEL",
-            "SABR_LOG_LEVEL",
             "ARIS_DEBUG_LEVEL",
-            "SABR_DEBUG_LEVEL",
             default="INFO",
         ),
         choices=["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"],
@@ -261,8 +255,6 @@ if __name__ == "__main__":
 
     runtime_log_level = str(args.log_level).upper()
     os.environ["ARIS_LOG_LEVEL"] = runtime_log_level
-    # Keep the legacy env name synchronized while compatibility shims remain.
-    os.environ["SABR_LOG_LEVEL"] = runtime_log_level
     setup_logging(default_level=runtime_log_level)
     logger.info(
         log_event(

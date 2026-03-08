@@ -1,5 +1,5 @@
-i notice that you have put the bridge_service:AiiDABridgeService inside sab_core which is a bit unsettling.
-sab_core defined the framework of this kind of agent and aiida is one of the implementation.
+i notice that you had put the bridge_service:AiiDABridgeService inside the old core package, which was a bit unsettling.
+the core package should define the framework of this kind of agent and aiida should remain one implementation.
 would it be better if the code related to aiida is separated from the core and be be put inside engines/
 or another specifically created new folder if necessary? done
 

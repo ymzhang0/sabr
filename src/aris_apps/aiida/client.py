@@ -33,14 +33,6 @@ _bridge_call_listener: contextvars.ContextVar[BridgeCallListener | None] = conte
 WORKSPACE_PATH_HEADER = "X-ARIS-Active-Workspace-Path"
 SESSION_ID_HEADER = "X-ARIS-Session-Id"
 PROJECT_ID_HEADER = "X-ARIS-Project-Id"
-LEGACY_WORKSPACE_PATH_HEADER = "X-SABR-Active-Workspace-Path"
-LEGACY_SESSION_ID_HEADER = "X-SABR-Session-Id"
-LEGACY_PROJECT_ID_HEADER = "X-SABR-Project-Id"
-_BRIDGE_HEADER_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
-    (WORKSPACE_PATH_HEADER, LEGACY_WORKSPACE_PATH_HEADER),
-    (SESSION_ID_HEADER, LEGACY_SESSION_ID_HEADER),
-    (PROJECT_ID_HEADER, LEGACY_PROJECT_ID_HEADER),
-)
 _bridge_request_headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "aiida_bridge_request_headers",
     default=None,
@@ -148,27 +140,6 @@ def _normalize_header_entries(headers: Mapping[str, Any] | None = None) -> dict[
             normalized[cleaned_key] = cleaned_value
     return normalized
 
-
-def _apply_bridge_header_aliases(headers: Mapping[str, str] | None = None) -> dict[str, str] | None:
-    normalized = dict(headers or {})
-    if not normalized:
-        return None
-
-    for header_group in _BRIDGE_HEADER_ALIAS_GROUPS:
-        resolved_value = ""
-        for header_name in header_group:
-            candidate = str(normalized.get(header_name) or "").strip()
-            if candidate:
-                resolved_value = candidate
-                break
-        if not resolved_value:
-            continue
-        for header_name in header_group:
-            normalized[header_name] = resolved_value
-
-    return normalized or None
-
-
 def build_bridge_context_headers(
     *,
     session_id: Any = None,
@@ -182,7 +153,7 @@ def build_bridge_context_headers(
         headers[PROJECT_ID_HEADER] = project_id
     if workspace_path is not None:
         headers[WORKSPACE_PATH_HEADER] = workspace_path
-    return _apply_bridge_header_aliases(_normalize_header_entries(headers))
+    return _normalize_header_entries(headers) or None
 
 
 def _merge_request_headers(headers: Mapping[str, Any] | None = None) -> dict[str, str] | None:
@@ -190,7 +161,7 @@ def _merge_request_headers(headers: Mapping[str, Any] | None = None) -> dict[str
     scoped_headers = _bridge_request_headers.get()
     for payload in (scoped_headers, headers):
         merged.update(_normalize_header_entries(payload))
-    return _apply_bridge_header_aliases(merged)
+    return merged or None
 
 
 class AiiDAWorkerClient:

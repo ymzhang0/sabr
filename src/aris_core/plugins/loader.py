@@ -30,7 +30,7 @@ class AppManifest(Protocol):
 
 
 def _parse_enabled_app_names(raw_names: str | None = None) -> tuple[str, ...]:
-    raw = raw_names or os.getenv("ARIS_ENABLED_APPS") or os.getenv("SABR_ENABLED_APPS") or "aiida"
+    raw = raw_names or os.getenv("ARIS_ENABLED_APPS") or "aiida"
     names = tuple(dict.fromkeys(name.strip() for name in raw.split(",") if name.strip()))
     return names or ("aiida",)
 

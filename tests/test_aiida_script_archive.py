@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.sab_engines.aiida.agent import tools
+from src.aris_apps.aiida.agent import tools
 
 
 @pytest.mark.anyio

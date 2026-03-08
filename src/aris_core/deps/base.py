@@ -28,8 +28,4 @@ class BaseARISDeps:
                 callback(message)
             except Exception:  # noqa: BLE001
                 logger.warning(log_event("aiida.agent.step.callback_failed", step=message))
-
-BaseSABRDeps = BaseARISDeps
-
-
-__all__ = ["BaseARISDeps", "BaseSABRDeps"]
+__all__ = ["BaseARISDeps"]

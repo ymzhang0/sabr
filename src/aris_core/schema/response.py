@@ -30,8 +30,4 @@ class ARISResponse(BaseModel):
                 )
         return value
 
-
-SABRResponse = ARISResponse
-
-
-__all__ = ["ARISResponse", "SABRResponse"]
+__all__ = ["ARISResponse"]
