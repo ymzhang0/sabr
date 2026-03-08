@@ -37,8 +37,8 @@ def collect_reload_excludes(settings: object) -> list[str]:
     excludes: list[str] = []
     candidates = [
         getattr(settings, "ARIS_RUNTIME_ROOT", ""),
-        getattr(settings, "SABR_MEMORY_DIR", ""),
-        getattr(settings, "SABR_PROJECTS_ROOT", ""),
+        getattr(settings, "ARIS_MEMORY_DIR", ""),
+        getattr(settings, "ARIS_PROJECTS_ROOT", ""),
         getattr(settings, "ARIS_SCRIPT_ARCHIVE_DIR", ""),
         *_LEGACY_RUNTIME_PATHS,
     ]

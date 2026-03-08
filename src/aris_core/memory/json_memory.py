@@ -34,7 +34,7 @@ def _default_storage_path() -> str:
     try:
         from src.aris_core.config import settings
 
-        configured = str(getattr(settings, "SABR_MEMORY_DIR", "") or "").strip()
+        configured = str(getattr(settings, "ARIS_MEMORY_DIR", "") or "").strip()
         if configured:
             return configured
     except Exception:  # noqa: BLE001
@@ -45,7 +45,7 @@ def _default_storage_path() -> str:
 
 class JSONMemory:
     """
-    Persistent JSON memory store shared by the current SABR codebase and the
+    Persistent JSON memory store shared by the current ARIS codebase and the
     future ARIS layout.
     """
 

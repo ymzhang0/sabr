@@ -46,7 +46,8 @@ import type {
 } from "@/types/aiida";
 import { DataImportModal } from "@/components/dashboard/data-import-modal";
 
-const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
+const CONTEXT_NODE_DRAG_MIME = "application/x-aris-context-node";
+const LEGACY_CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
 
 function clampRecentLimit(value: number): number {
   return Math.min(100, Math.max(1, value));
@@ -662,12 +663,15 @@ export function Sidebar({
       node_type: process.node_type || "Unknown",
     };
     event.dataTransfer.setData(CONTEXT_NODE_DRAG_MIME, JSON.stringify(payload));
+    event.dataTransfer.setData(LEGACY_CONTEXT_NODE_DRAG_MIME, JSON.stringify(payload));
     event.dataTransfer.setData("text/plain", `#${process.pk}`);
   };
 
   const handleGroupDrop = (event: DragEvent<HTMLDivElement>, groupPk: number) => {
     event.preventDefault();
-    const payload = event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME);
+    const payload =
+      event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME) ||
+      event.dataTransfer.getData(LEGACY_CONTEXT_NODE_DRAG_MIME);
     if (!payload) return;
     try {
       const parsed = JSON.parse(payload);

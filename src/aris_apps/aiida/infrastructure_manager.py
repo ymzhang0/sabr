@@ -12,7 +12,7 @@ from src.aris_core.config import settings
 class InfrastructureManager:
     @property
     def config_path(self) -> Path:
-        return Path(settings.SABR_PRESETS_FILE)
+        return Path(settings.ARIS_PRESETS_FILE)
 
     def __init__(self):
         # We load presets on demand or at least don't hardcode the path in __init__ 

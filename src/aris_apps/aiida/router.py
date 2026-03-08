@@ -124,7 +124,7 @@ PENDING_SUBMISSION_KEY = "aiida_pending_submission"
 def _get_quick_prompts() -> list[dict[str, str]]:
     """Load quick prompts from external settings file."""
     try:
-        settings_path = settings.SABR_AIIDA_SETTINGS_FILE
+        settings_path = settings.ARIS_AIIDA_SETTINGS_FILE
         if not os.path.exists(settings_path):
             return []
         with open(settings_path, "r", encoding="utf-8") as f:
@@ -1115,7 +1115,7 @@ async def frontend_upload_archive(file: UploadFile = File(...)):
     if extension not in ARCHIVE_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported archive format")
 
-    upload_root = Path(tempfile.gettempdir()) / "sabr-aiida-uploads"
+    upload_root = Path(tempfile.gettempdir()) / "aris-aiida-uploads"
     upload_root.mkdir(parents=True, exist_ok=True)
     target_name = f"{int(time.time() * 1000)}-{_sanitize_upload_name(filename)}"
     target_path = upload_root / target_name

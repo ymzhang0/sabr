@@ -49,7 +49,7 @@ class RemoteAiiDAController(BaseController):
                     with ui.row().classes("items-start gap-3 no-wrap"):
                         ui.avatar("auto_awesome", color="primary", text_color="white").props("size=sm shadow-lg")
                         with ui.column().classes("max-w-[85%] items-start"):
-                            ui.label("SABR-AiiDA").classes("text-[10px] font-black text-primary opacity-60 pl-1 tracking-tighter")
+                            ui.label("ARIS-AiiDA").classes("text-[10px] font-black text-primary opacity-60 pl-1 tracking-tighter")
                             with (
                                 ui.card()
                                 .classes("bg-white/5 border border-white/10 p-4 rounded-2xl shadow-none")

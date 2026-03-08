@@ -30,7 +30,7 @@ def create_aiida_layout(theme_name="gemini_dark", available_models=None):
             with ui.row().classes("items-center px-4 py-8 gap-0"):
                 with ui.element("div").classes(f"{ICON_W} flex items-center"):
                     ui.icon("auto_awesome", color="primary", size="28px")
-                ui.label("SABR-AiiDA").classes("text-2xl font-black tracking-tighter")
+                ui.label("ARIS-AiiDA").classes("text-2xl font-black tracking-tighter")
 
             with ui.column().classes("w-full gap-2 mb-4"):
                 with ui.row().classes("w-full items-center px-4 justify-between"):
@@ -140,7 +140,7 @@ def create_aiida_layout(theme_name="gemini_dark", available_models=None):
                     suggestion_cards.append((card, full_intent))
 
             with ui.row().classes("w-full input-pill px-6 py-1 items-center no-wrap shadow-2xl") as input_container:
-                input_field = ui.textarea(placeholder="Ask SABR...").classes("flex-grow bg-transparent text-xl").props("borderless autogrow")
+                input_field = ui.textarea(placeholder="Ask ARIS...").classes("flex-grow bg-transparent text-xl").props("borderless autogrow")
                 send_btn = ui.button(icon="send", color="primary").props("round flat size=lg")
 
             with ui.row().classes("w-full items-center justify-between"):

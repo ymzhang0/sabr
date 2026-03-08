@@ -61,14 +61,17 @@ import type {
 } from "@/types/aiida";
 import { Database, FolderOpen, History } from "lucide-react";
 
-const THEME_STORAGE_KEY = "sabr.dashboard.theme";
+const THEME_STORAGE_KEY = "aris.dashboard.theme";
+const LEGACY_THEME_STORAGE_KEY = "sabr.dashboard.theme";
 const CURRENT_SESSION_STORAGE_KEY = "current_session_id";
 const CHAT_POLL_INTERVAL_MS = 350;
 const GROUP_SELECTION_ALL = "__all_groups__";
 const GROUP_SELECTION_CURRENT_CONTEXT = "__current_context__";
 
 function initialTheme(): "light" | "dark" {
-  const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+  const saved =
+    window.localStorage.getItem(THEME_STORAGE_KEY) ??
+    window.localStorage.getItem(LEGACY_THEME_STORAGE_KEY);
   return saved === "light" ? "light" : "dark";
 }
 
@@ -592,6 +595,7 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    window.localStorage.removeItem(LEGACY_THEME_STORAGE_KEY);
   }, [theme]);
 
   const bootstrapQuery = useQuery({

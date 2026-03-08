@@ -513,7 +513,7 @@ def _resolve_filesystem_path(path_value: Any) -> Path | None:
 
 
 def _managed_projects_root() -> Path:
-    root = _resolve_filesystem_path(settings.SABR_PROJECTS_ROOT)
+    root = _resolve_filesystem_path(settings.ARIS_PROJECTS_ROOT)
     if root is None:
         root = Path.cwd() / "data" / "projects"
     root.mkdir(parents=True, exist_ok=True)
@@ -3631,8 +3631,8 @@ async def _execute_chat_turn(
                             raise RuntimeError(
                                 "Gemini model was rejected by the API. "
                                 f"Model='{selected_model}', api_version='{getattr(settings, 'GEMINI_API_VERSION', 'unknown')}'. "
-                                "Update SABR_DEFAULT_MODEL (e.g., gemini-3-flash-preview) "
-                                "or SABR_GEMINI_API_VERSION and retry."
+                                "Update ARIS_DEFAULT_MODEL (e.g., gemini-3-flash-preview) "
+                                "or ARIS_GEMINI_API_VERSION and retry."
                             ) from run_error
 
                         if _is_retryable_model_unavailable_error(run_error) and attempt < retry_budget:

@@ -90,8 +90,10 @@ type RecoveryPlanState = {
 
 const SUBMISSION_DRAFT_TAG = "[SUBMISSION_DRAFT]";
 const SUBMISSION_DRAFT_JSON_GLOBAL_REGEX = /(?:\[SUBMISSION_DRAFT\])\s*(?:```(?:json)?\s*)?(\{[\s\S]*?\})(?:\s*```)?/gis;
-const CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
-const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
+const CONTEXT_NODE_DRAG_MIME = "application/x-aris-context-node";
+const LEGACY_CONTEXT_NODE_DRAG_MIME = "application/x-sabr-context-node";
+const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-aris-resource-attachment";
+const LEGACY_RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
 
 const FRIENDLY_TOOL_STEP_MAP: Record<string, string> = {
   inspect_process: "Inspecting process details...",
@@ -1382,7 +1384,9 @@ function normalizeDroppedContextNode(raw: unknown): FocusNode | null {
 }
 
 function parseDroppedContextNode(event: DragEvent<HTMLElement>): FocusNode | null {
-  const rawPayload = event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME);
+  const rawPayload =
+    event.dataTransfer.getData(CONTEXT_NODE_DRAG_MIME) ||
+    event.dataTransfer.getData(LEGACY_CONTEXT_NODE_DRAG_MIME);
   if (rawPayload) {
     try {
       const parsed = JSON.parse(rawPayload);
@@ -1445,7 +1449,9 @@ function normalizeDroppedResourceAttachment(raw: unknown): ResourceAttachment | 
 }
 
 function parseDroppedResourceAttachment(event: DragEvent<HTMLElement>): ResourceAttachment | null {
-  const rawPayload = event.dataTransfer.getData(RESOURCE_ATTACHMENT_DRAG_MIME);
+  const rawPayload =
+    event.dataTransfer.getData(RESOURCE_ATTACHMENT_DRAG_MIME) ||
+    event.dataTransfer.getData(LEGACY_RESOURCE_ATTACHMENT_DRAG_MIME);
   if (!rawPayload) {
     return null;
   }
@@ -2333,7 +2339,7 @@ export function ChatPanel({
             {turns.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center text-center">
                 <p className="text-3xl font-medium tracking-tight text-zinc-900 dark:text-zinc-100">
-                  Ask SABR about your AiiDA workflow
+                  Ask ARIS about your AiiDA workflow
                 </p>
                 <p className="mt-2 max-w-xl text-sm text-zinc-500 dark:text-zinc-400">
                   Profile-aware assistant with live process telemetry and runtime logs.
@@ -2669,7 +2675,7 @@ export function ChatPanel({
                 ref={textareaRef}
                 rows={2}
                 value={draft}
-                placeholder="Message SABR... (type / for commands)"
+                placeholder="Message ARIS... (type / for commands)"
                 className={cn(
                   "max-h-[220px] min-h-[56px] w-full resize-none rounded-lg border border-transparent bg-transparent text-sm text-zinc-900 outline-none placeholder:text-zinc-400 transition-colors dark:text-zinc-100",
                   dragOverZone === "textarea" &&

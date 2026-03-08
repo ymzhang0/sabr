@@ -78,7 +78,7 @@ def _normalize_runtime_path(raw_path: str, *, canonical_path: Path, legacy_paths
 
 class Settings(BaseSettings):
     """
-    Runtime configuration for the current SABR codebase while it transitions to ARIS.
+    Runtime configuration for the current ARIS codebase.
 
     New `ARIS_*` variables are accepted first. Existing `SABR_*` variables remain
     supported so the current deployment and tests do not break during refactoring.
@@ -231,6 +231,62 @@ class Settings(BaseSettings):
                 ),
             ),
         )
+
+    @property
+    def ARIS_MEMORY_DIR(self) -> str:
+        return self.SABR_MEMORY_DIR
+
+    @ARIS_MEMORY_DIR.setter
+    def ARIS_MEMORY_DIR(self, value: str) -> None:
+        object.__setattr__(self, "SABR_MEMORY_DIR", str(value))
+
+    @property
+    def ARIS_PRESETS_FILE(self) -> str:
+        return self.SABR_PRESETS_FILE
+
+    @ARIS_PRESETS_FILE.setter
+    def ARIS_PRESETS_FILE(self, value: str) -> None:
+        object.__setattr__(self, "SABR_PRESETS_FILE", str(value))
+
+    @property
+    def ARIS_AIIDA_SETTINGS_FILE(self) -> str:
+        return self.SABR_AIIDA_SETTINGS_FILE
+
+    @ARIS_AIIDA_SETTINGS_FILE.setter
+    def ARIS_AIIDA_SETTINGS_FILE(self, value: str) -> None:
+        object.__setattr__(self, "SABR_AIIDA_SETTINGS_FILE", str(value))
+
+    @property
+    def ARIS_PROJECTS_ROOT(self) -> str:
+        return self.SABR_PROJECTS_ROOT
+
+    @ARIS_PROJECTS_ROOT.setter
+    def ARIS_PROJECTS_ROOT(self, value: str) -> None:
+        object.__setattr__(self, "SABR_PROJECTS_ROOT", str(value))
+
+    @property
+    def ARIS_DEBUG_LEVEL(self) -> str:
+        return self.SABR_DEBUG_LEVEL
+
+    @ARIS_DEBUG_LEVEL.setter
+    def ARIS_DEBUG_LEVEL(self, value: str) -> None:
+        object.__setattr__(self, "SABR_DEBUG_LEVEL", str(value))
+
+    @property
+    def ARIS_USE_OUTBOUND_PROXY(self) -> bool:
+        return self.SABR_USE_OUTBOUND_PROXY
+
+    @ARIS_USE_OUTBOUND_PROXY.setter
+    def ARIS_USE_OUTBOUND_PROXY(self, value: bool) -> None:
+        object.__setattr__(self, "SABR_USE_OUTBOUND_PROXY", bool(value))
+
+    @property
+    def ARIS_FRONTEND_ORIGINS(self) -> str:
+        return self.SABR_FRONTEND_ORIGINS
+
+    @ARIS_FRONTEND_ORIGINS.setter
+    def ARIS_FRONTEND_ORIGINS(self, value: str) -> None:
+        object.__setattr__(self, "SABR_FRONTEND_ORIGINS", str(value))
 
     model_config = SettingsConfigDict(
         env_file=".env",

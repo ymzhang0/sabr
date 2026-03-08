@@ -1,6 +1,6 @@
 # Base quick prompts should stay plugin-agnostic.
 # Put plugin-specific prompt bundles in a separate file and point
-# SABR_AIIDA_SETTINGS_FILE to it when you explicitly want that specialization.
+# ARIS_AIIDA_SETTINGS_FILE to it when you explicitly want that specialization.
 
 quick_prompts:
   - label: "prepare workflow"

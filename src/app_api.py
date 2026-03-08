@@ -44,8 +44,8 @@ def _get_compat_env_value(*env_names: str, default: str | None = None) -> str | 
 
 
 def _configure_proxy_environment() -> None:
-    """Normalize proxy environment variables from SABR settings."""
-    use_proxy = bool(settings.SABR_USE_OUTBOUND_PROXY)
+    """Normalize proxy environment variables from ARIS settings."""
+    use_proxy = bool(settings.ARIS_USE_OUTBOUND_PROXY)
     http_proxy = str(settings.HTTP_PROXY or "").strip() if use_proxy else ""
     https_proxy = str(settings.HTTPS_PROXY or "").strip() if use_proxy else ""
 
@@ -98,14 +98,14 @@ def _get_engine_manifest(engine_name: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Handles startup and shutdown logic for the SABR Hub.
+    Handles startup and shutdown logic for the ARIS Hub.
     """
     logger.info(log_event("hub.startup.begin"))
     
     # Initialize Global Memory
     memory = JSONMemory(
         namespace="sabr_v2_global",
-        storage_path=settings.SABR_MEMORY_DIR  # Now it's dynamic!
+        storage_path=settings.ARIS_MEMORY_DIR
         )
     state["memory"] = memory
     app.state.memory = memory
@@ -174,9 +174,10 @@ def _get_cors_origins() -> list[str]:
     required = {
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://aris.yiming-zhang.com",
         "https://sabr.yiming-zhang.com",
     }
-    raw = settings.SABR_FRONTEND_ORIGINS or ""
+    raw = settings.ARIS_FRONTEND_ORIGINS or ""
     values = {item.strip() for item in raw.split(",") if item.strip()}
     return sorted(values | required)
 

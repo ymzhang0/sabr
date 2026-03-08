@@ -277,7 +277,7 @@ def _turn_id_from_fields(fields: dict[str, str]) -> str | None:
     return None
 
 
-class SABRRichHandler(RichHandler):
+class ARISRichHandler(RichHandler):
     def __init__(self) -> None:
         super().__init__(
             show_time=False,
@@ -338,6 +338,9 @@ class SABRRichHandler(RichHandler):
             super().emit(record)
 
 
+SABRRichHandler = ARISRichHandler
+
+
 class InterceptHandler(logging.Handler):
     """Route stdlib logging records into Loguru with original call-site metadata."""
 
@@ -389,7 +392,7 @@ def setup_logging(default_level: str = "INFO") -> str:
     logger.remove()
     logger.configure(patcher=_patch_record)
 
-    rich_handler = SABRRichHandler()
+    rich_handler = ARISRichHandler()
     logger.add(
         rich_handler,
         level=global_level,

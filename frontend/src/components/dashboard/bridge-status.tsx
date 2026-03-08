@@ -18,7 +18,8 @@ const DETAILS_POLL_INTERVAL_MS = 30_000;
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001";
 
 type HoveredDetail = "computers" | "codes" | "plugins" | null;
-const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
+const RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-aris-resource-attachment";
+const LEGACY_RESOURCE_ATTACHMENT_DRAG_MIME = "application/x-sabr-resource-attachment";
 
 type HoveredResourceItem = {
   id: string;
@@ -223,6 +224,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
     }
     event.dataTransfer.effectAllowed = "copy";
     event.dataTransfer.setData(RESOURCE_ATTACHMENT_DRAG_MIME, JSON.stringify(attachment));
+    event.dataTransfer.setData(LEGACY_RESOURCE_ATTACHMENT_DRAG_MIME, JSON.stringify(attachment));
     event.dataTransfer.setData("text/plain", cleanedValue);
   };
 
