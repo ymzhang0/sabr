@@ -23,9 +23,7 @@ def test_aris_core_surface_is_available() -> None:
     assert settings.FRONTEND_INDEX_FILE
     assert Path(settings.FRONTEND_INDEX_FILE).as_posix().endswith("apps/web/dist/index.html")
     assert Path(settings.ARIS_MEMORY_DIR).as_posix().endswith("runtime/memories")
-    assert Path(settings.SABR_MEMORY_DIR).as_posix().endswith("runtime/memories")
     assert Path(settings.ARIS_PROJECTS_ROOT).as_posix().endswith("runtime/projects")
-    assert Path(settings.SABR_PROJECTS_ROOT).as_posix().endswith("runtime/projects")
     assert Path(settings.ARIS_PRESETS_FILE).as_posix().endswith("config/apps/aiida/presets.yaml")
     assert Path(settings.ARIS_AIIDA_SETTINGS_FILE).as_posix().endswith("config/apps/aiida/settings.yaml")
     assert Path(settings.ARIS_SCRIPT_ARCHIVE_DIR).as_posix().endswith("runtime/scripts")
@@ -90,20 +88,20 @@ def test_legacy_runtime_env_values_are_normalized_to_runtime_root(monkeypatch) -
 
     config = Settings(_env_file=None)
 
-    assert Path(config.SABR_MEMORY_DIR).as_posix().endswith("runtime/memories")
-    assert Path(config.SABR_PROJECTS_ROOT).as_posix().endswith("runtime/projects")
+    assert Path(config.ARIS_MEMORY_DIR).as_posix().endswith("runtime/memories")
+    assert Path(config.ARIS_PROJECTS_ROOT).as_posix().endswith("runtime/projects")
     assert Path(config.ARIS_SCRIPT_ARCHIVE_DIR).as_posix().endswith("runtime/scripts")
 
 
 def test_aris_setting_aliases_track_legacy_storage_fields(tmp_path) -> None:
     config = Settings(_env_file=None)
-    original_memory_dir = config.SABR_MEMORY_DIR
-    original_projects_root = config.SABR_PROJECTS_ROOT
+    original_memory_dir = config.ARIS_MEMORY_DIR
+    original_projects_root = config.ARIS_PROJECTS_ROOT
     try:
         config.ARIS_MEMORY_DIR = str(tmp_path / "memories")
         config.ARIS_PROJECTS_ROOT = str(tmp_path / "projects")
         assert config.SABR_MEMORY_DIR == config.ARIS_MEMORY_DIR
         assert config.SABR_PROJECTS_ROOT == config.ARIS_PROJECTS_ROOT
     finally:
-        config.SABR_MEMORY_DIR = original_memory_dir
-        config.SABR_PROJECTS_ROOT = original_projects_root
+        config.ARIS_MEMORY_DIR = original_memory_dir
+        config.ARIS_PROJECTS_ROOT = original_projects_root

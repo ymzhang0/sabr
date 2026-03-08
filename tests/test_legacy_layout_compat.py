@@ -14,8 +14,10 @@ from src.sab_engines.system_health.web_reporter import NiceGUIReporter, UIState
 
 
 def test_new_config_layout_is_default() -> None:
-    assert settings.SABR_PRESETS_FILE.endswith("config/apps/aiida/presets.yaml")
-    assert settings.SABR_AIIDA_SETTINGS_FILE.endswith("config/apps/aiida/settings.yaml")
+    assert settings.ARIS_PRESETS_FILE.endswith("config/apps/aiida/presets.yaml")
+    assert settings.ARIS_AIIDA_SETTINGS_FILE.endswith("config/apps/aiida/settings.yaml")
+    assert settings.SABR_PRESETS_FILE == settings.ARIS_PRESETS_FILE
+    assert settings.SABR_AIIDA_SETTINGS_FILE == settings.ARIS_AIIDA_SETTINGS_FILE
     assert Path(settings.ARIS_AIIDA_SPECIALIZATIONS_ROOT).as_posix().endswith(
         "config/apps/aiida/specializations"
     )

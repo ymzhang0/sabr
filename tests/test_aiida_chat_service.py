@@ -836,12 +836,12 @@ def test_normalize_chat_session_store_skips_archived_active_session() -> None:
 
 def test_create_chat_session_creates_default_project_workspace(tmp_path) -> None:
     state = _make_chat_state()
-    original_root = chat_service.settings.SABR_PROJECTS_ROOT
-    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
     try:
         session = chat_service.create_chat_session(state, title="Workspace session", activate=True)
     finally:
-        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
 
     assert session["project_id"]
     assert session["project_label"] == "Default Project"
@@ -853,8 +853,8 @@ def test_create_chat_session_creates_default_project_workspace(tmp_path) -> None
 
 def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path) -> None:
     state = _make_chat_state()
-    original_root = chat_service.settings.SABR_PROJECTS_ROOT
-    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
     try:
         project = chat_service.create_chat_project(
             state,
@@ -869,7 +869,7 @@ def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path)
             project_id=project["id"],
         )
     finally:
-        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
 
     assert session["project_id"] == project["id"]
     assert session["project_label"] == "Born Charge Study"
@@ -878,8 +878,8 @@ def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path)
 
 def test_delete_chat_items_removes_session_workspace_and_reassigns_active_session(tmp_path) -> None:
     state = _make_chat_state()
-    original_root = chat_service.settings.SABR_PROJECTS_ROOT
-    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
     try:
         older = chat_service.create_chat_session(state, title="Older", activate=True)
         newer = chat_service.create_chat_session(state, title="Newer", activate=True)
@@ -888,7 +888,7 @@ def test_delete_chat_items_removes_session_workspace_and_reassigns_active_sessio
 
         deleted = chat_service.delete_chat_items(state, session_ids=[newer["id"]])
     finally:
-        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
 
     assert deleted["deleted_session_ids"] == [newer["id"]]
     assert deleted["deleted_project_ids"] == []
@@ -899,8 +899,8 @@ def test_delete_chat_items_removes_session_workspace_and_reassigns_active_sessio
 
 def test_delete_chat_items_removes_project_and_child_sessions(tmp_path) -> None:
     state = _make_chat_state()
-    original_root = chat_service.settings.SABR_PROJECTS_ROOT
-    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
     try:
         doomed_project = chat_service.create_chat_project(state, name="To Delete", activate=True)
         doomed_session = chat_service.create_chat_session(state, title="Delete me", activate=True, project_id=doomed_project["id"])
@@ -910,7 +910,7 @@ def test_delete_chat_items_removes_project_and_child_sessions(tmp_path) -> None:
 
         deleted = chat_service.delete_chat_items(state, project_ids=[doomed_project["id"]])
     finally:
-        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
 
     remaining_projects = {project["id"] for project in chat_service.list_chat_projects(state)}
     remaining_sessions = {session["id"] for session in chat_service.list_chat_sessions(state)}
@@ -927,8 +927,8 @@ def test_delete_chat_items_removes_project_and_child_sessions(tmp_path) -> None:
 
 def test_list_chat_session_workspace_files_returns_saved_entries(tmp_path) -> None:
     state = _make_chat_state()
-    original_root = chat_service.settings.SABR_PROJECTS_ROOT
-    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
     try:
         session = chat_service.create_chat_session(state, title="Workspace browser", activate=True)
         workspace_path = Path(session["workspace_path"])
@@ -936,7 +936,7 @@ def test_list_chat_session_workspace_files_returns_saved_entries(tmp_path) -> No
         (workspace_path / "plots" / "band-structure.png").write_bytes(b"png")
         payload = chat_service.list_chat_session_workspace_files(state, session["id"], relative_path="plots")
     finally:
-        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
 
     assert payload is not None
     assert payload["relative_path"] == "plots"
@@ -945,12 +945,12 @@ def test_list_chat_session_workspace_files_returns_saved_entries(tmp_path) -> No
 
 def test_create_chat_session_uses_english_slug_for_group_and_workspace(tmp_path) -> None:
     state = _make_chat_state()
-    original_root = chat_service.settings.SABR_PROJECTS_ROOT
-    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
     try:
         session = chat_service.create_chat_session(state, title="Si Bands Study", activate=True)
     finally:
-        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
 
     assert session["title"] == "Si Bands Study"
     assert session["session_slug"] == "si-bands-study"
@@ -960,12 +960,12 @@ def test_create_chat_session_uses_english_slug_for_group_and_workspace(tmp_path)
 
 def test_create_chat_session_with_non_english_title_falls_back_to_default_english_name(tmp_path) -> None:
     state = _make_chat_state()
-    original_root = chat_service.settings.SABR_PROJECTS_ROOT
-    chat_service.settings.SABR_PROJECTS_ROOT = str(tmp_path)
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
     try:
         session = chat_service.create_chat_session(state, title="硅热膨胀", activate=True)
     finally:
-        chat_service.settings.SABR_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
 
     assert session["title"] == "New Conversation"
     assert session["session_slug"] == "new-conversation"

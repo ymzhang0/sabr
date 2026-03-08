@@ -108,12 +108,12 @@ class Settings(BaseSettings):
         "SABR_RUNTIME_ROOT",
         default_path=_REPO_ROOT / "runtime",
     )
-    SABR_MEMORY_DIR: str = _env_value(
+    ARIS_MEMORY_DIR: str = _env_value(
         "ARIS_MEMORY_DIR",
         "SABR_MEMORY_DIR",
         default=str(Path(ARIS_RUNTIME_ROOT) / "memories"),
     )
-    SABR_PRESETS_FILE: str = _env_value(
+    ARIS_PRESETS_FILE: str = _env_value(
         "ARIS_AIIDA_PRESETS_FILE",
         "SABR_PRESETS_FILE",
         default=_resolve_path(
@@ -125,7 +125,7 @@ class Settings(BaseSettings):
             ),
         ),
     )
-    SABR_AIIDA_SETTINGS_FILE: str = _env_value(
+    ARIS_AIIDA_SETTINGS_FILE: str = _env_value(
         "ARIS_AIIDA_SETTINGS_FILE",
         "SABR_AIIDA_SETTINGS_FILE",
         default=_resolve_path(
@@ -145,7 +145,7 @@ class Settings(BaseSettings):
             _REPO_ROOT / "config" / "specializations",
         ),
     )
-    SABR_PROJECTS_ROOT: str = _env_value(
+    ARIS_PROJECTS_ROOT: str = _env_value(
         "ARIS_PROJECTS_ROOT",
         "SABR_PROJECTS_ROOT",
         default=str(Path(ARIS_RUNTIME_ROOT) / "projects"),
@@ -156,13 +156,13 @@ class Settings(BaseSettings):
         default=str(Path(ARIS_RUNTIME_ROOT) / "scripts"),
     )
 
-    SABR_DEBUG_LEVEL: str = _env_value("ARIS_DEBUG_LEVEL", "SABR_DEBUG_LEVEL", default="default")
+    ARIS_DEBUG_LEVEL: str = _env_value("ARIS_DEBUG_LEVEL", "SABR_DEBUG_LEVEL", default="default")
     PRODUCTION_MODE: bool = _env_flag("ARIS_PRODUCTION_MODE", "PRODUCTION_MODE", default="false")
 
     HTTPS_PROXY: str = _env_value("HTTPS_PROXY", default="")
     HTTP_PROXY: str = _env_value("HTTP_PROXY", default="")
-    SABR_USE_OUTBOUND_PROXY: bool = _env_flag("ARIS_USE_OUTBOUND_PROXY", "SABR_USE_OUTBOUND_PROXY", default="false")
-    SABR_FRONTEND_ORIGINS: str = _env_value(
+    ARIS_USE_OUTBOUND_PROXY: bool = _env_flag("ARIS_USE_OUTBOUND_PROXY", "SABR_USE_OUTBOUND_PROXY", default="false")
+    ARIS_FRONTEND_ORIGINS: str = _env_value(
         "ARIS_FRONTEND_ORIGINS",
         "SABR_FRONTEND_ORIGINS",
         default="http://localhost:5173,http://127.0.0.1:5173,https://aiida.yiming-zhang.com",
@@ -196,9 +196,9 @@ class Settings(BaseSettings):
         runtime_root = Path(self.ARIS_RUNTIME_ROOT)
         object.__setattr__(
             self,
-            "SABR_MEMORY_DIR",
+            "ARIS_MEMORY_DIR",
             _normalize_runtime_path(
-                self.SABR_MEMORY_DIR,
+                self.ARIS_MEMORY_DIR,
                 canonical_path=runtime_root / "memories",
                 legacy_paths=(
                     _REPO_ROOT / "default",
@@ -210,9 +210,9 @@ class Settings(BaseSettings):
         )
         object.__setattr__(
             self,
-            "SABR_PROJECTS_ROOT",
+            "ARIS_PROJECTS_ROOT",
             _normalize_runtime_path(
-                self.SABR_PROJECTS_ROOT,
+                self.ARIS_PROJECTS_ROOT,
                 canonical_path=runtime_root / "projects",
                 legacy_paths=(
                     _REPO_ROOT / "data" / "projects",
@@ -233,60 +233,60 @@ class Settings(BaseSettings):
         )
 
     @property
-    def ARIS_MEMORY_DIR(self) -> str:
-        return self.SABR_MEMORY_DIR
+    def SABR_MEMORY_DIR(self) -> str:
+        return self.ARIS_MEMORY_DIR
 
-    @ARIS_MEMORY_DIR.setter
-    def ARIS_MEMORY_DIR(self, value: str) -> None:
-        object.__setattr__(self, "SABR_MEMORY_DIR", str(value))
-
-    @property
-    def ARIS_PRESETS_FILE(self) -> str:
-        return self.SABR_PRESETS_FILE
-
-    @ARIS_PRESETS_FILE.setter
-    def ARIS_PRESETS_FILE(self, value: str) -> None:
-        object.__setattr__(self, "SABR_PRESETS_FILE", str(value))
+    @SABR_MEMORY_DIR.setter
+    def SABR_MEMORY_DIR(self, value: str) -> None:
+        object.__setattr__(self, "ARIS_MEMORY_DIR", str(value))
 
     @property
-    def ARIS_AIIDA_SETTINGS_FILE(self) -> str:
-        return self.SABR_AIIDA_SETTINGS_FILE
+    def SABR_PRESETS_FILE(self) -> str:
+        return self.ARIS_PRESETS_FILE
 
-    @ARIS_AIIDA_SETTINGS_FILE.setter
-    def ARIS_AIIDA_SETTINGS_FILE(self, value: str) -> None:
-        object.__setattr__(self, "SABR_AIIDA_SETTINGS_FILE", str(value))
-
-    @property
-    def ARIS_PROJECTS_ROOT(self) -> str:
-        return self.SABR_PROJECTS_ROOT
-
-    @ARIS_PROJECTS_ROOT.setter
-    def ARIS_PROJECTS_ROOT(self, value: str) -> None:
-        object.__setattr__(self, "SABR_PROJECTS_ROOT", str(value))
+    @SABR_PRESETS_FILE.setter
+    def SABR_PRESETS_FILE(self, value: str) -> None:
+        object.__setattr__(self, "ARIS_PRESETS_FILE", str(value))
 
     @property
-    def ARIS_DEBUG_LEVEL(self) -> str:
-        return self.SABR_DEBUG_LEVEL
+    def SABR_AIIDA_SETTINGS_FILE(self) -> str:
+        return self.ARIS_AIIDA_SETTINGS_FILE
 
-    @ARIS_DEBUG_LEVEL.setter
-    def ARIS_DEBUG_LEVEL(self, value: str) -> None:
-        object.__setattr__(self, "SABR_DEBUG_LEVEL", str(value))
-
-    @property
-    def ARIS_USE_OUTBOUND_PROXY(self) -> bool:
-        return self.SABR_USE_OUTBOUND_PROXY
-
-    @ARIS_USE_OUTBOUND_PROXY.setter
-    def ARIS_USE_OUTBOUND_PROXY(self, value: bool) -> None:
-        object.__setattr__(self, "SABR_USE_OUTBOUND_PROXY", bool(value))
+    @SABR_AIIDA_SETTINGS_FILE.setter
+    def SABR_AIIDA_SETTINGS_FILE(self, value: str) -> None:
+        object.__setattr__(self, "ARIS_AIIDA_SETTINGS_FILE", str(value))
 
     @property
-    def ARIS_FRONTEND_ORIGINS(self) -> str:
-        return self.SABR_FRONTEND_ORIGINS
+    def SABR_PROJECTS_ROOT(self) -> str:
+        return self.ARIS_PROJECTS_ROOT
 
-    @ARIS_FRONTEND_ORIGINS.setter
-    def ARIS_FRONTEND_ORIGINS(self, value: str) -> None:
-        object.__setattr__(self, "SABR_FRONTEND_ORIGINS", str(value))
+    @SABR_PROJECTS_ROOT.setter
+    def SABR_PROJECTS_ROOT(self, value: str) -> None:
+        object.__setattr__(self, "ARIS_PROJECTS_ROOT", str(value))
+
+    @property
+    def SABR_DEBUG_LEVEL(self) -> str:
+        return self.ARIS_DEBUG_LEVEL
+
+    @SABR_DEBUG_LEVEL.setter
+    def SABR_DEBUG_LEVEL(self, value: str) -> None:
+        object.__setattr__(self, "ARIS_DEBUG_LEVEL", str(value))
+
+    @property
+    def SABR_USE_OUTBOUND_PROXY(self) -> bool:
+        return self.ARIS_USE_OUTBOUND_PROXY
+
+    @SABR_USE_OUTBOUND_PROXY.setter
+    def SABR_USE_OUTBOUND_PROXY(self, value: bool) -> None:
+        object.__setattr__(self, "ARIS_USE_OUTBOUND_PROXY", bool(value))
+
+    @property
+    def SABR_FRONTEND_ORIGINS(self) -> str:
+        return self.ARIS_FRONTEND_ORIGINS
+
+    @SABR_FRONTEND_ORIGINS.setter
+    def SABR_FRONTEND_ORIGINS(self, value: str) -> None:
+        object.__setattr__(self, "ARIS_FRONTEND_ORIGINS", str(value))
 
     model_config = SettingsConfigDict(
         env_file=".env",
