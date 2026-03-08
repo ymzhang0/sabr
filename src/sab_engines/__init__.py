@@ -1,1 +1,1 @@
-"""Engine integration layers for SABR."""
+"""Legacy compatibility surface for historical SABR engine packages."""

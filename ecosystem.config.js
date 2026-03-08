@@ -11,22 +11,22 @@ module.exports = {
             }
         },
         {
-            name: 'sabr-api',
-            cwd: '/Users/yimingzhang/Developer/sabr',
-            script: '/Users/yimingzhang/Developer/sabr/.venv/bin/python',
+            name: 'aris-api',
+            cwd: '/Users/yimingzhang/Developer/aris',
+            script: '/Users/yimingzhang/Developer/aris/.venv/bin/python',
             args: 'app_api.py',
             env: {
-                PYTHONPATH: '/Users/yimingzhang/Developer/sabr'
+                PYTHONPATH: '/Users/yimingzhang/Developer/aris'
             }
         },
         {
-            name: 'sabr-frontend',
-            cwd: '/Users/yimingzhang/Developer/sabr/frontend',
+            name: 'aris-web',
+            cwd: '/Users/yimingzhang/Developer/aris/apps/web',
             script: 'npm',
             args: 'run dev',
         },
         {
-            name: "cf-tunnel",
+            name: "aris-tunnel",
             script: "cloudflared",
             args: "tunnel run sabr-aiida-tunnel",
             autorestart: true

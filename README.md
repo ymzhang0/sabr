@@ -1,19 +1,23 @@
-# SABR v2: Standard Agent Bus for Research
+# ARIS: Agentic Research Intelligence System
 
-SABR v2 is a next-generation AI agent framework designed for autonomous scientific discovery, specifically optimized for the **AiiDA** (Advanced Interactive Infrastructure for Data-Agnostic) ecosystem. 
+ARIS is the evolving successor to the SABR codebase: an agentic scientific research framework designed around a strict Brain/Body split and optimized for the **AiiDA** ecosystem.
 
-Built on top of **PydanticAI**, SABR v2 transitions from linear execution to a **Cyclic Reasoning Graph**, enabling agents to self-diagnose failures and autocorrect simulation parameters in real-time.
+Built on top of **PydanticAI**, ARIS uses a cyclic reasoning workflow that lets the orchestration layer diagnose failures, inspect worker state, and revise simulation parameters iteratively.
 
 ## 🚀 Key Features
 
 - **Cyclic Reasoning**: Powered by PydanticAI, the agent can loop through "Think-Tool-Observe" cycles to self-correct and retry failed tasks.
 - **Strict Type Safety**: Every response is validated against Pydantic models, ensuring the UI always receives structured, reliable data.
-- **Engine Decoupling**: The core bus (`sab_core`) is isolated from specific research engines (e.g., `aiida`), allowing for easy extension to other scientific tools like VASP or QE.
+- **Engine Decoupling**: The canonical core (`aris_core`) is isolated from app-specific integrations (for example `aris_apps.aiida`), allowing future support for other scientific domains.
 - **Oxford-Style UI**: A sophisticated, dark-themed dashboard built with **NiceGUI**, featuring a real-time thinking terminal and structured insights.
 
-## 🏗️ SABR ⇌ AiiDA-Worker Communication Protocol (v1.0)
+Legacy `sab_core` / `sab_engines` imports remain available as compatibility layers during the refactor, but new implementation work should target `aris_core` and `aris_apps`.
 
-This protocol defines the communication standards between **SABR (Brain/Control)** and **AiiDA-Worker (Muscle/Execution)**. It follows a "Thin Client - Fat Server" architecture, ensuring that the Brain can orchestrate complex scientific workflows without having `aiida-core` installed locally.
+The canonical local repo folder is now `aris/`. A temporary `sabr -> aris` symlink may remain on disk so older local scripts keep working during the migration window.
+
+## 🏗️ ARIS ⇌ AiiDA-Worker Communication Protocol (v1.0)
+
+This protocol defines the communication standards between **ARIS (Brain/Control)** and **AiiDA-Worker (Body/Execution)**. It follows a "Thin Client - Fat Server" architecture, ensuring that the Brain can orchestrate complex scientific workflows without having `aiida-core` installed locally.
 
 ---
 
@@ -21,9 +25,9 @@ This protocol defines the communication standards between **SABR (Brain/Control)
 * **Protocol**: HTTP/1.1
 * **Content-Type**: `application/json`
 * **Ports**:
-    * **SABR (Brain)**: `:8000`
+    * **ARIS (Brain)**: `:8000`
     * **AiiDA-Worker (Bridge)**: `:8001`
-* **Authentication**: Internal trusted connection (future support for `X-SABR-Token` headers).
+* **Authentication**: Internal trusted connection (future support for `X-ARIS-Token` headers).
 
 ---
 
@@ -102,7 +106,14 @@ To maintain a "Thin Client," the Worker must return "Dehydrated" JSON:
 
 * **Worker Side**: Implement these paths using fastapi.APIRouter by reusing the migrated logic in the tools/ package.
 
-* **SABR Side**: Maintain a BridgeClient that encapsulates these HTTP calls, providing clean methods like get_spec() and submit_job() for the Agent.
+* **ARIS Side**: Maintain a bridge client that encapsulates these HTTP calls, providing clean methods like `get_spec()` and `submit_job()` for the agent layer.
+
+## Local Operations
+
+- PM2 process names now use the ARIS convention: `aris-api`, `aris-web`, `aris-tunnel`.
+- The current PM2 ecosystem file lives at `/Users/yimingzhang/Developer/aris/ecosystem.config.js`.
+- A legacy `/Users/yimingzhang/Developer/sabr` symlink may still exist and point at `/Users/yimingzhang/Developer/aris`.
+- The Cloudflare tunnel command still targets `sabr-aiida-tunnel` for compatibility with the existing external tunnel resource.
 
 方案一：桌面端“伪装” (Electron) —— 最推荐
 

@@ -1,8 +1,3 @@
-"""Legacy NiceGUI implementation package."""
+from src.aris_apps.aiida.ui.legacy_nicegui import RemoteAiiDAController, THEMES, create_aiida_layout
 
-from .controller import RemoteAiiDAController
-from .layout import create_aiida_layout
-from .themes import THEMES
-
-__all__ = ["RemoteAiiDAController", "create_aiida_layout", "THEMES"]
-
+__all__ = ["RemoteAiiDAController", "THEMES", "create_aiida_layout"]

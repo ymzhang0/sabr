@@ -1,1 +1,1 @@
-"""Tests for sab-core."""
+"""Tests for the ARIS transition codebase."""

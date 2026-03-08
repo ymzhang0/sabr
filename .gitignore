@@ -48,10 +48,20 @@ site/
 
 # Runtime memory snapshots (do not track)
 engines/aiida/data/memories/history_sabr_v2_global.json
+runtime/memories/*
+!runtime/memories/.gitkeep
+runtime/projects/*
+!runtime/projects/.gitkeep
+runtime/uploads/*
+!runtime/uploads/.gitkeep
+runtime/cache/*
+!runtime/cache/.gitkeep
+runtime/scripts/*
+!runtime/scripts/.gitkeep
 
 # --- Node.js / Frontend ---
 node_modules/
 frontend/node_modules/
+apps/web/node_modules/
 *.tsbuildinfo
 dist/
-

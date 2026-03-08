@@ -1,4 +1,5 @@
-"""Compatibility wrapper for legacy NiceGUI layout module."""
+import sys
 
-from .legacy_nicegui.layout import *  # noqa: F401,F403
+from src.aris_apps.aiida.ui import layout as _module
 
+sys.modules[__name__] = _module

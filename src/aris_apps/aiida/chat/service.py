@@ -1,0 +1,3847 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import re
+import shutil
+import time
+import unicodedata
+from contextlib import suppress
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+from uuid import uuid4
+
+from loguru import logger
+from pydantic_ai.settings import ModelSettings
+
+from src.aris_apps.aiida.client import (
+    PROJECT_ID_HEADER,
+    reset_bridge_call_listener,
+    reset_bridge_request_headers,
+    SESSION_ID_HEADER,
+    set_bridge_call_listener,
+    set_bridge_request_headers,
+    WORKSPACE_PATH_HEADER,
+)
+from src.aris_apps.aiida.frontend_bridge import inspect_group, list_groups, rename_group
+from src.aris_apps.aiida.presenters.workflow_view import enrich_submission_draft_payload
+from src.aris_core.config import settings
+from src.aris_core.logging import log_event
+
+_PENDING_SUBMISSION_KEY = "aiida_pending_submission"
+_CHAT_SESSIONS_KV_KEY = "frontend_chat_sessions_v2"
+_LEGACY_CHAT_SESSIONS_KV_KEY = "frontend_chat_sessions_v1"
+_SUBMISSION_DRAFT_PREFIX = "[SUBMISSION_DRAFT]"
+_DEFAULT_PROJECT_NAME = "Default Project"
+_DEFAULT_SESSION_TITLE = "New Conversation"
+_PROJECT_SESSIONS_DIRNAME = "sessions"
+_MAX_CHAT_SESSION_MESSAGES = 200
+_MAX_CHAT_SESSIONS = 120
+_MAX_CHAT_SESSION_TAGS = 12
+_MAX_CHAT_SESSION_TAG_LENGTH = 32
+_TITLE_MAX_LENGTH = 24
+_TITLE_RESEARCH_CHARS_LIMIT = 12
+_TITLE_STATE_IDLE = "idle"
+_TITLE_STATE_PENDING = "pending"
+_TITLE_STATE_READY = "ready"
+_TITLE_STATE_FAILED = "failed"
+_TITLE_STAGE_INITIAL = "initial"
+_TITLE_STAGE_DEEP_SUMMARY = "deep_summary"
+_TITLE_STAGE_CONTEXT_SWITCH = "context_switch"
+_TITLE_GENERATOR_SYSTEM_PROMPT = (
+    "You are a scientific research assistant. Generate one very short English session title."
+    " The title must use ASCII only."
+    " Prefer 2-4 concise English words."
+    " Keep material abbreviations or node numbers when useful, such as Si Bands, GaAs Relax, Node 101."
+    " The title must describe the research object or task."
+    " Prefer the pinned/context nodes when available."
+    " Output only the title itself. No Chinese. No quotes. No markdown. No explanation."
+)
+_KNOWN_PARALLEL_KEYS = {
+    "num_machines",
+    "num_mpiprocs_per_machine",
+    "tot_num_mpiprocs",
+    "num_cores_per_machine",
+    "num_cores_per_mpiproc",
+    "max_wallclock_seconds",
+    "queue_name",
+    "withmpi",
+    "account",
+    "qos",
+    "npool",
+    "nk",
+    "ntg",
+    "ndiag",
+}
+_CRITICAL_ADVANCED_KEYS = {
+    "protocol",
+    *_KNOWN_PARALLEL_KEYS,
+}
+_BATCH_PROCESS_TYPES = {
+    "processnode",
+    "workflownode",
+    "workchainnode",
+    "calcjobnode",
+    "calcfunctionnode",
+}
+_BATCH_RUNNING_STATES = {"running"}
+_BATCH_QUEUED_STATES = {"created", "waiting"}
+_BATCH_FINISHED_STATES = {"finished", "completed", "success"}
+_BATCH_FAILED_STATES = {"failed", "excepted", "killed", "error"}
+_UNSET = object()
+_SESSION_SLUG_MAX_LENGTH = 48
+
+
+def _draft_fragment_hash(fragment: str) -> str:
+    return hashlib.sha1(fragment.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+
+def normalize_context_node_ids(raw: Any) -> list[int]:
+    if raw is None:
+        return []
+
+    values: list[Any]
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return []
+        values = [part.strip() for part in stripped.split(",")]
+    elif isinstance(raw, (list, tuple, set)):
+        values = list(raw)
+    else:
+        values = [raw]
+
+    deduped: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        try:
+            pk = int(str(value).strip())
+        except (TypeError, ValueError):
+            continue
+        if pk <= 0 or pk in seen:
+            continue
+        seen.add(pk)
+        deduped.append(pk)
+        if len(deduped) >= 30:
+            break
+    return deduped
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _extract_requested_structure_count(user_intent: str) -> int | None:
+    text = str(user_intent or "").strip()
+    if not text:
+        return None
+
+    patterns = (
+        r"生成\s*(\d+)\s*个\s*(?:等间距)?(?:的)?(?:\s*[A-Za-z0-9._-]+)?\s*结构",
+        r"(\d+)\s*个\s*(?:等间距)?(?:的)?(?:\s*[A-Za-z0-9._-]+)?\s*结构",
+        r"\b(?:generate|create|prepare|build)\s+(\d+)\s+(?:equally\s+spaced\s+)?(?:structures?|jobs?|tasks?)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            count = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if count > 1:
+            return count
+    return None
+
+
+def _extract_requested_kpoints_distance(user_intent: str) -> float | None:
+    text = str(user_intent or "").strip()
+    if not text:
+        return None
+
+    patterns = (
+        r"k[\s-]*points?\s*distance\s*(?:设置为|设为|set\s+to|to|=|:)?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"k[\s-]*point\s*distance\s*(?:设置为|设为|set\s+to|to|=|:)?\s*([0-9]+(?:\.[0-9]+)?)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            return float(match.group(1))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _extract_intent_hints(user_intent: str) -> dict[str, Any]:
+    text = str(user_intent or "").strip()
+    if not text:
+        return {}
+
+    lowered = text.lower()
+    requested_structure_count = _extract_requested_structure_count(text)
+    expected_batch = requested_structure_count is not None
+    if not expected_batch:
+        expected_batch = any(
+            marker in text
+            for marker in (
+                "批量",
+                "高通量",
+                "多个结构",
+                "这些结构",
+                "参数扫描",
+                "参数网格",
+                "等间距",
+            )
+        ) or any(
+            marker in lowered
+            for marker in (
+                "batch",
+                "high-throughput",
+                "multiple structures",
+                "structure list",
+                "parameter sweep",
+                "parameter grid",
+            )
+        )
+
+    hints: dict[str, Any] = {}
+    if expected_batch:
+        hints["expected_batch"] = True
+    if requested_structure_count is not None:
+        hints["requested_structure_count"] = requested_structure_count
+
+    kpoints_distance = _extract_requested_kpoints_distance(text)
+    if kpoints_distance is not None:
+        hints["kpoints_distance"] = kpoints_distance
+
+    return hints
+
+
+def _trim_text(value: Any, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _normalize_title_state(value: Any) -> str:
+    cleaned = str(value or "").strip().lower()
+    if cleaned in {_TITLE_STATE_PENDING, _TITLE_STATE_READY, _TITLE_STATE_FAILED}:
+        return cleaned
+    return _TITLE_STATE_IDLE
+
+
+def _looks_like_session_identifier_title(title: Any, session_id: Any) -> bool:
+    cleaned_title = str(title or "").strip()
+    cleaned_session_id = str(session_id or "").strip()
+    if not cleaned_title:
+        return False
+    if cleaned_session_id and cleaned_title == cleaned_session_id:
+        return True
+    return bool(
+        re.fullmatch(r"[0-9a-f]{32}", cleaned_title, flags=re.IGNORECASE)
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            cleaned_title,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _normalize_group_label_segment(value: Any, *, fallback: str) -> str:
+    text = " ".join(str(value or "").split()).replace("/", "_").strip()
+    return text or fallback
+
+
+def _ascii_text(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    return normalized.encode("ascii", "ignore").decode("ascii")
+
+
+def _sanitize_session_title_text(value: Any) -> str:
+    text = _ascii_text(value)
+    text = text.replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"^title[:：\s-]*", "", text, flags=re.IGNORECASE).strip()
+    text = text.strip("`'\"“”‘’[](){}")
+    text = re.sub(r"[^A-Za-z0-9#()+._ -]+", " ", text)
+    text = " ".join(text.split())
+    return text.strip(" -_.")
+
+
+def _normalize_session_title(value: Any, *, fallback: str = _DEFAULT_SESSION_TITLE, max_length: int = 80) -> str:
+    text = _sanitize_session_title_text(value)
+    if not text:
+        text = _sanitize_session_title_text(fallback) or _DEFAULT_SESSION_TITLE
+    return text[:max_length].strip() or (_sanitize_session_title_text(fallback) or _DEFAULT_SESSION_TITLE)
+
+
+def _slugify_session_name(value: Any, *, fallback: str = "session") -> str:
+    text = _ascii_text(value).lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+    text = re.sub(r"-{2,}", "-", text)
+    text = text[:_SESSION_SLUG_MAX_LENGTH].strip("-")
+    return text or fallback
+
+
+def _get_session_slug(session: dict[str, Any]) -> str:
+    stored = str(session.get("session_slug") or "").strip()
+    if stored:
+        return stored
+    workspace_path = _resolve_filesystem_path(session.get("workspace_path"))
+    if workspace_path is not None:
+        workspace_name = workspace_path.name.strip()
+        if workspace_name:
+            return workspace_name
+    session_id = str(session.get("id") or "").strip()
+    return session_id or "session"
+
+
+def _resolve_unique_session_slug(
+    store: dict[str, Any],
+    project_id: str,
+    preferred_slug: str,
+    *,
+    session_id: str | None = None,
+) -> str:
+    base_slug = preferred_slug.strip() or "session"
+    existing_slugs = {
+        _get_session_slug(session)
+        for session in store.get("sessions", [])
+        if isinstance(session, dict)
+        and str(session.get("project_id") or "").strip() == project_id
+        and str(session.get("id") or "").strip() != str(session_id or "").strip()
+    }
+
+    if base_slug not in existing_slugs:
+        return base_slug
+
+    suffix = 2
+    while True:
+        candidate = f"{base_slug}-{suffix}"
+        if candidate not in existing_slugs:
+            return candidate
+        suffix += 1
+
+
+def _desired_session_slug(store: dict[str, Any], session: dict[str, Any], title: Any) -> str:
+    project_id = str(session.get("project_id") or "").strip()
+    title_slug = _slugify_session_name(title, fallback="new-conversation")
+    return _resolve_unique_session_slug(store, project_id, title_slug, session_id=str(session.get("id") or ""))
+
+
+def _rename_session_group_label_if_needed(store: dict[str, Any], session: dict[str, Any], old_slug: str | None) -> None:
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
+    old_group_label = _build_session_group_label(project_name, old_slug or "session")
+    new_group_label = _build_session_group_label(project_name, _get_session_slug(session))
+    if old_group_label == new_group_label:
+        return
+
+    with suppress(Exception):
+        existing_new = next(
+            (group for group in list_groups() if str(group.get("label") or "").strip() == new_group_label),
+            None,
+        )
+        existing_old = next(
+            (group for group in list_groups() if str(group.get("label") or "").strip() == old_group_label),
+            None,
+        )
+        if existing_old and not existing_new:
+            rename_group(int(existing_old.get("pk") or 0), new_group_label)
+
+
+def _build_project_group_label(project_name: Any) -> str:
+    return _normalize_group_label_segment(project_name, fallback=_DEFAULT_PROJECT_NAME)
+
+
+def _build_session_group_label(project_name: Any, session_name: Any) -> str:
+    project_group_label = _build_project_group_label(project_name)
+    session_segment = _normalize_group_label_segment(session_name, fallback="session")
+    return f"{project_group_label}/{session_segment}"
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and re.fullmatch(r"-?\d+", stripped):
+            return int(stripped)
+    return None
+
+
+def _normalize_process_state_value(value: Any) -> str:
+    return str(value or "").strip().replace("_", " ").lower()
+
+
+def _is_batch_process_node(entry: Any) -> bool:
+    if not isinstance(entry, dict):
+        return False
+
+    process_state = _normalize_process_state_value(entry.get("process_state") or entry.get("state"))
+    if process_state and process_state != "n/a":
+        return True
+
+    node_type_candidates = (
+        entry.get("type"),
+        entry.get("node_type"),
+        entry.get("full_type"),
+    )
+    for candidate in node_type_candidates:
+        normalized = str(candidate or "").strip().lower()
+        if any(token in normalized for token in _BATCH_PROCESS_TYPES):
+            return True
+
+    process_label = str(entry.get("process_label") or "").strip()
+    return bool(process_label and process_label.upper() != "N/A")
+
+
+def _classify_batch_process_status(entry: dict[str, Any]) -> str | None:
+    process_state = _normalize_process_state_value(entry.get("process_state") or entry.get("state"))
+    exit_status = _coerce_optional_int(entry.get("exit_status"))
+
+    if process_state in _BATCH_RUNNING_STATES:
+        return "running"
+    if process_state in _BATCH_QUEUED_STATES:
+        return "queued"
+    if process_state in _BATCH_FINISHED_STATES:
+        if exit_status in (None, 0):
+            return "success"
+        return "failed"
+    if process_state in _BATCH_FAILED_STATES:
+        return "failed"
+
+    if exit_status is not None and exit_status != 0:
+        return "failed"
+    if process_state:
+        return "queued"
+    return None
+
+
+def _batch_process_label(entry: dict[str, Any]) -> str:
+    for key in ("label", "process_label"):
+        value = str(entry.get(key) or "").strip()
+        if value and value.upper() != "N/A":
+            return value
+    pk = _coerce_optional_int(entry.get("pk"))
+    return f"Process #{pk}" if pk is not None and pk > 0 else "Process"
+
+
+def _summarize_chat_session_batch_progress(
+    *,
+    session_id: str,
+    title: str,
+    session_group_label: str,
+    nodes: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    status_rank = {
+        "running": 0,
+        "queued": 1,
+        "failed": 2,
+        "success": 3,
+    }
+    items: list[dict[str, Any]] = []
+    success = 0
+    running = 0
+    queued = 0
+    failed = 0
+
+    for entry in nodes:
+        if not _is_batch_process_node(entry):
+            continue
+        status = _classify_batch_process_status(entry)
+        if status is None:
+            continue
+
+        if status == "success":
+            success += 1
+        elif status == "running":
+            running += 1
+        elif status == "queued":
+            queued += 1
+        elif status == "failed":
+            failed += 1
+
+        items.append(
+            {
+                "pk": _coerce_optional_int(entry.get("pk")) or 0,
+                "label": _batch_process_label(entry),
+                "process_label": str(entry.get("process_label") or "").strip() or None,
+                "state": _normalize_process_state_value(entry.get("process_state") or entry.get("state")) or "unknown",
+                "exit_status": _coerce_optional_int(entry.get("exit_status")),
+                "status": status,
+            }
+        )
+
+    total = len(items)
+    if total <= 1:
+        return None
+
+    done = success + failed
+    percent = int(round((done / total) * 100)) if total else 0
+
+    items.sort(key=lambda item: (status_rank.get(str(item["status"]), 99), item["pk"]))
+
+    return {
+        "session_id": session_id,
+        "label": str(title or _DEFAULT_SESSION_TITLE),
+        "group_label": session_group_label,
+        "total": total,
+        "done": done,
+        "percent": max(0, min(100, percent)),
+        "success": success,
+        "running": running,
+        "queued": queued,
+        "failed": failed,
+        "items": items,
+    }
+
+
+def _resolve_filesystem_path(path_value: Any) -> Path | None:
+    cleaned = str(path_value or "").strip()
+    if not cleaned:
+        return None
+    return Path(cleaned).expanduser().resolve()
+
+
+def _managed_projects_root() -> Path:
+    root = _resolve_filesystem_path(settings.SABR_PROJECTS_ROOT)
+    if root is None:
+        root = Path.cwd() / "data" / "projects"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _managed_project_root(project_id: str) -> Path:
+    return _managed_projects_root() / str(project_id).strip()
+
+
+def _project_sessions_root_path(project: dict[str, Any]) -> Path:
+    root = _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or uuid4().hex))
+    return root / _PROJECT_SESSIONS_DIRNAME
+
+
+def _session_workspace_path(session: dict[str, Any], project: dict[str, Any]) -> Path:
+    return _project_sessions_root_path(project) / _get_session_slug(session)
+
+
+def _is_path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_rmtree(path: Path | None) -> None:
+    if path is None:
+        return
+    with suppress(FileNotFoundError):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _cleanup_session_workspace_dir(session: dict[str, Any], project: dict[str, Any]) -> None:
+    sessions_root = _project_sessions_root_path(project)
+    candidates: list[Path] = [_session_workspace_path(session, project)]
+    explicit_workspace = _resolve_filesystem_path(session.get("workspace_path"))
+    if explicit_workspace is not None:
+        candidates.insert(0, explicit_workspace)
+
+    for candidate in candidates:
+        if not _is_path_within(candidate, sessions_root):
+            continue
+        _safe_rmtree(candidate)
+        break
+
+    with suppress(OSError):
+        if sessions_root.exists() and not any(sessions_root.iterdir()):
+            sessions_root.rmdir()
+
+
+def _cleanup_project_workspace_dir(project: dict[str, Any]) -> None:
+    sessions_root = _project_sessions_root_path(project)
+    _safe_rmtree(sessions_root)
+
+    root = _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or ""))
+    managed_root = _managed_project_root(str(project.get("id") or ""))
+    if root == managed_root:
+        _safe_rmtree(root)
+
+
+def _normalize_project_root_path(path_value: Any, *, project_id: str) -> str:
+    resolved = _resolve_filesystem_path(path_value) or _managed_project_root(project_id)
+    if resolved.exists() and not resolved.is_dir():
+        resolved = _managed_project_root(project_id)
+    return str(resolved)
+
+
+def _validate_new_project_root_path(path_value: Any, *, project_id: str) -> str:
+    resolved = _resolve_filesystem_path(path_value)
+    if resolved is None:
+        resolved = _managed_project_root(project_id)
+    if resolved.exists() and not resolved.is_dir():
+        raise ValueError(f"Project root path points to a file: {resolved}")
+    return str(resolved)
+
+
+def _ensure_directory(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _build_default_chat_project(project_id: str | None = None) -> dict[str, Any]:
+    now = _now_iso()
+    resolved_project_id = str(project_id or uuid4().hex).strip() or uuid4().hex
+    return {
+        "id": resolved_project_id,
+        "name": _DEFAULT_PROJECT_NAME,
+        "root_path": str(_managed_project_root(resolved_project_id)),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _summarize_focus_node_for_title(node: dict[str, Any] | None) -> str:
+    if not isinstance(node, dict):
+        return ""
+
+    formula = _trim_text(node.get("formula") or "", limit=24)
+    label = _trim_text(node.get("label") or "", limit=24)
+    subject = formula or label
+    if not subject:
+        return ""
+
+    try:
+        pk = int(node.get("pk") or 0)
+    except (TypeError, ValueError):
+        pk = 0
+    if pk > 0:
+        return f"{subject} #{pk}"
+    return subject
+
+
+def _pick_title_focus_node(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    normalized_snapshot = _normalize_chat_session_snapshot(snapshot)
+    pinned_nodes = normalized_snapshot.get("pinned_nodes") or []
+    if pinned_nodes:
+        return pinned_nodes[0]
+    context_nodes = normalized_snapshot.get("context_nodes") or []
+    if context_nodes:
+        return context_nodes[0]
+    return None
+
+
+def _derive_chat_session_title(intent: str, snapshot: dict[str, Any] | None = None) -> str:
+    cleaned = " ".join(str(intent or "").split())
+    if not cleaned:
+        return _DEFAULT_SESSION_TITLE
+
+    focus_subject = _summarize_focus_node_for_title(_pick_title_focus_node(snapshot))
+    if focus_subject:
+        lowered = cleaned.lower()
+        if any(keyword in cleaned for keyword in ("结构", "structure")):
+            return _trim_text(f"查看 {focus_subject}", limit=_TITLE_MAX_LENGTH) or _DEFAULT_SESSION_TITLE
+        if any(keyword in lowered for keyword in ("band", "bands")) or "能带" in cleaned:
+            return _trim_text(f"{focus_subject} 能带", limit=_TITLE_MAX_LENGTH) or _DEFAULT_SESSION_TITLE
+        return _trim_text(focus_subject, limit=_TITLE_MAX_LENGTH) or _DEFAULT_SESSION_TITLE
+
+    first_line = cleaned.splitlines()[0].strip(" -:;,.")
+    return _trim_text(first_line or cleaned, limit=48) or _DEFAULT_SESSION_TITLE
+
+
+def _count_session_user_turns(session: dict[str, Any] | None) -> int:
+    if not isinstance(session, dict):
+        return 0
+    messages = _normalize_chat_messages(session.get("messages"))
+    return sum(1 for message in messages if message.get("role") == "user")
+
+
+def _extract_first_session_message_text(session: dict[str, Any] | None, role: str) -> str:
+    if not isinstance(session, dict):
+        return ""
+    for message in _normalize_chat_messages(session.get("messages")):
+        if str(message.get("role") or "") == role:
+            return str(message.get("text") or "").strip()
+    return ""
+
+
+def _extract_latest_session_message_text(session: dict[str, Any] | None, role: str) -> str:
+    if not isinstance(session, dict):
+        return ""
+    for message in reversed(_normalize_chat_messages(session.get("messages"))):
+        if str(message.get("role") or "") == role:
+            return str(message.get("text") or "").strip()
+    return ""
+
+
+def _serialize_title_context_nodes(nodes: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for node in nodes[:4]:
+        if not isinstance(node, dict):
+            continue
+        pk = node.get("pk")
+        formula = str(node.get("formula") or "").strip()
+        label = str(node.get("label") or "").strip()
+        node_type = str(node.get("node_type") or "").strip()
+        summary = formula or label or node_type or "Unknown node"
+        if pk:
+            summary = f"{summary} (#{pk})"
+        if node_type and node_type not in summary:
+            summary = f"{summary}, type={node_type}"
+        lines.append(summary)
+    return lines
+
+
+def _build_title_context_key(snapshot: dict[str, Any] | None) -> str:
+    normalized_snapshot = _normalize_chat_session_snapshot(snapshot)
+    parts: list[str] = []
+    pinned_nodes = normalized_snapshot.get("pinned_nodes") or []
+    context_nodes = normalized_snapshot.get("context_nodes") or []
+    for node in [*pinned_nodes[:2], *context_nodes[:2]]:
+        if not isinstance(node, dict):
+            continue
+        parts.append(
+            "|".join(
+                [
+                    str(node.get("pk") or ""),
+                    str(node.get("formula") or ""),
+                    str(node.get("label") or ""),
+                    str(node.get("node_type") or ""),
+                ]
+            )
+        )
+    selected_group = str(normalized_snapshot.get("selected_group") or "").strip()
+    if selected_group:
+        parts.append(f"group:{selected_group}")
+    session_environment = str(normalized_snapshot.get("session_environment") or "").strip()
+    if session_environment:
+        parts.append(f"env:{session_environment}")
+    return hashlib.sha1("\n".join(parts).encode("utf-8", errors="replace")).hexdigest() if parts else ""
+
+
+def _sanitize_generated_title(raw_title: Any, fallback: str) -> str:
+    text = _normalize_session_title(raw_title, fallback=fallback, max_length=_TITLE_MAX_LENGTH)
+    if len(text) > _TITLE_RESEARCH_CHARS_LIMIT and "#" not in text and "(" not in text:
+        text = text[:_TITLE_RESEARCH_CHARS_LIMIT].strip()
+
+    return text or fallback
+
+
+def _build_title_generation_prompt(
+    session: dict[str, Any],
+    *,
+    stage: str,
+    completed_turn_id: int,
+) -> str:
+    snapshot = _normalize_chat_session_snapshot(session.get("snapshot"))
+    first_user_intent = str(session.get("title_first_intent") or "").strip() or _extract_first_session_message_text(session, "user")
+    latest_user_intent = _extract_latest_session_message_text(session, "user")
+    latest_assistant_reply = _trim_text(_extract_latest_session_message_text(session, "assistant"), limit=180)
+    pinned_lines = _serialize_title_context_nodes(snapshot.get("pinned_nodes") or [])
+    context_lines = _serialize_title_context_nodes(snapshot.get("context_nodes") or [])
+    selected_group = str(snapshot.get("selected_group") or "").strip()
+    session_environment = str(snapshot.get("session_environment") or "").strip()
+    current_title = str(session.get("title") or _DEFAULT_SESSION_TITLE)
+    stage_label = {
+        _TITLE_STAGE_INITIAL: "Initial Naming",
+        _TITLE_STAGE_DEEP_SUMMARY: "Deep Summary",
+        _TITLE_STAGE_CONTEXT_SWITCH: "Context Switch",
+    }.get(stage, "Session Summary")
+
+    prompt_lines = [
+        _TITLE_GENERATOR_SYSTEM_PROMPT,
+        "",
+        f"Stage: {stage_label}",
+        f"Turn: {completed_turn_id}",
+        f"Current title: {current_title}",
+        f"First user request: {first_user_intent or 'None'}",
+        f"Latest user request: {latest_user_intent or first_user_intent or 'None'}",
+    ]
+    if latest_assistant_reply:
+        prompt_lines.append(f"Latest assistant summary: {latest_assistant_reply}")
+    if selected_group:
+        prompt_lines.append(f"Selected group: {selected_group}")
+    if session_environment:
+        prompt_lines.append(f"Environment: {session_environment}")
+    if pinned_lines:
+        prompt_lines.append("Pinned Context:")
+        prompt_lines.extend(f"- {line}" for line in pinned_lines)
+    if context_lines:
+        prompt_lines.append("Attached Context:")
+        prompt_lines.extend(f"- {line}" for line in context_lines)
+    prompt_lines.extend(
+        [
+            "",
+            "Return the final English title only.",
+        ]
+    )
+    return "\n".join(prompt_lines)
+
+
+def _should_schedule_title_generation(session: dict[str, Any], completed_turn_id: int) -> str | None:
+    if not bool(session.get("auto_title", False)):
+        return None
+    if _normalize_title_state(session.get("title_state")) == _TITLE_STATE_PENDING:
+        return None
+
+    user_turn_count = _count_session_user_turns(session)
+    last_generated_turn = int(session.get("title_last_generated_turn") or 0)
+    generation_count = max(0, int(session.get("title_generation_count") or 0))
+    context_key = _build_title_context_key(session.get("snapshot"))
+    last_context_key = str(session.get("title_last_context_key") or "").strip()
+
+    if user_turn_count <= 1 and generation_count == 0 and completed_turn_id > last_generated_turn:
+        return _TITLE_STAGE_INITIAL
+    if context_key and last_context_key and context_key != last_context_key and completed_turn_id > last_generated_turn:
+        return _TITLE_STAGE_CONTEXT_SWITCH
+    if user_turn_count > 5 and generation_count < 2 and completed_turn_id > last_generated_turn:
+        return _TITLE_STAGE_DEEP_SUMMARY
+    return None
+
+
+def _normalize_chat_session_tags(raw_tags: Any) -> list[str]:
+    if not isinstance(raw_tags, (list, tuple, set)):
+        return []
+
+    tags: list[str] = []
+    seen: set[str] = set()
+    for value in raw_tags:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        normalized = text if text.startswith("#") else f"#{text}"
+        normalized = _trim_text(normalized, limit=_MAX_CHAT_SESSION_TAG_LENGTH)
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tags.append(normalized)
+        if len(tags) >= _MAX_CHAT_SESSION_TAGS:
+            break
+    return tags
+
+
+def serialize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    for message in history:
+        item = {
+            "role": str(message.get("role", "assistant")),
+            "text": str(message.get("text", "")),
+            "status": str(message.get("status", "done")),
+            "turn_id": int(message.get("turn_id") or 0),
+        }
+        message_payload = message.get("payload")
+        if isinstance(message_payload, dict):
+            item["payload"] = message_payload
+        payload.append(item)
+    return payload
+
+
+def _normalize_chat_messages(raw_messages: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_messages, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for entry in raw_messages:
+        if not isinstance(entry, dict):
+            continue
+        message = {
+            "role": str(entry.get("role", "assistant")),
+            "text": str(entry.get("text", "")),
+            "status": str(entry.get("status", "done")),
+            "turn_id": int(entry.get("turn_id") or 0),
+        }
+        payload = entry.get("payload")
+        if isinstance(payload, dict):
+            message["payload"] = payload
+        normalized.append(message)
+    return normalized[-_MAX_CHAT_SESSION_MESSAGES:]
+
+
+def _normalize_chat_session_snapshot(raw_snapshot: Any) -> dict[str, Any]:
+    snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else {}
+    context_nodes = _normalize_focus_context_nodes(snapshot.get("context_nodes"))
+    pinned_nodes = _normalize_focus_context_nodes(snapshot.get("pinned_nodes"))
+
+    selected_group_raw = snapshot.get("selected_group")
+    selected_group = str(selected_group_raw).strip() if isinstance(selected_group_raw, str) else ""
+    selected_model_raw = snapshot.get("selected_model")
+    selected_model = str(selected_model_raw).strip() if isinstance(selected_model_raw, str) else ""
+    session_environment_raw = snapshot.get("session_environment")
+    session_environment = str(session_environment_raw).strip().lower() if isinstance(session_environment_raw, str) else ""
+    prompt_override_raw = snapshot.get("prompt_override")
+    prompt_override = str(prompt_override_raw).strip() if isinstance(prompt_override_raw, str) else ""
+
+    normalized = {
+        "context_nodes": context_nodes,
+        "pinned_nodes": pinned_nodes,
+        "selected_group": selected_group or None,
+        "selected_model": selected_model or None,
+        "session_environment": session_environment or None,
+        "session_environment_auto": bool(snapshot.get("session_environment_auto", True)),
+        "prompt_override": prompt_override or None,
+        "session_parameters": _normalize_session_parameters(snapshot.get("session_parameters")),
+    }
+    return normalized
+
+
+def _normalize_chat_project_record(raw_project: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_project, dict):
+        return None
+
+    project_id = str(raw_project.get("id") or "").strip()
+    if not project_id:
+        return None
+
+    created_at = str(raw_project.get("created_at") or _now_iso())
+    updated_at = str(raw_project.get("updated_at") or created_at)
+    name = _trim_text(raw_project.get("name") or _DEFAULT_PROJECT_NAME, limit=80) or _DEFAULT_PROJECT_NAME
+    return {
+        "id": project_id,
+        "name": name,
+        "root_path": _normalize_project_root_path(raw_project.get("root_path"), project_id=project_id),
+        "created_at": created_at,
+        "updated_at": updated_at,
+    }
+
+
+def _normalize_chat_session_record(
+    raw_session: Any,
+    *,
+    default_project_id: str,
+    known_project_ids: set[str],
+) -> dict[str, Any] | None:
+    if not isinstance(raw_session, dict):
+        return None
+
+    session_id = str(raw_session.get("id") or "").strip()
+    if not session_id:
+        return None
+
+    created_at = str(raw_session.get("created_at") or _now_iso())
+    updated_at = str(raw_session.get("updated_at") or created_at)
+    raw_title = _trim_text(raw_session.get("title") or _DEFAULT_SESSION_TITLE, limit=80) or _DEFAULT_SESSION_TITLE
+    is_legacy_identifier_title = _looks_like_session_identifier_title(raw_title, session_id)
+    title = _DEFAULT_SESSION_TITLE if is_legacy_identifier_title else _normalize_session_title(raw_title)
+    auto_title = True if is_legacy_identifier_title else bool(
+        raw_session.get("auto_title", title == _DEFAULT_SESSION_TITLE)
+    )
+    project_id = str(raw_session.get("project_id") or "").strip()
+    if project_id not in known_project_ids:
+        project_id = default_project_id
+
+    try:
+        title_last_generated_turn = max(0, int(raw_session.get("title_last_generated_turn") or 0))
+    except (TypeError, ValueError):
+        title_last_generated_turn = 0
+    try:
+        title_generation_count = max(0, int(raw_session.get("title_generation_count") or 0))
+    except (TypeError, ValueError):
+        title_generation_count = 0
+    if is_legacy_identifier_title:
+        title_last_generated_turn = 0
+        title_generation_count = 0
+
+    workspace_path = str(raw_session.get("workspace_path") or "").strip() or None
+    session_slug = str(raw_session.get("session_slug") or "").strip()
+    if not session_slug and workspace_path:
+        session_slug = Path(workspace_path).name.strip()
+    if not session_slug:
+        title_slug = _slugify_session_name(title, fallback="")
+        session_slug = title_slug or session_id
+
+    return {
+        "id": session_id,
+        "project_id": project_id,
+        "title": title,
+        "session_slug": session_slug,
+        "auto_title": auto_title,
+        "title_state": _TITLE_STATE_IDLE if is_legacy_identifier_title else _normalize_title_state(raw_session.get("title_state")),
+        "title_first_intent": str(raw_session.get("title_first_intent") or "").strip() or None,
+        "title_last_generated_turn": title_last_generated_turn,
+        "title_generation_count": title_generation_count,
+        "title_last_context_key": None if is_legacy_identifier_title else (str(raw_session.get("title_last_context_key") or "").strip() or None),
+        "is_archived": bool(raw_session.get("is_archived", False)),
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "tags": _normalize_chat_session_tags(raw_session.get("tags")),
+        "workspace_path": workspace_path,
+        "snapshot": _normalize_chat_session_snapshot(raw_session.get("snapshot")),
+        "messages": _normalize_chat_messages(raw_session.get("messages")),
+    }
+
+
+def _project_map(store: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(project.get("id")): project
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip()
+    }
+
+
+def _get_store_project(store: dict[str, Any], project_id: str | None = None) -> dict[str, Any]:
+    projects = _project_map(store)
+    target_id = str(project_id or store.get("active_project_id") or "").strip()
+    if target_id and target_id in projects:
+        return projects[target_id]
+    for project in store.get("projects", []):
+        if isinstance(project, dict):
+            return project
+    fallback = _build_default_chat_project()
+    store["projects"] = [fallback]
+    store["active_project_id"] = fallback["id"]
+    return fallback
+
+
+def _ensure_project_workspace_dir(project: dict[str, Any]) -> Path:
+    root = _ensure_directory(
+        _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or uuid4().hex))
+    )
+    project["root_path"] = str(root)
+    _ensure_directory(root / _PROJECT_SESSIONS_DIRNAME)
+    return root
+
+
+def _ensure_session_workspace_dir(store: dict[str, Any], session: dict[str, Any]) -> str:
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    _ensure_project_workspace_dir(project)
+    desired_workspace = _session_workspace_path(session, project)
+    current_workspace = _resolve_filesystem_path(session.get("workspace_path"))
+    sessions_root = _project_sessions_root_path(project)
+    if (
+        current_workspace is not None
+        and current_workspace != desired_workspace
+        and _is_path_within(current_workspace, sessions_root)
+        and current_workspace.exists()
+        and not desired_workspace.exists()
+    ):
+        desired_workspace.parent.mkdir(parents=True, exist_ok=True)
+        current_workspace.rename(desired_workspace)
+    workspace = _ensure_directory(desired_workspace)
+    session["project_id"] = str(project["id"])
+    session["workspace_path"] = str(workspace)
+    return str(workspace)
+
+
+def _ensure_store_workspace_dirs(store: dict[str, Any]) -> None:
+    for project in store.get("projects", []):
+        if isinstance(project, dict):
+            _ensure_project_workspace_dir(project)
+    for session in store.get("sessions", []):
+        if isinstance(session, dict):
+            _ensure_session_workspace_dir(store, session)
+
+
+def _resolve_new_chat_session_project_id(
+    store: dict[str, Any],
+    requested_project_id: str | None = None,
+) -> str:
+    projects = _project_map(store)
+    cleaned_requested = str(requested_project_id or "").strip()
+    if cleaned_requested and cleaned_requested in projects:
+        return cleaned_requested
+
+    active_session_id = str(store.get("active_session_id") or "").strip()
+    if active_session_id:
+        active_session = next(
+            (session for session in store.get("sessions", []) if isinstance(session, dict) and session.get("id") == active_session_id),
+            None,
+        )
+        if isinstance(active_session, dict):
+            candidate_project_id = str(active_session.get("project_id") or "").strip()
+            if candidate_project_id in projects:
+                return candidate_project_id
+
+    active_project_id = str(store.get("active_project_id") or "").strip()
+    if active_project_id in projects:
+        return active_project_id
+
+    return str(_get_store_project(store).get("id"))
+
+
+def _normalize_chat_session_store(raw_store: Any) -> dict[str, Any]:
+    if not isinstance(raw_store, dict):
+        raw_store = {}
+
+    seen_project_ids: set[str] = set()
+    projects: list[dict[str, Any]] = []
+    for raw_project in raw_store.get("projects", []):
+        project = _normalize_chat_project_record(raw_project)
+        if project is None:
+            continue
+        project_id = str(project["id"])
+        if project_id in seen_project_ids:
+            continue
+        seen_project_ids.add(project_id)
+        projects.append(project)
+
+    if not projects:
+        projects.append(_build_default_chat_project())
+
+    project_ids = {str(project["id"]) for project in projects}
+    default_project_id = str(projects[0]["id"])
+
+    seen_ids: set[str] = set()
+    sessions: list[dict[str, Any]] = []
+    for raw_session in raw_store.get("sessions", []):
+        session = _normalize_chat_session_record(
+            raw_session,
+            default_project_id=default_project_id,
+            known_project_ids=project_ids,
+        )
+        if session is None:
+            continue
+        session_id = str(session["id"])
+        if session_id in seen_ids:
+            continue
+        seen_ids.add(session_id)
+        sessions.append(session)
+        if len(sessions) >= _MAX_CHAT_SESSIONS:
+            break
+
+    active_session_id = str(raw_store.get("active_session_id") or "").strip() or None
+    active_session = next((session for session in sessions if session["id"] == active_session_id), None)
+    if active_session is None or bool(active_session.get("is_archived", False)):
+        active_session_id = next(
+            (session["id"] for session in sessions if not bool(session.get("is_archived", False))),
+            None,
+        )
+
+    active_project_id = str(raw_store.get("active_project_id") or "").strip() or None
+    if active_session is None and active_session_id:
+        active_session = next((session for session in sessions if session["id"] == active_session_id), None)
+    if active_session is not None:
+        session_project_id = str(active_session.get("project_id") or "").strip()
+        if session_project_id in project_ids:
+            active_project_id = session_project_id
+    if active_project_id not in project_ids:
+        active_project_id = default_project_id
+
+    turn_seq = 0
+    for session in sessions:
+        for message in session["messages"]:
+            turn_seq = max(turn_seq, int(message.get("turn_id") or 0))
+
+    raw_turn_seq = raw_store.get("turn_seq")
+    if isinstance(raw_turn_seq, int) and raw_turn_seq > turn_seq:
+        turn_seq = raw_turn_seq
+
+    raw_version = raw_store.get("version")
+    version = int(raw_version) if isinstance(raw_version, int) else 0
+
+    store = {
+        "version": max(0, version),
+        "turn_seq": max(0, turn_seq),
+        "active_project_id": active_project_id,
+        "active_session_id": active_session_id,
+        "projects": projects,
+        "sessions": sessions,
+    }
+    _ensure_store_workspace_dirs(store)
+    return store
+
+
+def _get_chat_session_store(state: Any) -> dict[str, Any]:
+    store = getattr(state, "chat_session_store", None)
+    if isinstance(store, dict):
+        return store
+
+    raw_store: Any = None
+    memory = getattr(state, "memory", None)
+    memory_getter = getattr(memory, "get_kv", None)
+    if callable(memory_getter):
+        raw_store = memory_getter(_CHAT_SESSIONS_KV_KEY)
+        if raw_store is None:
+            raw_store = memory_getter(_LEGACY_CHAT_SESSIONS_KV_KEY)
+
+    store = _normalize_chat_session_store(raw_store)
+    state.chat_session_store = store
+    state.chat_sessions_version = int(store["version"])
+    state.chat_turn_seq = max(int(getattr(state, "chat_turn_seq", 0)), int(store["turn_seq"]))
+    state.active_chat_session_id = store["active_session_id"]
+    state.active_chat_project_id = store["active_project_id"]
+    memory_setter = getattr(memory, "set_kv", None)
+    if callable(memory_setter):
+        memory_setter(_CHAT_SESSIONS_KV_KEY, store)
+    if not hasattr(state, "chat_version"):
+        state.chat_version = 0
+    return store
+
+
+def _persist_chat_session_store(state: Any) -> None:
+    store = _get_chat_session_store(state)
+    _ensure_store_workspace_dirs(store)
+    state.chat_sessions_version = int(store["version"])
+    state.chat_turn_seq = max(int(getattr(state, "chat_turn_seq", 0)), int(store["turn_seq"]))
+    state.active_chat_session_id = store["active_session_id"]
+    state.active_chat_project_id = store["active_project_id"]
+
+    memory = getattr(state, "memory", None)
+    memory_setter = getattr(memory, "set_kv", None)
+    if callable(memory_setter):
+        memory_setter(_CHAT_SESSIONS_KV_KEY, store)
+
+
+def _touch_chat_sessions(state: Any) -> None:
+    store = _get_chat_session_store(state)
+    store["version"] = int(store.get("version", 0)) + 1
+    state.chat_sessions_version = int(store["version"])
+
+
+def _find_chat_session(
+    state: Any,
+    session_id: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    store = _get_chat_session_store(state)
+    target_id = str(session_id or store.get("active_session_id") or "").strip()
+    if not target_id:
+        return None, store
+    for session in store["sessions"]:
+        if session["id"] == target_id:
+            return session, store
+    return None, store
+
+
+def _build_chat_session_snapshot(
+    metadata: dict[str, Any] | None,
+    *,
+    selected_model: str | None = None,
+) -> dict[str, Any]:
+    normalized_metadata = metadata if isinstance(metadata, dict) else {}
+    selected_group_raw = (
+        normalized_metadata.get("selected_group")
+        or normalized_metadata.get("project_label")
+        or normalized_metadata.get("group_label")
+    )
+    snapshot = {
+        "context_nodes": _normalize_focus_context_nodes(normalized_metadata.get("context_nodes")),
+        "pinned_nodes": _normalize_focus_context_nodes(normalized_metadata.get("pinned_nodes")),
+        "selected_group": str(selected_group_raw).strip() if isinstance(selected_group_raw, str) else None,
+        "selected_model": str(selected_model).strip() if isinstance(selected_model, str) and selected_model.strip() else None,
+        "session_environment": str(normalized_metadata.get("session_environment") or "").strip().lower() or None,
+        "session_environment_auto": bool(normalized_metadata.get("session_environment_auto", True)),
+        "prompt_override": str(normalized_metadata.get("prompt_override") or "").strip() or None,
+        "session_parameters": _normalize_session_parameters(normalized_metadata.get("session_parameters")),
+    }
+    return _normalize_chat_session_snapshot(snapshot)
+
+
+def _serialize_chat_session_snapshot(session: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(session, dict):
+        return _normalize_chat_session_snapshot({})
+    return _normalize_chat_session_snapshot(session.get("snapshot"))
+
+
+def _build_chat_session_preview(messages: list[dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        text = _trim_text(message.get("text") or "", limit=96)
+        if text:
+            return text
+    return ""
+
+
+def _serialize_chat_project_summary(project: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(project.get("id") or "")
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
+    project_sessions = [
+        session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict) and str(session.get("project_id") or "") == project_id
+    ]
+    latest_session_update = max(
+        (
+            str(session.get("updated_at") or session.get("created_at") or "")
+            for session in project_sessions
+            if isinstance(session, dict)
+        ),
+        default="",
+    )
+    sessions_root = _project_sessions_root_path(project)
+    return {
+        "id": project_id,
+        "name": project_name,
+        "group_label": _build_project_group_label(project_name),
+        "root_path": str(project.get("root_path") or ""),
+        "sessions_path": str(sessions_root),
+        "created_at": str(project.get("created_at") or _now_iso()),
+        "updated_at": max(str(project.get("updated_at") or _now_iso()), latest_session_update),
+        "session_count": len(project_sessions),
+        "active": str(store.get("active_project_id") or "") == project_id,
+    }
+
+
+def _serialize_chat_session_summary(session: dict[str, Any], store: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _serialize_chat_session_snapshot(session)
+    messages = _normalize_chat_messages(session.get("messages"))
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    workspace_path = _ensure_session_workspace_dir(store, session)
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
+    project_group_label = _build_project_group_label(project_name)
+    return {
+        "id": session["id"],
+        "project_id": str(session.get("project_id") or project.get("id") or ""),
+        "title": str(session.get("title") or _DEFAULT_SESSION_TITLE),
+        "session_slug": _get_session_slug(session),
+        "auto_title": bool(session.get("auto_title", False)),
+        "title_state": _normalize_title_state(session.get("title_state")),
+        "is_archived": bool(session.get("is_archived", False)),
+        "created_at": str(session.get("created_at") or _now_iso()),
+        "updated_at": str(session.get("updated_at") or _now_iso()),
+        "tags": _normalize_chat_session_tags(session.get("tags")),
+        "project_label": project_name,
+        "project_group_label": project_group_label,
+        "session_group_label": _build_session_group_label(project_name, _get_session_slug(session)),
+        "workspace_path": workspace_path,
+        "node_count": len(snapshot.get("context_nodes") or []),
+        "preview": _build_chat_session_preview(messages),
+        "message_count": len(messages),
+        "snapshot": snapshot,
+    }
+
+
+def _serialize_chat_session_detail(session: dict[str, Any], store: dict[str, Any], state: Any | None = None) -> dict[str, Any]:
+    detail = _serialize_chat_session_summary(session, store)
+    detail["version"] = int(getattr(state, "chat_version", 0)) if state is not None else 0
+    detail["messages"] = serialize_chat_history(_normalize_chat_messages(session.get("messages")))
+    return detail
+
+
+def list_chat_projects(state: Any) -> list[dict[str, Any]]:
+    store = _get_chat_session_store(state)
+    projects = sorted(
+        store["projects"],
+        key=lambda project: _serialize_chat_project_summary(project, store)["updated_at"],
+        reverse=True,
+    )
+    return [_serialize_chat_project_summary(project, store) for project in projects]
+
+
+def list_chat_sessions(state: Any) -> list[dict[str, Any]]:
+    store = _get_chat_session_store(state)
+    sessions = sorted(
+        store["sessions"],
+        key=lambda session: str(session.get("updated_at") or session.get("created_at") or ""),
+        reverse=True,
+    )
+    return [_serialize_chat_session_summary(session, store) for session in sessions]
+
+
+def get_active_chat_project_id(state: Any) -> str | None:
+    store = _get_chat_session_store(state)
+    active_project_id = store.get("active_project_id")
+    return str(active_project_id) if isinstance(active_project_id, str) and active_project_id else None
+
+
+def get_active_chat_session_id(state: Any) -> str | None:
+    store = _get_chat_session_store(state)
+    active_session_id = store.get("active_session_id")
+    return str(active_session_id) if isinstance(active_session_id, str) and active_session_id else None
+
+
+def get_chat_session_detail(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def get_chat_session_batch_progress(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    project_name = str(project.get("name") or _DEFAULT_PROJECT_NAME)
+    session_group_label = _build_session_group_label(project_name, _get_session_slug(session))
+    group_payload = inspect_group(session_group_label, limit=500)
+    if not isinstance(group_payload, dict):
+        return None
+
+    raw_nodes = group_payload.get("nodes")
+    nodes = raw_nodes if isinstance(raw_nodes, list) else []
+    return _summarize_chat_session_batch_progress(
+        session_id=str(session.get("id") or session_id),
+        title=str(session.get("title") or _DEFAULT_SESSION_TITLE),
+        session_group_label=session_group_label,
+        nodes=[entry for entry in nodes if isinstance(entry, dict)],
+    )
+
+
+def get_chat_session_workspace_path(state: Any, session_id: str | None = None) -> str | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    return _ensure_session_workspace_dir(store, session)
+
+
+def _build_worker_workspace_headers(state: Any, session_id: str | None = None) -> dict[str, str] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    workspace_path = _ensure_session_workspace_dir(store, session)
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    return {
+        WORKSPACE_PATH_HEADER: workspace_path,
+        SESSION_ID_HEADER: str(session.get("id") or ""),
+        PROJECT_ID_HEADER: str(project.get("id") or ""),
+    }
+
+
+def _resolve_workspace_target_path(workspace_root: Path, relative_path: str | None = None) -> Path:
+    target = workspace_root
+    cleaned_relative = str(relative_path or "").strip().strip("/")
+    if cleaned_relative:
+        target = (workspace_root / cleaned_relative).resolve()
+        try:
+            target.relative_to(workspace_root)
+        except ValueError as exc:
+            raise ValueError("Workspace path escapes the session root") from exc
+    return target
+
+
+def list_chat_session_workspace_files(
+    state: Any,
+    session_id: str,
+    *,
+    relative_path: str | None = None,
+) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    workspace_root = Path(_ensure_session_workspace_dir(store, session))
+    target = _resolve_workspace_target_path(workspace_root, relative_path=relative_path)
+    if target.exists() and not target.is_dir():
+        raise ValueError("Requested workspace path is a file")
+    target.mkdir(parents=True, exist_ok=True)
+
+    entries: list[dict[str, Any]] = []
+    for child in sorted(target.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))[:200]:
+        stat = child.stat()
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "relative_path": str(child.relative_to(workspace_root)),
+                "is_dir": child.is_dir(),
+                "size": None if child.is_dir() else int(stat.st_size),
+                "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+
+    return {
+        "session_id": str(session["id"]),
+        "project_id": str(project.get("id") or ""),
+        "project_name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "workspace_path": str(workspace_root),
+        "relative_path": str(target.relative_to(workspace_root)) if target != workspace_root else "",
+        "entries": entries,
+    }
+
+
+def list_chat_project_workspace_files(
+    state: Any,
+    project_id: str,
+    *,
+    relative_path: str | None = None,
+) -> dict[str, Any] | None:
+    _session, store = _find_chat_session(state, None)
+    project = _get_store_project(store, project_id)
+    if project is None:
+        return None
+
+    workspace_root = _ensure_project_workspace_dir(project)
+    target = _resolve_workspace_target_path(workspace_root, relative_path=relative_path)
+    if target.exists() and not target.is_dir():
+        raise ValueError("Requested workspace path is a file")
+    target.mkdir(parents=True, exist_ok=True)
+
+    entries: list[dict[str, Any]] = []
+    for child in sorted(target.iterdir(), key=lambda path: (not path.is_dir(), path.name.lower()))[:200]:
+        stat = child.stat()
+        entries.append(
+            {
+                "name": child.name,
+                "path": str(child),
+                "relative_path": str(child.relative_to(workspace_root)),
+                "is_dir": child.is_dir(),
+                "size": None if child.is_dir() else int(stat.st_size),
+                "updated_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+
+    return {
+        "project_id": str(project.get("id") or ""),
+        "project_name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "workspace_path": str(workspace_root),
+        "relative_path": str(target.relative_to(workspace_root)) if target != workspace_root else "",
+        "entries": entries,
+    }
+
+
+def get_chat_snapshot(state: Any) -> dict[str, Any]:
+    session, _store = _find_chat_session(state, None)
+    return {
+        "version": int(getattr(state, "chat_version", 0)),
+        "session_id": session["id"] if isinstance(session, dict) else None,
+        "messages": serialize_chat_history(session.get("messages", []) if isinstance(session, dict) else []),
+        "snapshot": _serialize_chat_session_snapshot(session),
+    }
+
+
+def archive_chat_session(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    changed = False
+    if not bool(session.get("is_archived", False)):
+        session["is_archived"] = True
+        changed = True
+
+    if store.get("active_session_id") == session["id"]:
+        store["active_session_id"] = None
+        state.active_chat_session_id = None
+        touch_chat(state)
+        changed = True
+
+    if not changed:
+        return _serialize_chat_session_detail(session, store, state)
+
+    session["updated_at"] = _now_iso()
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def create_chat_project(
+    state: Any,
+    *,
+    name: str,
+    root_path: str | None = None,
+    activate: bool = True,
+) -> dict[str, Any]:
+    cleaned_name = _trim_text(name or "", limit=80)
+    if not cleaned_name:
+        raise ValueError("Project name is required")
+
+    store = _get_chat_session_store(state)
+    project_id = uuid4().hex
+    normalized_root_path = _validate_new_project_root_path(root_path, project_id=project_id)
+    if any(str(project.get("root_path") or "") == normalized_root_path for project in store.get("projects", [])):
+        raise ValueError("A project with the same disk path already exists")
+
+    now = _now_iso()
+    project = {
+        "id": project_id,
+        "name": cleaned_name,
+        "root_path": normalized_root_path,
+        "created_at": now,
+        "updated_at": now,
+    }
+    store["projects"].append(project)
+    _ensure_project_workspace_dir(project)
+    if activate:
+        store["active_project_id"] = project_id
+        state.active_chat_project_id = project_id
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_project_summary(project, store)
+
+
+def create_chat_session(
+    state: Any,
+    *,
+    title: str | None = None,
+    snapshot: dict[str, Any] | None = None,
+    activate: bool = True,
+    archive_session_id: str | None = None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    store = _get_chat_session_store(state)
+    if isinstance(archive_session_id, str) and archive_session_id.strip():
+        archive_chat_session(state, archive_session_id.strip())
+        store = _get_chat_session_store(state)
+    now = _now_iso()
+    cleaned_title = _sanitize_session_title_text(title or "")[:80].strip()
+    resolved_project_id = _resolve_new_chat_session_project_id(store, requested_project_id=project_id)
+    session_id = uuid4().hex
+    session = {
+        "id": session_id,
+        "project_id": resolved_project_id,
+        "title": cleaned_title or _DEFAULT_SESSION_TITLE,
+        "session_slug": _resolve_unique_session_slug(
+            store,
+            resolved_project_id,
+            _slugify_session_name(cleaned_title or _DEFAULT_SESSION_TITLE, fallback="new-conversation"),
+            session_id=session_id,
+        ),
+        "auto_title": not bool(cleaned_title),
+        "title_state": _TITLE_STATE_READY if cleaned_title else _TITLE_STATE_IDLE,
+        "title_first_intent": None,
+        "title_last_generated_turn": 0,
+        "title_generation_count": 0,
+        "title_last_context_key": None,
+        "is_archived": False,
+        "created_at": now,
+        "updated_at": now,
+        "tags": [],
+        "workspace_path": None,
+        "snapshot": _normalize_chat_session_snapshot(snapshot),
+        "messages": [],
+    }
+    store["sessions"].append(session)
+    store["sessions"] = store["sessions"][-_MAX_CHAT_SESSIONS:]
+    _ensure_session_workspace_dir(store, session)
+    if activate:
+        store["active_session_id"] = session["id"]
+        store["active_project_id"] = resolved_project_id
+        state.active_chat_session_id = session["id"]
+        state.active_chat_project_id = resolved_project_id
+        touch_chat(state)
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def activate_chat_session(state: Any, session_id: str) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    changed = False
+    if bool(session.get("is_archived", False)):
+        session["is_archived"] = False
+        changed = True
+    if store.get("active_session_id") != session["id"]:
+        store["active_session_id"] = session["id"]
+        store["active_project_id"] = str(session.get("project_id") or store.get("active_project_id") or "")
+        state.active_chat_session_id = session["id"]
+        state.active_chat_project_id = store["active_project_id"]
+        touch_chat(state)
+        changed = True
+    if changed:
+        session["updated_at"] = _now_iso()
+        _touch_chat_sessions(state)
+        _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def update_chat_session(
+    state: Any,
+    session_id: str,
+    *,
+    title: str | object = _UNSET,
+    tags: list[str] | object = _UNSET,
+    snapshot: dict[str, Any] | object = _UNSET,
+) -> dict[str, Any] | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+
+    changed = False
+    if title is not _UNSET:
+        old_slug = _get_session_slug(session)
+        cleaned_title = _sanitize_session_title_text(title or "")[:80].strip()
+        session["title"] = cleaned_title or _DEFAULT_SESSION_TITLE
+        session["session_slug"] = _desired_session_slug(store, session, cleaned_title or _DEFAULT_SESSION_TITLE)
+        session["auto_title"] = not bool(cleaned_title)
+        session["title_state"] = _TITLE_STATE_READY if cleaned_title else _TITLE_STATE_IDLE
+        if not cleaned_title:
+            session["title_generation_count"] = 0
+            session["title_last_generated_turn"] = 0
+            session["title_last_context_key"] = None
+        _ensure_session_workspace_dir(store, session)
+        _rename_session_group_label_if_needed(store, session, old_slug)
+        changed = True
+    if tags is not _UNSET:
+        session["tags"] = _normalize_chat_session_tags(tags)
+        changed = True
+    if snapshot is not _UNSET:
+        session["snapshot"] = _normalize_chat_session_snapshot(snapshot)
+        changed = True
+
+    if not changed:
+        return _serialize_chat_session_detail(session, store, state)
+
+    session["updated_at"] = _now_iso()
+    _touch_chat_sessions(state)
+    if get_active_chat_session_id(state) == session["id"]:
+        touch_chat(state)
+    _persist_chat_session_store(state)
+    return _serialize_chat_session_detail(session, store, state)
+
+
+def _normalize_identifier_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+    return normalized
+
+
+def _reconcile_active_chat_targets(state: Any, store: dict[str, Any]) -> None:
+    project_ids = {
+        str(project.get("id") or "").strip()
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip()
+    }
+    sessions = [
+        session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict)
+    ]
+    sessions_by_recent = sorted(
+        sessions,
+        key=lambda session: str(session.get("updated_at") or session.get("created_at") or ""),
+        reverse=True,
+    )
+
+    active_session_id = str(store.get("active_session_id") or "").strip()
+    active_session = next(
+        (
+            session
+            for session in sessions_by_recent
+            if session.get("id") == active_session_id and not bool(session.get("is_archived", False))
+        ),
+        None,
+    )
+    if active_session is None:
+        active_session = next(
+            (session for session in sessions_by_recent if not bool(session.get("is_archived", False))),
+            None,
+        )
+    store["active_session_id"] = str(active_session.get("id") or "") if isinstance(active_session, dict) else None
+
+    if isinstance(active_session, dict):
+        active_project_id = str(active_session.get("project_id") or "").strip()
+        store["active_project_id"] = active_project_id if active_project_id in project_ids else None
+    else:
+        current_project_id = str(store.get("active_project_id") or "").strip()
+        if current_project_id in project_ids:
+            store["active_project_id"] = current_project_id
+        else:
+            projects_by_recent = sorted(
+                (
+                    project
+                    for project in store.get("projects", [])
+                    if isinstance(project, dict) and str(project.get("id") or "").strip()
+                ),
+                key=lambda project: max(
+                    str(project.get("updated_at") or project.get("created_at") or ""),
+                    max(
+                        (
+                            str(session.get("updated_at") or session.get("created_at") or "")
+                            for session in sessions
+                            if str(session.get("project_id") or "").strip() == str(project.get("id") or "").strip()
+                        ),
+                        default="",
+                    ),
+                ),
+                reverse=True,
+            )
+            store["active_project_id"] = (
+                str(projects_by_recent[0].get("id") or "").strip()
+                if projects_by_recent
+                else None
+            )
+
+    state.active_chat_session_id = store.get("active_session_id")
+    state.active_chat_project_id = store.get("active_project_id")
+
+
+def delete_chat_items(
+    state: Any,
+    *,
+    project_ids: list[str] | None = None,
+    session_ids: list[str] | None = None,
+) -> dict[str, list[str]]:
+    normalized_project_ids = set(_normalize_identifier_list(project_ids))
+    normalized_session_ids = set(_normalize_identifier_list(session_ids))
+    if not normalized_project_ids and not normalized_session_ids:
+        return {"deleted_project_ids": [], "deleted_session_ids": []}
+
+    store = _get_chat_session_store(state)
+    existing_projects = {
+        str(project.get("id") or "").strip(): project
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip()
+    }
+    existing_sessions = {
+        str(session.get("id") or "").strip(): session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict) and str(session.get("id") or "").strip()
+    }
+
+    matched_project_ids = {project_id for project_id in normalized_project_ids if project_id in existing_projects}
+    matched_session_ids = {session_id for session_id in normalized_session_ids if session_id in existing_sessions}
+    matched_session_ids.update(
+        str(session.get("id") or "").strip()
+        for session in existing_sessions.values()
+        if str(session.get("project_id") or "").strip() in matched_project_ids
+    )
+
+    if not matched_project_ids and not matched_session_ids:
+        return {"deleted_project_ids": [], "deleted_session_ids": []}
+
+    projects_by_id = existing_projects
+    sessions_by_id = existing_sessions
+
+    for project_id in matched_project_ids:
+        project = projects_by_id.get(project_id)
+        if not isinstance(project, dict):
+            continue
+        _cleanup_project_workspace_dir(project)
+
+    for session_id in matched_session_ids:
+        session = sessions_by_id.get(session_id)
+        if not isinstance(session, dict):
+            continue
+        project_id = str(session.get("project_id") or "").strip()
+        if project_id in matched_project_ids:
+            continue
+        project = projects_by_id.get(project_id)
+        if isinstance(project, dict):
+            _cleanup_session_workspace_dir(session, project)
+
+    store["sessions"] = [
+        session
+        for session in store.get("sessions", [])
+        if isinstance(session, dict) and str(session.get("id") or "").strip() not in matched_session_ids
+    ]
+    store["projects"] = [
+        project
+        for project in store.get("projects", [])
+        if isinstance(project, dict) and str(project.get("id") or "").strip() not in matched_project_ids
+    ]
+
+    deleted_project_ids = sorted(matched_project_ids)
+    deleted_session_ids = sorted(matched_session_ids)
+    if not deleted_project_ids and not deleted_session_ids:
+        return {"deleted_project_ids": [], "deleted_session_ids": []}
+
+    _reconcile_active_chat_targets(state, store)
+    _touch_chat_sessions(state)
+    touch_chat(state)
+    _persist_chat_session_store(state)
+    return {
+        "deleted_project_ids": deleted_project_ids,
+        "deleted_session_ids": deleted_session_ids,
+    }
+
+
+def get_chat_history(state: Any, session_id: str | None = None) -> list[dict[str, Any]]:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        state.active_chat_session_id = store.get("active_session_id")
+        if not hasattr(state, "chat_version"):
+            state.chat_version = 0
+        legacy_history = getattr(state, "chat_history", None)
+        if isinstance(legacy_history, list):
+            return legacy_history
+        return []
+    if not hasattr(state, "chat_version"):
+        state.chat_version = 0
+    return session["messages"]
+
+
+def touch_chat(state: Any) -> None:
+    state.chat_version = getattr(state, "chat_version", 0) + 1
+
+
+def _ensure_chat_lock(state: Any) -> asyncio.Lock:
+    lock = getattr(state, "chat_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        state.chat_lock = lock
+    return lock
+
+
+def _ensure_chat_task_registry(state: Any) -> dict[int, asyncio.Task]:
+    tasks = getattr(state, "chat_turn_tasks", None)
+    if tasks is None:
+        tasks = {}
+        state.chat_turn_tasks = tasks
+    return tasks
+
+
+def _is_status_only_text(text: str) -> bool:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    return all(
+        line.lower().startswith("thinking:")
+        or line.lower().startswith("running:")
+        or line.lower().startswith("step:")
+        or line.lower().startswith("⚙️ [step]")
+        for line in lines
+    )
+
+
+def _merge_message_payload(
+    existing_payload: dict[str, Any] | None,
+    incoming_payload: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(existing_payload, dict):
+        return incoming_payload
+    if not isinstance(incoming_payload, dict):
+        return existing_payload
+
+    merged = dict(existing_payload)
+    for key, value in incoming_payload.items():
+        if key == "tool_calls" and isinstance(merged.get("tool_calls"), list) and isinstance(value, list):
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for entry in [*merged["tool_calls"], *value]:
+                cleaned = str(entry).strip()
+                if not cleaned or cleaned in seen:
+                    continue
+                seen.add(cleaned)
+                deduped.append(cleaned)
+            merged["tool_calls"] = deduped
+            continue
+        if (
+            key == "status"
+            and isinstance(merged.get("status"), dict)
+            and isinstance(value, dict)
+        ):
+            merged_status = dict(merged["status"])
+            for status_key, status_value in value.items():
+                if (
+                    status_key == "steps"
+                    and isinstance(merged_status.get("steps"), list)
+                    and isinstance(status_value, list)
+                ):
+                    deduped_steps: list[str] = []
+                    seen_steps: set[str] = set()
+                    for step in [*merged_status["steps"], *status_value]:
+                        step_text = str(step).strip()
+                        if not step_text or step_text in seen_steps:
+                            continue
+                        seen_steps.add(step_text)
+                        deduped_steps.append(step_text)
+                    merged_status["steps"] = deduped_steps
+                else:
+                    merged_status[status_key] = status_value
+            merged["status"] = merged_status
+            continue
+        merged[key] = value
+    return merged
+
+
+def _update_assistant_message(
+    state: Any,
+    turn_id: int,
+    text: str | None,
+    status: str = "thinking",
+    *,
+    session_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    chat_history = get_chat_history(state, session_id=session_id)
+    for msg in reversed(chat_history):
+        if msg.get("role") == "assistant" and msg.get("turn_id") == turn_id:
+            previous_text = str(msg.get("text") or "")
+            if text is None:
+                next_text = previous_text
+            else:
+                incoming_text = str(text)
+                if incoming_text.strip() and previous_text.strip():
+                    if _is_status_only_text(incoming_text) and not _is_status_only_text(previous_text):
+                        next_text = previous_text
+                    else:
+                        next_text = incoming_text
+                elif not incoming_text.strip() and previous_text.strip():
+                    next_text = previous_text
+                else:
+                    next_text = incoming_text
+
+            msg["text"] = next_text
+            msg["status"] = status
+            if isinstance(payload, dict):
+                merged_payload = _merge_message_payload(
+                    msg.get("payload") if isinstance(msg.get("payload"), dict) else None,
+                    payload,
+                )
+                if isinstance(merged_payload, dict):
+                    msg["payload"] = merged_payload
+            touch_chat(state)
+            return
+    logger.warning(log_event("aiida.chat_turn.message_update_missed", turn_id=turn_id, status=status))
+
+
+def _coerce_positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            parsed = int(stripped)
+            return parsed if parsed > 0 else None
+    return None
+
+
+def _normalize_focus_context_nodes(raw_nodes: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_nodes, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for entry in raw_nodes:
+        if not isinstance(entry, dict):
+            continue
+        pk = _coerce_positive_int(entry.get("pk"))
+        if pk is None or pk in seen:
+            continue
+        seen.add(pk)
+
+        label_raw = entry.get("label")
+        label = str(label_raw).strip() if isinstance(label_raw, str) else ""
+        node_type_raw = entry.get("node_type")
+        node_type = str(node_type_raw).strip() if isinstance(node_type_raw, str) else ""
+        formula_raw = entry.get("formula")
+        formula = str(formula_raw).strip() if isinstance(formula_raw, str) else ""
+        normalized.append(
+            {
+                "pk": pk,
+                "label": label or f"#{pk}",
+                "formula": formula or None,
+                "node_type": node_type or "Unknown",
+            }
+        )
+    return normalized
+
+
+def _normalize_session_parameters(raw_parameters: Any) -> list[dict[str, str]]:
+    values = raw_parameters if isinstance(raw_parameters, list) else []
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in values:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key") or "").strip()
+        value = str(entry.get("value") or "").strip()
+        if not key or not value:
+            continue
+        lowered = key.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append({"key": key, "value": value})
+    return normalized
+
+
+def _build_user_message_payload(
+    metadata: dict[str, Any] | None,
+    context_pks: list[int],
+) -> dict[str, Any] | None:
+    payload: dict[str, Any] = {}
+    normalized_pks = normalize_context_node_ids(context_pks)
+    if normalized_pks:
+        payload["context_pks"] = normalized_pks
+
+    context_nodes = _normalize_focus_context_nodes((metadata or {}).get("context_nodes"))
+    if context_nodes:
+        payload["context_nodes"] = context_nodes
+    pinned_nodes = _normalize_focus_context_nodes((metadata or {}).get("pinned_nodes"))
+    if pinned_nodes:
+        payload["pinned_nodes"] = pinned_nodes
+    session_environment = str((metadata or {}).get("session_environment") or "").strip().lower()
+    if session_environment:
+        payload["session_environment"] = session_environment
+    prompt_override = str((metadata or {}).get("prompt_override") or "").strip()
+    if prompt_override:
+        payload["prompt_override"] = prompt_override
+    session_parameters = _normalize_session_parameters((metadata or {}).get("session_parameters"))
+    if session_parameters:
+        payload["session_parameters"] = session_parameters
+
+    return payload or None
+
+
+def _extract_submission_inputs(draft: dict[str, Any]) -> dict[str, Any]:
+    request_wrapper_keys = {
+        "workchain",
+        "workchain_label",
+        "workchain_entry_point",
+        "entry_point",
+        "structure_pk",
+        "code",
+        "protocol",
+        "overrides",
+    }
+    visited: set[int] = set()
+
+    def unwrap(node: Any, depth: int = 0) -> dict[str, Any] | None:
+        if not isinstance(node, dict) or depth > 8:
+            return None
+        marker = id(node)
+        if marker in visited:
+            return None
+        visited.add(marker)
+
+        direct_inputs = node.get("inputs")
+        if isinstance(direct_inputs, dict):
+            nested_inputs = unwrap(direct_inputs, depth + 1)
+            return nested_inputs if isinstance(nested_inputs, dict) else direct_inputs
+
+        builder_inputs = node.get("builder_inputs")
+        if isinstance(builder_inputs, dict):
+            nested_builder_inputs = unwrap(builder_inputs, depth + 1)
+            return nested_builder_inputs if isinstance(nested_builder_inputs, dict) else builder_inputs
+
+        for key in ("builder", "draft", "submission", "payload", "result"):
+            nested = node.get(key)
+            if not isinstance(nested, dict):
+                continue
+            extracted = unwrap(nested, depth + 1)
+            if isinstance(extracted, dict):
+                return extracted
+
+        has_wrapper_markers = any(key in node for key in request_wrapper_keys)
+        if has_wrapper_markers:
+            namespace_like = any(
+                isinstance(value, dict) and key not in request_wrapper_keys
+                for key, value in node.items()
+            )
+            if not namespace_like:
+                return None
+
+        return node
+
+    extracted = unwrap(draft)
+    return extracted if isinstance(extracted, dict) else {}
+
+
+def _find_first_named_value(payload: Any, candidate_keys: set[str]) -> Any:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            lowered = str(key).strip().lower()
+            if lowered in candidate_keys and value not in (None, "", []):
+                return value
+            nested = _find_first_named_value(value, candidate_keys)
+            if nested is not None:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = _find_first_named_value(item, candidate_keys)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _looks_like_code_key(key: Any) -> bool:
+    lowered = str(key).strip().lower()
+    return lowered in {"code", "code_label", "codes"} or lowered.endswith("_code")
+
+
+def _find_first_matching_value(payload: Any, predicate: Any) -> Any:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if predicate(str(key), value) and value not in (None, "", [], {}):
+                return value
+            nested = _find_first_matching_value(value, predicate)
+            if nested is not None:
+                return nested
+    elif isinstance(payload, list):
+        for item in payload:
+            nested = _find_first_matching_value(item, predicate)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _is_node_metadata_envelope(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    lowered_keys = {str(key).strip().lower() for key in value.keys() if str(key).strip()}
+    if not lowered_keys:
+        return False
+    if {"pk", "uuid"} & lowered_keys:
+        return True
+    if "type" in lowered_keys and "value" in lowered_keys:
+        return True
+    return bool({"node_type", "full_type"} & lowered_keys)
+
+
+def _coerce_node_envelope_value(value: dict[str, Any]) -> Any:
+    for candidate_key in ("value", "payload", "label", "name", "full_label", "code", "family"):
+        if candidate_key not in value:
+            continue
+        candidate = value.get(candidate_key)
+        if candidate is None:
+            continue
+        if isinstance(candidate, str) and not candidate.strip():
+            continue
+        return candidate
+    return value
+
+
+def _flatten_input_values(payload: Any, *, prefix: str = "", out: dict[str, Any] | None = None) -> dict[str, Any]:
+    flattened = out if isinstance(out, dict) else {}
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_text = str(key).strip()
+            if not key_text:
+                continue
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if _is_node_metadata_envelope(value):
+                flattened[path] = _coerce_node_envelope_value(value)
+                continue
+            if isinstance(value, dict):
+                _flatten_input_values(value, prefix=path, out=flattened)
+                continue
+            flattened[path] = value
+        return flattened
+    if prefix:
+        flattened[prefix] = payload
+    return flattened
+
+
+def _extract_target_computer(draft: dict[str, Any]) -> str | None:
+    value = _find_first_named_value(
+        draft,
+        {"computer", "computer_label", "computer_name", "target_computer"},
+    )
+    if isinstance(value, dict):
+        for key in ("label", "name", "computer_label", "computer_name"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+        pk = _coerce_positive_int(value.get("pk"))
+        return f"PK #{pk}" if pk else None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+    return None
+
+
+def _extract_process_label(draft: dict[str, Any]) -> str:
+    value = _find_first_named_value(
+        draft,
+        {
+            "process_label",
+            "workchain",
+            "workchain_label",
+            "entry_point",
+            "workflow",
+            "workflow_label",
+        },
+    )
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return cleaned
+    return "AiiDA Workflow"
+
+
+def _extract_parallel_settings(draft: dict[str, Any]) -> dict[str, Any]:
+    settings: dict[str, Any] = {}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                lowered = str(key).strip().lower()
+                if lowered in _KNOWN_PARALLEL_KEYS and lowered not in settings:
+                    settings[lowered] = value
+                if isinstance(value, (dict, list)):
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(draft)
+    return settings
+
+
+def _is_empty_submission_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) == 0
+    return False
+
+
+def _normalize_primary_input_field(label: str, value: Any) -> dict[str, Any] | None:
+    if _is_empty_submission_value(value):
+        return None
+
+    field: dict[str, Any] = {"label": label}
+    if isinstance(value, dict):
+        pk = _coerce_positive_int(value.get("pk") or value.get("structure_pk") or value.get("code_pk"))
+        display: str | None = None
+        for key in ("label", "name", "value", "formula", "code_label", "family"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                display = candidate.strip()
+                break
+        if display is None and pk is not None:
+            display = f"PK #{pk}"
+        if display is None:
+            display = json.dumps(value, ensure_ascii=False)
+        field["value"] = display
+        if pk is not None:
+            field["pk"] = pk
+        return field
+
+    if isinstance(value, list):
+        preview = ", ".join(str(item) for item in value[:4])
+        suffix = " ..." if len(value) > 4 else ""
+        field["value"] = preview + suffix
+        return field
+
+    scalar_pk = _coerce_positive_int(value)
+    if scalar_pk is not None and label.lower() == "structure":
+        field["value"] = f"PK #{scalar_pk}"
+        field["pk"] = scalar_pk
+        return field
+
+    field["value"] = str(value)
+    return field
+
+
+def _extract_primary_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    primary_inputs: dict[str, Any] = {}
+
+    code_value = _find_first_matching_value(
+        inputs,
+        lambda key, _value: _looks_like_code_key(key),
+    )
+    code_field = _normalize_primary_input_field("Code", code_value)
+    if isinstance(code_field, dict):
+        primary_inputs["code"] = code_field
+
+    structure_value = _find_first_named_value(
+        inputs,
+        {"structure", "structure_pk", "structure_id"},
+    )
+    structure_field = _normalize_primary_input_field("Structure", structure_value)
+    if isinstance(structure_field, dict):
+        primary_inputs["structure"] = structure_field
+
+    pseudos_value = _find_first_named_value(
+        inputs,
+        {"pseudos", "pseudo", "pseudopotentials", "pseudo_family", "pseudo_family_label"},
+    )
+    pseudos_field = _normalize_primary_input_field("Pseudopotentials", pseudos_value)
+    if isinstance(pseudos_field, dict):
+        primary_inputs["pseudos"] = pseudos_field
+
+    return primary_inputs
+
+
+def _is_default_advanced_setting(key: str, value: Any) -> bool:
+    lowered = key.strip().lower()
+    if lowered in {
+        "num_machines",
+        "num_mpiprocs_per_machine",
+        "tot_num_mpiprocs",
+        "num_cores_per_machine",
+        "num_cores_per_mpiproc",
+        "npool",
+        "nk",
+        "ntg",
+        "ndiag",
+    }:
+        parsed = _coerce_positive_int(value)
+        return parsed == 1
+    if lowered == "withmpi":
+        return value is True
+    if lowered == "protocol":
+        return str(value).strip().lower() in {"default", "moderate"}
+    return False
+
+
+def _should_include_advanced_setting(path: str, value: Any) -> bool:
+    if _is_empty_submission_value(value):
+        return False
+    if _is_node_metadata_envelope(value):
+        return _coerce_node_envelope_value(value) is not value and not _is_empty_submission_value(_coerce_node_envelope_value(value))
+    lowered_path = str(path).strip().lower()
+    if not lowered_path or lowered_path.startswith("metadata."):
+        return False
+    segments = [segment for segment in lowered_path.split(".") if segment]
+    if not segments:
+        return False
+    leaf = segments[-1]
+    if leaf in {"pk", "uuid"}:
+        return False
+    if any(_looks_like_code_key(segment) for segment in segments):
+        return False
+    if any(
+        segment in {"structure", "structure_pk", "structure_id", "computer", "computer_label", "computer_name"}
+        for segment in segments
+    ):
+        return False
+    if leaf in {"process_label", "workchain", "workchain_label", "entry_point", "workflow", "workflow_label"}:
+        return False
+    return not _is_default_advanced_setting(leaf, value)
+
+
+def _collect_advanced_settings(payload: Any) -> dict[str, Any]:
+    settings: dict[str, Any] = {}
+    for path, value in _flatten_input_values(payload).items():
+        lowered_path = str(path).strip().lower()
+        if not _should_include_advanced_setting(lowered_path, value):
+            continue
+        leaf = lowered_path.rsplit(".", 1)[-1]
+        target_key = leaf if leaf and leaf not in settings else lowered_path
+        if target_key in settings:
+            continue
+        settings[target_key] = value
+    return settings
+
+
+def _normalize_recommended_inputs(
+    raw_recommended: Any,
+    fallback: dict[str, Any],
+) -> dict[str, Any]:
+    source = raw_recommended if isinstance(raw_recommended, dict) else fallback
+    normalized: dict[str, Any] = {}
+    for key, value in source.items():
+        normalized_key = str(key).strip().lower()
+        if not normalized_key:
+            continue
+        if _is_empty_submission_value(value) or _is_default_advanced_setting(normalized_key, value):
+            continue
+        normalized[normalized_key] = value
+    return normalized
+
+
+def _collect_pk_map(payload: Any) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    explicit_pk_list_keys = {"input_pks", "node_pks", "structure_pks"}
+
+    def append_entry(pk: int, path: str, label: str) -> None:
+        dedupe_key = (pk, path)
+        if dedupe_key in seen:
+            return
+        seen.add(dedupe_key)
+        entries.append({"pk": pk, "path": path, "label": label})
+
+    def walk(node: Any, path: str = "") -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                key_text = str(key)
+                lowered = key_text.strip().lower()
+                key_path = f"{path}.{key_text}" if path else key_text
+                if lowered == "pk" or lowered.endswith("_pk"):
+                    candidate = _coerce_positive_int(value)
+                    if candidate is not None:
+                        append_entry(candidate, key_path, key_text)
+                elif lowered in explicit_pk_list_keys and isinstance(value, list):
+                    for index, item in enumerate(value):
+                        candidate = _coerce_positive_int(item)
+                        if candidate is None:
+                            continue
+                        append_entry(candidate, f"{key_path}[{index}]", key_text)
+
+                if isinstance(value, (dict, list)):
+                    walk(value, key_path)
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                item_path = f"{path}[{index}]" if path else f"[{index}]"
+                walk(item, item_path)
+
+    walk(payload)
+    return entries[:120]
+
+
+def _extract_pending_submission_payload(deps: Any) -> dict[str, Any] | None:
+    pending: Any = None
+    getter = getattr(deps, "get_registry_value", None)
+    if callable(getter):
+        pending = getter(_PENDING_SUBMISSION_KEY)
+    elif isinstance(getattr(deps, "registry", None), dict):
+        pending = deps.registry.get(_PENDING_SUBMISSION_KEY)
+
+    if not isinstance(pending, dict):
+        memory = getattr(deps, "memory", None)
+        memory_getter = getattr(memory, "get_kv", None)
+        if callable(memory_getter):
+            pending = memory_getter(_PENDING_SUBMISSION_KEY)
+
+    return pending if isinstance(pending, dict) else None
+
+
+def _deps_expect_batch(deps: Any) -> bool:
+    raw_hints = getattr(deps, "intent_hints", None)
+    if not isinstance(raw_hints, dict):
+        return False
+    return bool(raw_hints.get("expected_batch"))
+
+
+def _submission_draft_is_batch(submission_draft: dict[str, Any] | None) -> bool:
+    if not isinstance(submission_draft, dict):
+        return False
+    if isinstance(submission_draft.get("jobs"), list) and len(submission_draft["jobs"]) > 1:
+        return True
+    if isinstance(submission_draft.get("batch_aggregation"), dict):
+        return True
+    meta = submission_draft.get("meta")
+    if not isinstance(meta, dict):
+        return False
+    raw_draft = meta.get("draft")
+    if isinstance(raw_draft, list) and len(raw_draft) > 1:
+        return True
+    if _coerce_positive_int(meta.get("job_count")) and int(meta["job_count"]) > 1:
+        return True
+    structure_pks = meta.get("structure_pks")
+    if isinstance(structure_pks, list) and len(structure_pks) > 1:
+        return True
+    return False
+
+
+def _strip_submission_draft_tail(answer_text: str | None) -> str:
+    text = str(answer_text or "")
+    if not text.strip():
+        return text
+    tag_index = text.upper().rfind(_SUBMISSION_DRAFT_PREFIX)
+    if tag_index < 0:
+        return text
+    return text[:tag_index].rstrip()
+
+
+def _normalize_submission_draft_payload(
+    raw_submission_draft: dict[str, Any],
+    *,
+    draft: dict[str, Any] | None,
+    validation: dict[str, Any] | None,
+    validation_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    process_label_raw = raw_submission_draft.get("process_label")
+    process_label = process_label_raw.strip() if isinstance(process_label_raw, str) and process_label_raw.strip() else None
+    if process_label is None and isinstance(draft, dict):
+        process_label = _extract_process_label(draft)
+    if process_label is None:
+        process_label = "AiiDA Workflow"
+
+    inputs = raw_submission_draft.get("inputs")
+    if not isinstance(inputs, dict):
+        inputs = _extract_submission_inputs(draft) if isinstance(draft, dict) else {}
+    primary_inputs = raw_submission_draft.get("primary_inputs")
+    if not isinstance(primary_inputs, dict):
+        primary_inputs = _extract_primary_inputs(inputs)
+
+    raw_advanced_settings = raw_submission_draft.get("advanced_settings")
+    advanced_settings: dict[str, Any]
+    if isinstance(raw_advanced_settings, dict):
+        advanced_settings = {}
+        for key, value in raw_advanced_settings.items():
+            lowered = str(key).strip().lower()
+            if _is_empty_submission_value(value) or _is_default_advanced_setting(lowered, value):
+                continue
+            advanced_settings[lowered] = value
+    else:
+        advanced_settings = _collect_advanced_settings(inputs)
+
+    raw_meta = raw_submission_draft.get("meta")
+    meta: dict[str, Any] = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+    raw_recommended_inputs = raw_submission_draft.get("recommended_inputs")
+    if not isinstance(raw_recommended_inputs, dict):
+        meta_recommended = meta.get("recommended_inputs")
+        raw_recommended_inputs = meta_recommended if isinstance(meta_recommended, dict) else None
+    recommended_inputs = _normalize_recommended_inputs(raw_recommended_inputs, advanced_settings)
+    meta["recommended_inputs"] = recommended_inputs
+    raw_pk_map = meta.get("pk_map")
+    if isinstance(raw_pk_map, list):
+        normalized_pk_map: list[dict[str, Any]] = []
+        seen: set[tuple[int, str]] = set()
+        for item in raw_pk_map:
+            if not isinstance(item, dict):
+                continue
+            pk = _coerce_positive_int(item.get("pk"))
+            if pk is None:
+                continue
+            path_value = item.get("path")
+            path = str(path_value).strip() if isinstance(path_value, str) and path_value.strip() else f"pk_{pk}"
+            dedupe_key = (pk, path)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized_pk_map.append(
+                {
+                    "pk": pk,
+                    "path": path,
+                    "label": str(item.get("label") or "pk"),
+                }
+            )
+        meta["pk_map"] = normalized_pk_map
+    else:
+        meta["pk_map"] = _collect_pk_map(inputs)
+
+    if isinstance(draft, dict):
+        meta["draft"] = draft
+        meta.setdefault("target_computer", _extract_target_computer(draft))
+        meta.setdefault("parallel_settings", _extract_parallel_settings(draft))
+    parallel_settings = meta.get("parallel_settings")
+    if not isinstance(parallel_settings, dict):
+        parallel_settings = _extract_parallel_settings(draft) if isinstance(draft, dict) else {}
+    meta["parallel_settings"] = parallel_settings
+    if "target_computer" not in meta:
+        meta["target_computer"] = _extract_target_computer(draft) if isinstance(draft, dict) else None
+    meta.setdefault("workchain", process_label)
+    for key, value in parallel_settings.items():
+        lowered = str(key).strip().lower()
+        if lowered in advanced_settings:
+            continue
+        if _is_empty_submission_value(value) or _is_default_advanced_setting(lowered, value):
+            continue
+        advanced_settings[lowered] = value
+    if isinstance(validation, dict):
+        meta["validation"] = validation
+    if isinstance(validation_summary, dict):
+        meta["validation_summary"] = validation_summary
+
+    payload = {
+        "process_label": process_label,
+        "inputs": inputs,
+        "primary_inputs": primary_inputs,
+        "recommended_inputs": recommended_inputs,
+        "advanced_settings": advanced_settings,
+        "meta": meta,
+    }
+    return enrich_submission_draft_payload(payload)
+
+
+def _build_submission_draft_payload(
+    draft: dict[str, Any],
+    *,
+    validation: dict[str, Any] | None,
+    validation_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    inputs = _extract_submission_inputs(draft)
+    advanced_settings = _collect_advanced_settings(inputs)
+    parallel_settings = _extract_parallel_settings(draft)
+    for key, value in parallel_settings.items():
+        if key in advanced_settings:
+            continue
+        if _is_empty_submission_value(value) or _is_default_advanced_setting(key, value):
+            continue
+        advanced_settings[key] = value
+    recommended_inputs = _normalize_recommended_inputs(None, advanced_settings)
+    process_label = _extract_process_label(draft)
+    meta: dict[str, Any] = {
+        "pk_map": _collect_pk_map(inputs),
+        "target_computer": _extract_target_computer(draft),
+        "parallel_settings": parallel_settings,
+        "draft": draft,
+        "recommended_inputs": recommended_inputs,
+        "workchain": process_label,
+    }
+    if isinstance(validation, dict):
+        meta["validation"] = validation
+    if isinstance(validation_summary, dict):
+        meta["validation_summary"] = validation_summary
+    payload = {
+        "process_label": process_label,
+        "inputs": inputs,
+        "primary_inputs": _extract_primary_inputs(inputs),
+        "recommended_inputs": recommended_inputs,
+        "advanced_settings": advanced_settings,
+        "meta": meta,
+    }
+    return enrich_submission_draft_payload(payload)
+
+
+def _extract_balanced_json_object(fragment: str) -> str | None:
+    start = fragment.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(fragment)):
+        char = fragment[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            depth += 1
+            continue
+        if char != "}":
+            continue
+
+        depth -= 1
+        if depth == 0:
+            return fragment[start : index + 1]
+
+    return None
+
+
+def _extract_submission_draft_from_output_payload(output_payload: dict[str, Any]) -> dict[str, Any] | None:
+    payload_type = str(output_payload.get("type") or "").strip().upper()
+    status_type = str(output_payload.get("status") or "").strip().upper()
+    raw_submission = output_payload.get("submission_draft")
+    if isinstance(raw_submission, dict):
+        return _normalize_submission_draft_payload(
+            raw_submission,
+            draft=None,
+            validation=None,
+            validation_summary=None,
+        )
+    raw_submission_tag = output_payload.get("submission_draft_tag")
+    if isinstance(raw_submission_tag, str) and raw_submission_tag.strip():
+        parsed_from_tag = _extract_submission_draft_from_text(raw_submission_tag)
+        if isinstance(parsed_from_tag, dict):
+            return parsed_from_tag
+    raw_draft = output_payload.get("draft")
+    if isinstance(raw_draft, dict):
+        validation = output_payload.get("validation")
+        validation_summary = output_payload.get("validation_summary")
+        return _build_submission_draft_payload(
+            raw_draft,
+            validation=validation if isinstance(validation, dict) else None,
+            validation_summary=validation_summary if isinstance(validation_summary, dict) else None,
+        )
+    if payload_type == "SUBMISSION_DRAFT":
+        return _normalize_submission_draft_payload(
+            output_payload,
+            draft=None,
+            validation=None,
+            validation_summary=None,
+        )
+    if status_type == "SUBMISSION_DRAFT":
+        return _normalize_submission_draft_payload(
+            output_payload,
+            draft=raw_draft if isinstance(raw_draft, dict) else None,
+            validation=output_payload.get("validation") if isinstance(output_payload.get("validation"), dict) else None,
+            validation_summary=(
+                output_payload.get("validation_summary")
+                if isinstance(output_payload.get("validation_summary"), dict)
+                else None
+            ),
+        )
+    return None
+
+
+def _extract_recovery_plan_from_submission_draft(submission_draft: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(submission_draft, dict):
+        return None
+    meta = submission_draft.get("meta")
+    if not isinstance(meta, dict):
+        return None
+    recovery_plan = meta.get("recovery_plan")
+    return recovery_plan if isinstance(recovery_plan, dict) and recovery_plan else None
+
+
+def _extract_recovery_payload(
+    output_payload: dict[str, Any] | None,
+    submission_draft: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    recovery_plan: dict[str, Any] | None = None
+    next_step: str | None = None
+    status: str | None = None
+
+    candidates = [output_payload]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if status is None:
+            raw_status = candidate.get("status")
+            if isinstance(raw_status, str) and raw_status.strip():
+                status = raw_status.strip()
+        if next_step is None:
+            raw_next_step = candidate.get("next_step")
+            if isinstance(raw_next_step, str) and raw_next_step.strip():
+                next_step = raw_next_step.strip()
+        direct_plan = candidate.get("recovery_plan")
+        if isinstance(direct_plan, dict) and direct_plan and recovery_plan is None:
+            recovery_plan = direct_plan
+        details = candidate.get("details")
+        if isinstance(details, dict) and recovery_plan is None:
+            nested_plan = details.get("recovery_plan")
+            if isinstance(nested_plan, dict) and nested_plan:
+                recovery_plan = nested_plan
+
+    if recovery_plan is None:
+        recovery_plan = _extract_recovery_plan_from_submission_draft(submission_draft)
+
+    return recovery_plan, next_step, status
+
+
+def _extract_submission_draft_from_text(answer_text: str | None) -> dict[str, Any] | None:
+    text = str(answer_text or "")
+    if not text.strip():
+        return None
+
+    tag_index = text.upper().rfind(_SUBMISSION_DRAFT_PREFIX)
+    if tag_index < 0:
+        return None
+
+    fragment = text[tag_index + len(_SUBMISSION_DRAFT_PREFIX) :]
+    json_text = _extract_balanced_json_object(fragment)
+    if not json_text:
+        logger.warning(
+            log_event(
+                "aiida.chat_turn.submission_draft_parse_failed",
+                reason="incomplete_json_object",
+                fragment_hash=_draft_fragment_hash(fragment),
+                fragment_chars=len(fragment),
+            )
+        )
+        return None
+
+    try:
+        parsed = json.loads(json_text)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            log_event(
+                "aiida.chat_turn.submission_draft_parse_failed",
+                reason="invalid_json",
+                fragment_hash=_draft_fragment_hash(fragment),
+                fragment_chars=len(fragment),
+            )
+        )
+        return None
+
+    if not isinstance(parsed, dict):
+        logger.warning(
+            log_event(
+                "aiida.chat_turn.submission_draft_parse_failed",
+                reason="parsed_payload_not_object",
+                fragment_hash=_draft_fragment_hash(fragment),
+                fragment_chars=len(fragment),
+            )
+        )
+        return None
+    raw_submission = parsed.get("submission_draft") if isinstance(parsed.get("submission_draft"), dict) else parsed
+    if not isinstance(raw_submission, dict):
+        logger.warning(
+            log_event(
+                "aiida.chat_turn.submission_draft_parse_failed",
+                reason="submission_draft_not_object",
+                fragment_hash=_draft_fragment_hash(fragment),
+                fragment_chars=len(fragment),
+            )
+        )
+        return None
+    return _normalize_submission_draft_payload(
+        raw_submission,
+        draft=None,
+        validation=None,
+        validation_summary=None,
+    )
+
+
+def _build_chat_message_payload(
+    output: Any,
+    deps: Any,
+    *,
+    tool_calls: list[str] | None = None,
+    answer_text: str | None = None,
+) -> dict[str, Any] | None:
+    combined: dict[str, Any] = {}
+    forced_batch_block = False
+    output_payload = getattr(output, "data_payload", None)
+    if isinstance(output_payload, dict):
+        combined["data_payload"] = output_payload
+    if tool_calls:
+        normalized_calls: list[str] = []
+        for call in tool_calls:
+            cleaned = str(call).strip()
+            if not cleaned:
+                continue
+            if normalized_calls and normalized_calls[-1] == cleaned:
+                continue
+            normalized_calls.append(cleaned)
+        if normalized_calls:
+            combined["tool_calls"] = normalized_calls
+
+    parsed_submission_draft_from_text = _extract_submission_draft_from_text(answer_text)
+
+    resolved_submission_draft: dict[str, Any] | None = None
+    pending = _extract_pending_submission_payload(deps)
+    draft = pending.get("draft") if isinstance(pending, dict) else None
+    validation = pending.get("validation") if isinstance(pending, dict) else None
+    validation_summary = pending.get("validation_summary") if isinstance(pending, dict) else None
+    raw_submission_draft = pending.get("submission_draft") if isinstance(pending, dict) else None
+    if isinstance(raw_submission_draft, dict) or isinstance(draft, dict):
+        if isinstance(raw_submission_draft, dict):
+            resolved_submission_draft = _normalize_submission_draft_payload(
+                raw_submission_draft,
+                draft=draft if isinstance(draft, dict) else None,
+                validation=validation if isinstance(validation, dict) else None,
+                validation_summary=validation_summary if isinstance(validation_summary, dict) else None,
+            )
+        elif isinstance(draft, dict):
+            resolved_submission_draft = _build_submission_draft_payload(
+                draft,
+                validation=validation if isinstance(validation, dict) else None,
+                validation_summary=validation_summary if isinstance(validation_summary, dict) else None,
+            )
+    elif isinstance(output_payload, dict):
+        resolved_submission_draft = _extract_submission_draft_from_output_payload(output_payload)
+
+    if resolved_submission_draft is None:
+        resolved_submission_draft = parsed_submission_draft_from_text
+
+    if _deps_expect_batch(deps) and isinstance(resolved_submission_draft, dict) and not _submission_draft_is_batch(
+        resolved_submission_draft
+    ):
+        resolved_submission_draft = None
+        forced_batch_block = True
+
+    if isinstance(resolved_submission_draft, dict):
+        combined["type"] = "SUBMISSION_DRAFT"
+        combined["submission_draft"] = resolved_submission_draft
+
+    recovery_plan, next_step, status = _extract_recovery_payload(
+        output_payload if isinstance(output_payload, dict) else None,
+        resolved_submission_draft,
+    )
+    if forced_batch_block:
+        recovery_plan = {
+            "status": "blocked",
+            "summary": "This request requires a batch submission draft, but only a single-job draft was produced.",
+            "issues": [
+                {
+                    "type": "batch_draft_required",
+                    "message": "Do not present a single-job submission draft for a multi-structure request.",
+                }
+            ],
+            "recommended_actions": [
+                {
+                    "action": "submit_new_batch_workflow",
+                    "reason": "Prepare one batch draft that contains the full structure set.",
+                }
+            ],
+            "user_decision_required": False,
+        }
+        next_step = (
+            "Prepare a batch submission draft for the full structure list before showing any launch button."
+        )
+        status = "SUBMISSION_BLOCKED"
+    if isinstance(recovery_plan, dict) and recovery_plan:
+        combined["recovery_plan"] = recovery_plan
+    if isinstance(next_step, str) and next_step:
+        combined["next_step"] = next_step
+    if isinstance(status, str) and status:
+        combined["status"] = status
+
+    return combined or None
+
+
+def _build_submission_draft_text_block(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    payload_type = str(payload.get("type") or "").strip().upper()
+    if payload_type != "SUBMISSION_DRAFT":
+        return None
+
+    draft = payload.get("submission_draft")
+    if not isinstance(draft, dict):
+        return None
+
+    try:
+        serialized = json.dumps(draft, ensure_ascii=False, indent=2)
+    except Exception:  # noqa: BLE001
+        return None
+    return f"{_SUBMISSION_DRAFT_PREFIX}\n{serialized}"
+
+
+def _append_assistant_message(
+    state: Any,
+    turn_id: int,
+    text: str,
+    status: str = "done",
+    *,
+    session_id: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    chat_history = get_chat_history(state, session_id=session_id)
+    message = {
+        "role": "assistant",
+        "text": text,
+        "status": status,
+        "turn_id": turn_id,
+    }
+    if isinstance(payload, dict):
+        message["payload"] = payload
+    chat_history.append(message)
+    touch_chat(state)
+    logger.info(
+        log_event(
+            "aiida.chat_turn.message_append",
+            turn_id=turn_id,
+            status=status,
+            chars=len(text),
+            has_payload=bool(payload),
+        )
+    )
+
+
+def _to_agent_model_name(name: str) -> str:
+    if ":" in name:
+        return name
+    return f"google-gla:{name}"
+
+
+def _build_agent_model(name: str) -> Any:
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        raise ValueError("Model name cannot be empty.")
+    model_name = cleaned.split(":", 1)[1] if ":" in cleaned else cleaned
+
+    api_version = str(getattr(settings, "GEMINI_API_VERSION", "") or "").strip()
+    if not api_version:
+        return _to_agent_model_name(cleaned)
+
+    try:
+        from google.genai import Client as GoogleGenAIClient
+        from google.genai.types import HttpOptions
+        from pydantic_ai.models.google import GoogleModel
+        from pydantic_ai.providers.google import GoogleProvider
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            log_event(
+                "aiida.chat_turn.model_init_api_version_fallback",
+                model=model_name,
+                api_version=api_version,
+            )
+        )
+        return _to_agent_model_name(cleaned)
+
+    api_key = settings.GEMINI_API_KEY
+    if api_key == "your-key-here":
+        api_key = None
+
+    client = GoogleGenAIClient(
+        api_key=api_key,
+        vertexai=False,
+        http_options=HttpOptions(api_version=api_version),
+    )
+    provider = GoogleProvider(client=client)
+    return GoogleModel(model_name, provider=provider)
+
+
+def _build_model_settings() -> ModelSettings | None:
+    max_tokens = int(getattr(settings, "GEMINI_MAX_OUTPUT_TOKENS", 0) or 0)
+    if max_tokens <= 0:
+        return None
+    return ModelSettings(max_tokens=max_tokens)
+
+
+def _generate_session_title_sync(prompt: str, model_name: str) -> str:
+    api_key = str(getattr(settings, "GEMINI_API_KEY", "") or "").strip()
+    if not api_key or api_key == "your-key-here":
+        raise RuntimeError("Gemini API key not configured for title generation.")
+
+    resolved_model_name = str(model_name or "").strip() or str(getattr(settings, "DEFAULT_MODEL", "") or "").strip()
+    if ":" in resolved_model_name:
+        resolved_model_name = resolved_model_name.split(":", 1)[1].strip()
+    if not resolved_model_name:
+        raise RuntimeError("No model available for title generation.")
+
+    from google import genai
+
+    client = genai.Client(
+        api_key=api_key,
+        http_options={"api_version": settings.GEMINI_API_VERSION},
+    )
+    response = client.models.generate_content(
+        model=resolved_model_name,
+        contents=prompt,
+    )
+    return str(getattr(response, "text", "") or "").strip()
+
+
+def _ensure_chat_title_task_registry(state: Any) -> dict[str, asyncio.Task]:
+    tasks = getattr(state, "chat_title_tasks", None)
+    if tasks is None:
+        tasks = {}
+        state.chat_title_tasks = tasks
+    return tasks
+
+
+def _finalize_auto_title_update(
+    state: Any,
+    session: dict[str, Any],
+    *,
+    title: str,
+    completed_turn_id: int,
+    context_key: str,
+    title_state: str,
+) -> None:
+    session["title"] = title or _DEFAULT_SESSION_TITLE
+    store = _get_chat_session_store(state)
+    old_slug = _get_session_slug(session)
+    session["session_slug"] = _desired_session_slug(store, session, session["title"])
+    session["title_state"] = _normalize_title_state(title_state)
+    session["title_last_generated_turn"] = max(0, int(completed_turn_id))
+    session["title_generation_count"] = max(0, int(session.get("title_generation_count") or 0)) + 1
+    session["title_last_context_key"] = context_key or None
+    session["updated_at"] = _now_iso()
+    _ensure_session_workspace_dir(store, session)
+    _rename_session_group_label_if_needed(store, session, old_slug)
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+
+
+async def _run_session_title_generation(
+    state: Any,
+    *,
+    session_id: str,
+    selected_model: str,
+    completed_turn_id: int,
+    stage: str,
+    prompt: str,
+    fallback_title: str,
+    context_key: str,
+) -> None:
+    try:
+        generated_title = await asyncio.to_thread(_generate_session_title_sync, prompt, selected_model)
+        resolved_title = _sanitize_generated_title(generated_title, fallback_title)
+        title_state = _TITLE_STATE_READY if resolved_title else _TITLE_STATE_FAILED
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            log_event(
+                "aiida.chat_title_generation.failed",
+                session_id=session_id,
+                turn_id=completed_turn_id,
+                stage=stage,
+                model=selected_model,
+                error=str(error),
+            )
+        )
+        resolved_title = fallback_title
+        title_state = _TITLE_STATE_READY if resolved_title != _DEFAULT_SESSION_TITLE else _TITLE_STATE_FAILED
+
+    lock = _ensure_chat_lock(state)
+    async with lock:
+        session, _store = _find_chat_session(state, session_id)
+        if session is None:
+            return
+        if not bool(session.get("auto_title", False)):
+            return
+        if _normalize_title_state(session.get("title_state")) != _TITLE_STATE_PENDING:
+            return
+        _finalize_auto_title_update(
+            state,
+            session,
+            title=resolved_title or _DEFAULT_SESSION_TITLE,
+            completed_turn_id=completed_turn_id,
+            context_key=context_key,
+            title_state=title_state,
+        )
+        logger.info(
+            log_event(
+                "aiida.chat_title_generation.done",
+                session_id=session_id,
+                turn_id=completed_turn_id,
+                stage=stage,
+                title=session.get("title"),
+            )
+        )
+
+
+def _schedule_session_title_generation(
+    state: Any,
+    *,
+    session_id: str,
+    selected_model: str,
+    completed_turn_id: int,
+    stage: str,
+) -> None:
+    session, _store = _find_chat_session(state, session_id)
+    if session is None or not bool(session.get("auto_title", False)):
+        return
+
+    existing_task = _ensure_chat_title_task_registry(state).get(session_id)
+    if existing_task is not None and not existing_task.done():
+        return
+
+    prompt = _build_title_generation_prompt(session, stage=stage, completed_turn_id=completed_turn_id)
+    fallback_seed = _extract_latest_session_message_text(session, "user") or str(session.get("title_first_intent") or "")
+    fallback_title = _sanitize_generated_title(
+        _derive_chat_session_title(fallback_seed, session.get("snapshot")),
+        _DEFAULT_SESSION_TITLE,
+    )
+    context_key = _build_title_context_key(session.get("snapshot"))
+    session["title_state"] = _TITLE_STATE_PENDING
+    session["updated_at"] = _now_iso()
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+
+    task = asyncio.create_task(
+        _run_session_title_generation(
+            state,
+            session_id=session_id,
+            selected_model=selected_model,
+            completed_turn_id=completed_turn_id,
+            stage=stage,
+            prompt=prompt,
+            fallback_title=fallback_title,
+            context_key=context_key,
+        )
+    )
+    _ensure_chat_title_task_registry(state)[session_id] = task
+    task.add_done_callback(
+        lambda _task, _state=state, _session_id=session_id: _ensure_chat_title_task_registry(_state).pop(_session_id, None)
+    )
+
+
+def _get_model_unavailable_retry_policy() -> tuple[int, float]:
+    retry_budget = int(getattr(settings, "GEMINI_UNAVAILABLE_RETRIES", 2) or 0)
+    retry_budget = max(0, min(retry_budget, 8))
+    base_backoff_seconds = float(
+        getattr(settings, "GEMINI_UNAVAILABLE_RETRY_BACKOFF_SECONDS", 2.0) or 2.0
+    )
+    base_backoff_seconds = max(0.2, min(base_backoff_seconds, 60.0))
+    return retry_budget, base_backoff_seconds
+
+
+def _error_text_blob(error: Exception) -> str:
+    values: list[str] = [str(error)]
+    for attr in ("message", "body", "payload", "details", "status", "response"):
+        value = getattr(error, attr, None)
+        if value is None:
+            continue
+        values.append(str(value))
+    return " ".join(value for value in values if value).lower()
+
+
+def _is_retryable_model_unavailable_error(error: Exception) -> bool:
+    text = _error_text_blob(error)
+    if not text:
+        return False
+
+    has_503 = (
+        "status_code: 503" in text
+        or "status code: 503" in text
+        or '"code": 503' in text
+        or "'code': 503" in text
+        or "http 503" in text
+    )
+    has_unavailable_hint = (
+        "status': 'unavailable'" in text
+        or '"status": "unavailable"' in text
+        or "currently experiencing high demand" in text
+        or "high demand" in text
+        or "try again later" in text
+        or "temporarily unavailable" in text
+    )
+    return has_503 and has_unavailable_hint
+
+
+def _merge_context_node_ids(
+    context_node_ids: list[int] | None,
+    metadata: dict[str, Any] | None,
+) -> list[int]:
+    raw_ids: list[Any] = []
+    if context_node_ids:
+        raw_ids.extend(context_node_ids)
+    if isinstance(metadata, dict):
+        raw_ids.extend(normalize_context_node_ids(metadata.get("context_pks")))
+        raw_ids.extend(normalize_context_node_ids(metadata.get("context_node_pks")))
+    return normalize_context_node_ids(raw_ids)
+
+
+def _inject_context_priority_instruction(user_intent: str, context_pks: list[int]) -> str:
+    if not context_pks:
+        return user_intent
+    serialized = ", ".join(str(pk) for pk in context_pks)
+    return (
+        "PRIMARY TURN CONTEXT:\n"
+        f"- context_pks: [{serialized}]\n"
+        "- Treat these PKs as the primary subjects of the current user query.\n"
+        "- If the request is ambiguous, prioritize inspecting these nodes first.\n\n"
+        f"USER REQUEST:\n{user_intent}"
+    )
+
+
+def _inject_session_preference_instruction(user_intent: str, metadata: dict[str, Any] | None) -> str:
+    normalized_metadata = metadata if isinstance(metadata, dict) else {}
+    session_environment = str(normalized_metadata.get("session_environment") or "").strip().lower()
+    prompt_override = str(normalized_metadata.get("prompt_override") or "").strip()
+    session_parameters = _normalize_session_parameters(normalized_metadata.get("session_parameters"))
+    pinned_nodes = _normalize_focus_context_nodes(normalized_metadata.get("pinned_nodes"))
+
+    preference_lines: list[str] = []
+    if session_environment:
+        preference_lines.append(f"- active_environment: {session_environment}")
+    if pinned_nodes:
+        serialized_nodes = ", ".join(f"#{item['pk']}" for item in pinned_nodes)
+        preference_lines.append(f"- pinned_nodes: [{serialized_nodes}]")
+    if session_parameters:
+        serialized_params = ", ".join(f"{item['key']}={item['value']}" for item in session_parameters)
+        preference_lines.append(f"- session_parameters: {serialized_params}")
+    if prompt_override:
+        preference_lines.append(f"- prompt_override: {prompt_override}")
+
+    if not preference_lines:
+        return user_intent
+
+    return (
+        "SESSION PREFERENCES:\n"
+        + "\n".join(preference_lines)
+        + "\n- Treat these preferences as defaults for this session unless the current message overrides them.\n\n"
+        + f"USER REQUEST:\n{user_intent}"
+    )
+
+
+async def _thinking_status_ticker(
+    state: Any,
+    turn_id: int,
+    session_id: str,
+    stop_event: asyncio.Event,
+    get_running_tools: Callable[[], list[str]] | None = None,
+    get_step_history: Callable[[], list[str]] | None = None,
+) -> None:
+    started = time.perf_counter()
+    dots = 0
+    while not stop_event.is_set():
+        elapsed = int(time.perf_counter() - started)
+        dots = (dots % 3) + 1
+        status_lines = [f"Thinking: waiting for Gemini response ({elapsed}s){'.' * dots}"]
+        running_tools: list[str] = []
+        if callable(get_running_tools):
+            running_tools = get_running_tools()
+            if running_tools:
+                status_lines.extend(f"Running: {tool_name}..." for tool_name in running_tools[-5:])
+        step_history: list[str] = []
+        if callable(get_step_history):
+            step_history = get_step_history()
+
+        status_payload = {
+            "type": "status",
+            "tool_calls": running_tools[-20:],
+            "status": {
+                "current_step": step_history[-1] if step_history else (running_tools[-1] if running_tools else None),
+                "steps": step_history[-40:],
+                "elapsed_seconds": elapsed,
+            },
+        }
+        _update_assistant_message(
+            state,
+            turn_id,
+            "\n".join(status_lines),
+            status="thinking",
+            session_id=session_id,
+            payload=status_payload,
+        )
+        await asyncio.sleep(0.9)
+
+
+def cancel_chat_turn(state: Any, turn_id: int | None = None) -> int | None:
+    tasks = _ensure_chat_task_registry(state)
+    if turn_id is not None:
+        candidates = [(turn_id, tasks.get(turn_id))]
+    else:
+        candidates = sorted(tasks.items(), key=lambda item: item[0], reverse=True)
+
+    for candidate_turn_id, task in candidates:
+        if task is None:
+            continue
+        if task.done():
+            tasks.pop(candidate_turn_id, None)
+            continue
+        task.cancel()
+        session_id = getattr(task, "session_id", None)
+        _update_assistant_message(
+            state,
+            candidate_turn_id,
+            "Response stopped by user.",
+            status="error",
+            session_id=str(session_id) if isinstance(session_id, str) and session_id else None,
+        )
+        logger.info(log_event("aiida.chat_turn.cancel.requested", turn_id=candidate_turn_id))
+        return candidate_turn_id
+
+    return None
+
+
+def start_chat_turn(
+    state: Any,
+    *,
+    user_intent: str,
+    selected_model: str,
+    fetch_context_nodes: Callable[[list[int]], list[dict[str, Any]]],
+    context_archive: str | None = None,
+    context_node_ids: list[int] | None = None,
+    metadata: dict[str, Any] | None = None,
+    source: str = "frontend",
+) -> int:
+    normalized_metadata = dict(metadata or {})
+    normalized_node_ids = _merge_context_node_ids(context_node_ids, normalized_metadata)
+    normalized_metadata["context_pks"] = normalized_node_ids
+    normalized_metadata["context_node_pks"] = normalized_node_ids
+    session, store = _find_chat_session(state, None)
+    if session is None:
+        session_detail = create_chat_session(
+            state,
+            snapshot=_build_chat_session_snapshot(normalized_metadata, selected_model=selected_model),
+            activate=True,
+        )
+        session, store = _find_chat_session(state, session_detail["id"])
+    if session is None:
+        raise RuntimeError("Unable to initialize chat session.")
+
+    session["snapshot"] = _build_chat_session_snapshot(normalized_metadata, selected_model=selected_model)
+    if not str(session.get("title_first_intent") or "").strip():
+        session["title_first_intent"] = user_intent
+    session["updated_at"] = _now_iso()
+
+    turn_id = int(store.get("turn_seq", 0)) + 1
+    store["turn_seq"] = turn_id
+    state.chat_turn_seq = turn_id
+    session_id = str(session["id"])
+    chat_history = session["messages"]
+
+    user_message: dict[str, Any] = {"role": "user", "text": user_intent, "turn_id": turn_id}
+    user_payload = _build_user_message_payload(normalized_metadata, normalized_node_ids)
+    if isinstance(user_payload, dict):
+        user_message["payload"] = user_payload
+    chat_history.append(user_message)
+    chat_history.append(
+        {
+            "role": "assistant",
+            "text": "Thinking: request queued.",
+            "status": "thinking",
+            "turn_id": turn_id,
+            "payload": {
+                "type": "status",
+                "status": {
+                    "current_step": "Queued request",
+                    "steps": [],
+                },
+                "tool_calls": [],
+            },
+        }
+    )
+    session["messages"] = chat_history[-_MAX_CHAT_SESSION_MESSAGES:]
+    touch_chat(state)
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+
+    logger.info(
+        log_event(
+            "aiida.chat_turn.queued",
+            turn_id=turn_id,
+            session_id=session_id,
+            source=source,
+            model=selected_model,
+            intent=user_intent[:120],
+            context=context_archive,
+            context_node_ids=",".join(str(pk) for pk in normalized_node_ids) or None,
+            metadata_keys=",".join(sorted(str(key) for key in normalized_metadata.keys())) or None,
+        )
+    )
+
+    task = asyncio.create_task(
+        _execute_chat_turn(
+            state=state,
+            turn_id=turn_id,
+            session_id=session_id,
+            user_intent=user_intent,
+            selected_model=selected_model,
+            fetch_context_nodes=fetch_context_nodes,
+            context_archive=context_archive,
+            context_node_ids=normalized_node_ids,
+            metadata=normalized_metadata,
+        )
+    )
+    setattr(task, "session_id", session_id)
+    _ensure_chat_task_registry(state)[turn_id] = task
+    task.add_done_callback(
+        lambda _task, _state=state, _turn_id=turn_id: _ensure_chat_task_registry(_state).pop(_turn_id, None)
+    )
+    return turn_id
+
+
+async def _execute_chat_turn(
+    state: Any,
+    turn_id: int,
+    session_id: str,
+    user_intent: str,
+    selected_model: str,
+    fetch_context_nodes: Callable[[list[int]], list[dict[str, Any]]],
+    context_archive: str | None = None,
+    context_node_ids: list[int] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    agent = getattr(state, "agent", None)
+    deps_class = getattr(state, "deps_class", None)
+    lock = _ensure_chat_lock(state)
+    t0 = time.perf_counter()
+    spinner_stop = asyncio.Event()
+    spinner_task: asyncio.Task | None = None
+    bridge_tool_calls: list[str] = []
+
+    def _record_bridge_call(tool_name: str) -> None:
+        cleaned = str(tool_name).strip()
+        if not cleaned:
+            return
+        if bridge_tool_calls and bridge_tool_calls[-1] == cleaned:
+            return
+        bridge_tool_calls.append(cleaned)
+        if len(bridge_tool_calls) > 40:
+            del bridge_tool_calls[:-40]
+
+    async with lock:
+        logger.info(
+            log_event(
+                "aiida.chat_turn.start",
+                turn_id=turn_id,
+                model=selected_model,
+                intent=user_intent[:120],
+                context=context_archive,
+                context_node_ids=",".join(str(pk) for pk in normalize_context_node_ids(context_node_ids)) or None,
+                metadata_keys=",".join(sorted(str(key) for key in (metadata or {}).keys())) or None,
+            )
+        )
+
+        try:
+            if agent is None or deps_class is None:
+                raise RuntimeError("Agent dependencies are not ready")
+
+            normalized_node_ids = _merge_context_node_ids(context_node_ids, metadata)
+            context_nodes = fetch_context_nodes(normalized_node_ids)
+            intent_hints = _extract_intent_hints(user_intent)
+            if context_nodes:
+                _update_assistant_message(
+                    state,
+                    turn_id,
+                    f"Thinking: loaded {len(context_nodes)} referenced nodes...",
+                    status="thinking",
+                    session_id=session_id,
+                )
+
+            deps_kwargs: dict[str, Any] = {
+                "archive_path": context_archive,
+                "memory": getattr(state, "memory", None),
+            }
+            if "session_id" in getattr(deps_class, "__annotations__", {}):
+                deps_kwargs["session_id"] = session_id
+            if "app_state" in getattr(deps_class, "__annotations__", {}):
+                deps_kwargs["app_state"] = state
+            if "context_nodes" in getattr(deps_class, "__annotations__", {}):
+                deps_kwargs["context_nodes"] = context_nodes
+            if "intent_hints" in getattr(deps_class, "__annotations__", {}):
+                deps_kwargs["intent_hints"] = intent_hints
+            current_deps = deps_class(**deps_kwargs)
+            step_history: list[str] = getattr(current_deps, "step_history", [])
+
+            def _record_step_update(step_text: str) -> None:
+                cleaned = str(step_text).strip()
+                if not cleaned:
+                    return
+                payload = {
+                    "type": "status",
+                    "tool_calls": bridge_tool_calls[-20:],
+                    "status": {
+                        "current_step": cleaned,
+                        "steps": step_history[-40:],
+                    },
+                }
+                _update_assistant_message(
+                    state,
+                    turn_id,
+                    None,
+                    status="thinking",
+                    session_id=session_id,
+                    payload=payload,
+                )
+
+            if hasattr(current_deps, "step_callback"):
+                setattr(current_deps, "step_callback", _record_step_update)
+
+            listener_token = set_bridge_call_listener(_record_bridge_call)
+            request_headers_token = set_bridge_request_headers(_build_worker_workspace_headers(state, session_id))
+            spinner_task = asyncio.create_task(
+                _thinking_status_ticker(
+                    state=state,
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    stop_event=spinner_stop,
+                    get_running_tools=lambda: list(bridge_tool_calls),
+                    get_step_history=lambda: list(step_history),
+                )
+            )
+            try:
+                run_intent = _inject_session_preference_instruction(user_intent, metadata)
+                run_intent = _inject_context_priority_instruction(run_intent, normalized_node_ids)
+                resolved_model_name = _to_agent_model_name(selected_model)
+                resolved_model = _build_agent_model(selected_model)
+                retry_budget, retry_base_backoff_seconds = _get_model_unavailable_retry_policy()
+                last_run_error: Exception | None = None
+                result = None
+                for attempt in range(retry_budget + 1):
+                    try:
+                        result = await agent.run(
+                            run_intent,
+                            deps=current_deps,
+                            model=resolved_model,
+                            model_settings=_build_model_settings(),
+                        )
+                        last_run_error = None
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as run_error:  # noqa: BLE001
+                        error_text = str(run_error)
+                        normalized_error = error_text.lower()
+                        if (
+                            "404" in normalized_error
+                            and "model" in normalized_error
+                            or "is not found for api version" in normalized_error
+                            or "unsupported model" in normalized_error
+                        ):
+                            logger.error(
+                                log_event(
+                                    "aiida.chat_turn.model_rejected",
+                                    turn_id=turn_id,
+                                    model=selected_model,
+                                    resolved_model=resolved_model_name,
+                                    api_version=getattr(settings, "GEMINI_API_VERSION", "unknown"),
+                                    error=error_text[:500],
+                                )
+                            )
+                            raise RuntimeError(
+                                "Gemini model was rejected by the API. "
+                                f"Model='{selected_model}', api_version='{getattr(settings, 'GEMINI_API_VERSION', 'unknown')}'. "
+                                "Update SABR_DEFAULT_MODEL (e.g., gemini-3-flash-preview) "
+                                "or SABR_GEMINI_API_VERSION and retry."
+                            ) from run_error
+
+                        if _is_retryable_model_unavailable_error(run_error) and attempt < retry_budget:
+                            wait_seconds = retry_base_backoff_seconds * (2**attempt)
+                            retry_step = (
+                                "Gemini is under high demand (503). "
+                                f"Auto-retrying in {wait_seconds:.1f}s ({attempt + 1}/{retry_budget})."
+                            )
+                            current_deps.log_step(retry_step)
+                            logger.warning(
+                                log_event(
+                                    "aiida.chat_turn.model_unavailable_retry",
+                                    turn_id=turn_id,
+                                    model=selected_model,
+                                    attempt=attempt + 1,
+                                    max_attempts=retry_budget + 1,
+                                    wait_seconds=f"{wait_seconds:.2f}",
+                                    error=error_text[:500],
+                                )
+                            )
+                            await asyncio.sleep(wait_seconds)
+                            continue
+
+                        last_run_error = run_error
+                        break
+
+                if result is None:
+                    if last_run_error is None:
+                        raise RuntimeError("Model call failed: no result and no error captured.")
+                    if _is_retryable_model_unavailable_error(last_run_error):
+                        logger.error(
+                            log_event(
+                                "aiida.chat_turn.model_unavailable_retry_exhausted",
+                                turn_id=turn_id,
+                                model=selected_model,
+                                attempts=retry_budget + 1,
+                                error=str(last_run_error)[:500],
+                            )
+                        )
+                    raise last_run_error
+            finally:
+                reset_bridge_call_listener(listener_token)
+                reset_bridge_request_headers(request_headers_token)
+
+            spinner_stop.set()
+            if spinner_task:
+                spinner_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await spinner_task
+                spinner_task = None
+
+            elapsed = time.perf_counter() - t0
+            output = getattr(result, "output", None)
+            if output is None:
+                output = getattr(result, "data", None)
+            if output is None:
+                raise RuntimeError("Agent returned no output payload")
+
+            if hasattr(current_deps, "step_history") and hasattr(output, "thought_process"):
+                output.thought_process = current_deps.step_history
+
+            answer_text = str(output.answer) if hasattr(output, "answer") else str(output)
+            message_payload = _build_chat_message_payload(
+                output,
+                current_deps,
+                tool_calls=bridge_tool_calls,
+                answer_text=answer_text,
+            )
+            if (
+                intent_hints.get("expected_batch")
+                and not (
+                    isinstance(message_payload, dict)
+                    and isinstance(message_payload.get("submission_draft"), dict)
+                )
+            ):
+                answer_text = _strip_submission_draft_tail(answer_text)
+            submission_draft_block = _build_submission_draft_text_block(message_payload)
+            if submission_draft_block:
+                has_submission_prefix = _SUBMISSION_DRAFT_PREFIX.lower() in answer_text.lower()
+                has_canonical_block = submission_draft_block in answer_text
+                if not has_submission_prefix:
+                    answer_text = (
+                        f"{answer_text.rstrip()}\n\n{submission_draft_block}"
+                        if answer_text.strip()
+                        else submission_draft_block
+                    )
+                elif not has_canonical_block:
+                    # Ensure at least one parse-safe canonical draft block exists for the frontend modal parser.
+                    answer_text = f"{answer_text.rstrip()}\n\n{submission_draft_block}"
+            _append_assistant_message(
+                state,
+                turn_id,
+                answer_text,
+                status="done",
+                session_id=session_id,
+                payload=message_payload,
+            )
+            session_history = get_chat_history(state, session_id=session_id)
+            session_history[:] = session_history[-_MAX_CHAT_SESSION_MESSAGES:]
+            session, _store = _find_chat_session(state, session_id)
+            if session is not None:
+                session["updated_at"] = _now_iso()
+            touch_chat(state)
+            _touch_chat_sessions(state)
+            _persist_chat_session_store(state)
+            logger.info(
+                log_event(
+                    "aiida.chat_turn.done",
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    run_id=getattr(result, "run_id", None),
+                    elapsed=f"{elapsed:.2f}s",
+                    answer_chars=len(answer_text),
+                    steps=len(getattr(current_deps, "step_history", []) or []),
+                )
+            )
+
+            session_for_title, _ = _find_chat_session(state, session_id)
+            if session_for_title is not None:
+                title_stage = _should_schedule_title_generation(session_for_title, turn_id)
+                if title_stage:
+                    _schedule_session_title_generation(
+                        state,
+                        session_id=session_id,
+                        selected_model=selected_model,
+                        completed_turn_id=turn_id,
+                        stage=title_stage,
+                    )
+
+            if hasattr(state, "memory") and state.memory:
+                try:
+                    turn_metadata: dict[str, Any] = {
+                        "context_archive": context_archive,
+                        "context_node_ids": normalized_node_ids,
+                    }
+                    for key, value in (metadata or {}).items():
+                        turn_metadata[str(key)] = value
+                    state.memory.add_turn(
+                        intent=user_intent,
+                        response=answer_text,
+                        metadata=turn_metadata,
+                    )
+                except Exception as mem_error:  # noqa: BLE001
+                    logger.warning(
+                        log_event(
+                            "aiida.chat_turn.persist_failed",
+                            turn_id=turn_id,
+                            error=str(mem_error),
+                        )
+                    )
+
+        except asyncio.CancelledError:
+            elapsed = time.perf_counter() - t0
+            _update_assistant_message(
+                state,
+                turn_id,
+                "Response stopped by user.",
+                status="error",
+                session_id=session_id,
+            )
+            session_history = get_chat_history(state, session_id=session_id)
+            session_history[:] = session_history[-_MAX_CHAT_SESSION_MESSAGES:]
+            session, _store = _find_chat_session(state, session_id)
+            if session is not None:
+                session["updated_at"] = _now_iso()
+            touch_chat(state)
+            _touch_chat_sessions(state)
+            _persist_chat_session_store(state)
+            logger.info(
+                log_event(
+                    "aiida.chat_turn.cancelled",
+                    turn_id=turn_id,
+                    session_id=session_id,
+                    elapsed=f"{elapsed:.2f}s",
+                    model=selected_model,
+                )
+            )
+            raise
+        except Exception as error:  # noqa: BLE001
+            elapsed = time.perf_counter() - t0
+            logger.exception(
+                log_event(
+                    "aiida.chat_turn.failed",
+                    turn_id=turn_id,
+                    elapsed=f"{elapsed:.2f}s",
+                    model=selected_model,
+                    error=str(error),
+                )
+            )
+            _append_assistant_message(
+                state,
+                turn_id,
+                f"Request failed: {error}",
+                status="error",
+                session_id=session_id,
+            )
+            session_history = get_chat_history(state, session_id=session_id)
+            session_history[:] = session_history[-_MAX_CHAT_SESSION_MESSAGES:]
+            session, _store = _find_chat_session(state, session_id)
+            if session is not None:
+                session["updated_at"] = _now_iso()
+            touch_chat(state)
+            _touch_chat_sessions(state)
+            _persist_chat_session_store(state)
+        finally:
+            spinner_stop.set()
+            if spinner_task:
+                spinner_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await spinner_task

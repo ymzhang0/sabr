@@ -1,4 +1,5 @@
-"""Compatibility wrapper for legacy NiceGUI controller module."""
+import sys
 
-from .legacy_nicegui.controller import *  # noqa: F401,F403
+from src.aris_apps.aiida.ui import controller as _module
 
+sys.modules[__name__] = _module

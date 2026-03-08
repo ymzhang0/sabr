@@ -1,49 +1,5 @@
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
-from src.sab_core.deps.base import BaseSABRDeps
+import sys
 
-DEFAULT_DEPS_CLASS = "AiiDADeps"
+from src.aris_apps.aiida import deps as _module
 
-
-@dataclass
-class AiiDADeps(BaseSABRDeps):
-    """
-    AiiDA-specific dependency injection object.
-    
-    This class extends the core BaseSABRDeps to provide the AiiDA agent 
-    with necessary context such as archive paths and database profiles.
-    """
-    
-    # The absolute path to a .aiida archive mounted by the remote worker.
-    archive_path: Optional[str] = None
-    
-    # Metadata for the current research session
-    session_id: Optional[str] = None
-    app_state: Any = None
-    
-    # Dictionary to store intermediate AiiDA objects or PKs 
-    # that need to be shared between different tools in the same loop
-    registry: Dict[str, Any] = field(default_factory=dict)
-    context_nodes: List[Dict[str, Any]] = field(default_factory=list)
-    intent_hints: Dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        """
-        Optional: Logic to run after initialization, 
-        such as validating the archive path.
-        """
-        if self.archive_path:
-            # You could trigger a silent environment check here if needed
-            pass
-
-    def set_registry_value(self, key: str, value: Any):
-        """
-        Store a value in the session registry for cross-tool communication.
-        """
-        self.registry[key] = value
-
-    def get_registry_value(self, key: str, default: Any = None) -> Any:
-        """
-        Retrieve a value from the session registry.
-        """
-        return self.registry.get(key, default)
+sys.modules[__name__] = _module

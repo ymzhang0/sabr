@@ -1,37 +1,37 @@
-# SABR Architecture & Code Review Context
+# ARIS Architecture & Code Review Context
 
 ## Overview
-This document serves as the context transfer for AI agents working across different machines, preserving the review of the SABR ("The Brain") architecture. SABR's primary responsibility is intent parsing, tool orchestration, and presentation, strictly separated from the physical computational environment.
+This document serves as context transfer for agents working across different machines, preserving the review of the ARIS architecture. ARIS is the canonical Brain-side name for this codebase; legacy SABR paths remain as compatibility layers during the migration.
 
 ## 1. Core Architecture: Brain-Body Split
-SABR operates as the **Brain**. It communicates with the AiiDA-Worker (**Body**) entirely via REST APIs. 
-**Review finding**: SABR mostly adheres to the "no AiiDA dependency" rule. However, local imports of `aiida` (e.g., `from aiida import orm` or `plugins`) exist inside certain functions within `src/sab_engines/aiida/presenters/workflow_view.py`. These act as fallbacks but are a slight violation of the strict boundary and should be monitored or refactored if full isolation is desired. HTTP transport is correctly encapsulated.
+ARIS operates as the **Brain**. It communicates with the AiiDA-Worker (**Body**) entirely via REST APIs.
+**Review finding**: ARIS mostly adheres to the "no AiiDA dependency" rule. However, local imports of `aiida` (e.g., `from aiida import orm` or `plugins`) still exist inside certain fallback paths within `src/aris_apps/aiida/presenters/workflow_view.py`. These should remain under scrutiny if full isolation is required. HTTP transport is correctly encapsulated.
 
 ## 2. Key Design Patterns Analyzed
 
 ### Presenter Pattern (Demonstration Layer)
-**Location:** `src/sab_engines/aiida/presenters/` (`node_view.py`, `workflow_view.py`)
+**Location:** `src/aris_apps/aiida/presenters/` (`node_view.py`, `workflow_view.py`)
 **Implementation:** Takes raw JSON payloads returned by the Worker's API and recursively formats/ flattens them for the React frontend. It handles previews, link dereferencing, and stripping complex nested attributes into primitive JSON dictionaries.
 - **Dual Link Support:** Enriches both `inputs`/`outputs` (Verbose provenance) and `direct_inputs`/`direct_outputs` (Concise port-based) payloads for presentation.
 
 ### Bridge/Proxy Pattern
-**Location:** `src/sab_engines/aiida/client.py`, `bridge_client.py`
+**Location:** `src/aris_apps/aiida/client.py`, `bridge_client.py`
 **Implementation:** Wraps all `httpx` logic dynamically. It implements connection state caching, infrastructure introspection (counting codes/computers), connection offline awareness (`BridgeOfflineError`), and error payload normalization (`_extract_error_payload`).
 
 ### Registry & Analysis Integration (Agent Capability Growth)
-**Location:** `src/sab_engines/aiida/agent/tools.py`, `researcher.py`
-**Implementation:** SABR interacts with the Worker's `core.scripts` and `repository/analysis/` via the REST bridge. The agent can now execute standardized analysis modules (e.g., `run_born`) on the worker to retrieve complex physical insights without needing to implement the parsing logic locally. This preserves the Brain-Body split while enabling sophisticated scientific reasoning.
+**Location:** `src/aris_apps/aiida/agent/tools.py`, `researcher.py`
+**Implementation:** ARIS interacts with the Worker's `core.scripts` and `repository/analysis/` via the REST bridge. The agent can execute standardized analysis modules (for example `run_born`) on the worker to retrieve complex physical insights without implementing the parsing logic locally. This preserves the Brain-Body split while enabling sophisticated scientific reasoning.
 
 ### Observer Pattern (Streaming)
-**Location:** `src/sab_engines/aiida/router.py` (SSE Streams), `deps.py` (`log_step`)
+**Location:** `src/aris_apps/aiida/router.py` (SSE Streams), `deps.py` (`log_step`)
 **Implementation:** `AiiDADeps.log_step` fires structured string messages into the execution context. The API router (`/stream/chat`, `/stream/logs`, `/stream/process`) serves these concurrent state changes to the frontend using Server-Sent Events (SSE), keeping UI non-blocking while complex reasoning steps execute.
 
 ## Data Flow
-User -> Next.js Frontend -> FastAPI SABR Routers -> SABR Auto-Agent -> Tool Call -> `AiiDAWorkerClient` -> AiiDA-Worker REST API -> SABR Presenter -> SSE/JSON Frontend Render.
+User -> React Frontend -> FastAPI ARIS Routers -> ARIS Agent -> Tool Call -> `AiiDAWorkerClient` -> AiiDA-Worker REST API -> ARIS Presenter -> SSE/JSON Frontend Render.
 
 ## 3. Frontend Architecture Insights
 ### Submission Review & Draft Builders
-**Location:** `sabr/frontend/src/components/dashboard/submission-modal.tsx`, `process-detail-drawer.tsx`
+**Location:** `apps/web/src/components/dashboard/submission-modal.tsx`, `process-detail-drawer.tsx`
 **Implementation:** The submission UI dynamically reads AiiDA Builder outputs. For WorkChains that wrap one or more child calculations, specific port parameters like `metadata.options` (e.g., `workdir`, `account`, `resources`) may need to be mapped into nested child namespaces instead of the root directory. The mapping should always come from the actual builder/spec shape returned by the worker rather than plugin-specific assumptions.
 - **Process Detail Dual-View:** `ProcessDetailDrawer` and `ProcessTreeNodeView` implement a "Verbose Mode" toggle. By default, they display `direct_inputs` (clean port names) and fallback to the full provenance `inputs` graph when toggled.
 - **State management:** Form state hooks relying on `metadata` or `inputs` (like global code inheritance) require stable references, avoiding immediate resets upon edits.

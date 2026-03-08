@@ -4,35 +4,32 @@ import importlib
 import os
 from contextlib import asynccontextmanager
 
-from loguru import logger
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from loguru import logger
 
-from src.sab_core.logging_utils import get_log_buffer_snapshot, log_event, setup_logging
+from src.aris_core.logging import log_event, setup_logging
 
 # 1. Load environment variables at the very beginning (Proxy, API Keys)
 load_dotenv()
 setup_logging(default_level="INFO")
 logger.info(log_event("logging.ready"))
 
-from src.sab_core.config import settings
-from src.sab_core.memory.json_memory import JSONMemory
-
-from html import escape
+from src.aris_core.config import settings
+from src.aris_core.config.runtime import collect_reload_excludes
+from src.aris_core.memory import JSONMemory
+from src.aris_core.plugins import iter_enabled_app_manifests
 
 # Global state container for long-lived objects
 state = {}
 # Dynamic hub registry.
 ACTIVE_HUBS = []
 DEFAULT_ENGINE = "aiida"
-
-
-class SessionTitleUpdateRequest(BaseModel):
-    title: str | None = None
+APP_MANIFESTS = iter_enabled_app_manifests()
+APP_MANIFESTS_BY_NAME = {manifest.name: manifest for manifest in APP_MANIFESTS}
 
 
 def _configure_proxy_environment() -> None:
@@ -74,6 +71,16 @@ def _configure_proxy_environment() -> None:
 
 
 _configure_proxy_environment()
+
+
+def _get_engine_manifest(engine_name: str):
+    manifest = APP_MANIFESTS_BY_NAME.get(engine_name)
+    if manifest is None:
+        available = ", ".join(sorted(APP_MANIFESTS_BY_NAME))
+        raise RuntimeError(f"Unsupported engine '{engine_name}'. Enabled app manifests: {available}")
+    return manifest
+
+
 # ============================================================
 # 🧬 Lifespan Management
 # ============================================================
@@ -95,16 +102,13 @@ async def lifespan(app: FastAPI):
     # Dynamically load the engine-specific agent and deps
     engine_name = (settings.ENGINE_TYPE or "").strip() or DEFAULT_ENGINE
     try:
-        # Load the Researcher Agent from the engine folder
-        # e.g., from src.sab_engines.aiida.agent.researcher import aiida_researcher
-        agent_module = importlib.import_module(f"src.sab_engines.{engine_name}.agent.researcher")
+        engine_manifest = _get_engine_manifest(engine_name)
+        agent_module = importlib.import_module(engine_manifest.agent_module)
         agent = getattr(agent_module, f"{engine_name}_researcher")
         state["agent"] = agent
         app.state.agent = agent
         
-        # Load the specific Deps class
-        # e.g., from src.sab_engines.aiida.deps import AiiDADeps
-        deps_module = importlib.import_module(f"src.sab_engines.{engine_name}.deps")
+        deps_module = importlib.import_module(engine_manifest.deps_module)
         configured_deps_class = (settings.DEPS_CLASS or "").strip()
         if configured_deps_class and hasattr(deps_module, configured_deps_class):
             deps_class_name = configured_deps_class
@@ -133,18 +137,21 @@ async def lifespan(app: FastAPI):
 # 🛠️ FastAPI Application Setup
 # ============================================================
 app = FastAPI(
-    title="SABR v2 Central Hub",
-    description="Multi-Agent Scientific Research Bus powered by PydanticAI",
+    title="ARIS Central Hub",
+    description="Agentic scientific research hub powered by PydanticAI",
     lifespan=lifespan
 )
 
-LEGACY_STATIC_DIR = os.path.join(os.getcwd(), "src", "sab_engines", "aiida", "static")
 FRONTEND_DIST_DIR = settings.FRONTEND_DIST_DIR
 FRONTEND_ASSETS_DIR = settings.FRONTEND_ASSETS_DIR
 FRONTEND_INDEX_FILE = settings.FRONTEND_INDEX_FILE
 
-if os.path.isdir(LEGACY_STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=LEGACY_STATIC_DIR), name="static")
+for manifest in APP_MANIFESTS:
+    for static_mount in manifest.static_mounts:
+        if not static_mount.directory.is_dir():
+            logger.warning(log_event("app.static.missing", app=manifest.name, path=str(static_mount.directory)))
+            continue
+        app.mount(static_mount.url_path, StaticFiles(directory=str(static_mount.directory)), name=static_mount.name)
 
 if os.path.isdir(FRONTEND_ASSETS_DIR):
     app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="assets")
@@ -175,95 +182,22 @@ app.add_middleware(
 # ============================================================
 # 🚩 Engine-Specific Route Mounting
 # ============================================================
-def mount_engine(app: FastAPI, engine_name: str):
-    """
-    Mount an engine on demand:
-    1. Register routes.
-    2. Register the engine hub for startup.
-    """
-    try:
-        # Dynamically import unified engine router and hub modules.
-        router_module = importlib.import_module(f"src.sab_engines.{engine_name}.router")
-        hub_module = importlib.import_module(f"src.sab_engines.{engine_name}.hub")
-        
-        # 1. Mount routes.
-        app.include_router(router_module.router, prefix=f"/api/{engine_name}")
-        
-        # 2. Register hub.
-        if hasattr(hub_module, 'hub'):
-            ACTIVE_HUBS.append(hub_module.hub)
-            logger.info(log_event("engine.registry.registered", engine=engine_name))
-            
-    except Exception as e:
-        logger.exception(log_event("engine.registry.failed", engine=engine_name, error=str(e)))
+def mount_enabled_apps(app: FastAPI) -> None:
+    for manifest in APP_MANIFESTS:
+        try:
+            manifest.include_routes(app)
+            manifest.register_runtime(ACTIVE_HUBS)
+            logger.info(log_event("engine.registry.registered", engine=manifest.name))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(log_event("engine.registry.failed", engine=manifest.name, error=str(exc)))
 
-mount_engine(app, "aiida")
+
+mount_enabled_apps(app)
 
 
 @app.get("/api/health")
 async def healthcheck():
     return {"status": "ok"}
-
-
-@app.put("/api/sessions/{session_id}/title")
-async def update_session_title(session_id: str, payload: SessionTitleUpdateRequest):
-    from src.sab_engines.aiida.chat import (
-        get_active_chat_project_id,
-        get_active_chat_session_id,
-        get_chat_snapshot,
-        list_chat_projects,
-        update_chat_session,
-    )
-
-    state = app.state
-    session = update_chat_session(state, session_id, title=payload.title)
-    if session is None:
-        raise HTTPException(status_code=404, detail="Chat session not found")
-    return {
-        "session": session,
-        "chat": get_chat_snapshot(state),
-        "active_session_id": get_active_chat_session_id(state),
-        "active_project_id": get_active_chat_project_id(state),
-        "projects": list_chat_projects(state),
-        "version": int(getattr(state, "chat_sessions_version", 0)),
-    }
-
-
-@app.get("/api/specializations/active")
-async def specializations_active(
-    context_node_ids: list[int] | None = Query(default=None),
-    project_tags: list[str] | None = Query(default=None),
-    resource_plugins: list[str] | None = Query(default=None),
-    selected_environment: str | None = Query(default=None),
-    auto_switch: bool = Query(default=True),
-):
-    from src.sab_engines.aiida.specializations import build_active_specializations_payload
-
-    return await build_active_specializations_payload(
-        context_node_ids=context_node_ids,
-        project_tags=project_tags,
-        resource_plugins=resource_plugins,
-        selected_environment=selected_environment,
-        auto_switch=auto_switch,
-    )
-
-
-@app.get("/api/aiida/logs/copy", response_class=HTMLResponse)
-async def aiida_logs_copy_page():
-    """Open a tiny helper page and copy latest runtime logs to clipboard."""
-    _, lines = get_log_buffer_snapshot(limit=240)
-    payload = "\n".join(lines[-120:]) if lines else "No logs yet."
-    safe_payload = escape(payload)
-    
-    template_path = os.path.join(os.getcwd(), "src", "sab_engines", "aiida", "static", "logs_template.html")
-    try:
-        with open(template_path, "r", encoding="utf-8") as f:
-            template = f.read()
-            html = template.replace("{{safe_payload}}", safe_payload)
-            return HTMLResponse(html)
-    except Exception as error:
-        logger.error(log_event("aiida.logs.template.missing", path=template_path, error=str(error)))
-        return HTMLResponse(f"<html><body><pre>{safe_payload}</pre></body></html>")
 
 
 # ============================================================
@@ -315,28 +249,12 @@ if __name__ == "__main__":
             log_level=str(args.log_level).upper(),
         )
     )
-    reload_excludes: list[str] = []
-    if args.reload:
-        memory_dir = str(settings.SABR_MEMORY_DIR or "").strip()
-        if memory_dir:
-            cleaned = memory_dir.rstrip("/").rstrip("\\")
-            reload_excludes.extend([cleaned, f"{cleaned}/*"])
-        # Common local memory folders used in this repo.
-        reload_excludes.extend([
-            "src/sab_engines/aiida/data/memories",
-            "src/sab_engines/aiida/data/memories/*",
-            # Script archive files are generated during chat turns; exclude to prevent
-            # dev hot-reload from killing active SSE/stream responses.
-            "src/sab_engines/aiida/data/scripts",
-            "src/sab_engines/aiida/data/scripts/*",
-            "default",
-            "default/*",
-        ])
+    reload_excludes = collect_reload_excludes(settings) if args.reload else None
     uvicorn.run(
-        "src.app_api:app",
+        "apps.api.main:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
-        reload_excludes=reload_excludes or None,
+        reload_excludes=reload_excludes,
         log_config=None,
     )
