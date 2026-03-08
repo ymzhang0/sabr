@@ -4,7 +4,15 @@ import pytest
 
 from src.sab_engines.aiida.client import (
     AiiDAWorkerClient,
+    LEGACY_PROJECT_ID_HEADER,
+    LEGACY_SESSION_ID_HEADER,
+    LEGACY_WORKSPACE_PATH_HEADER,
+    PROJECT_ID_HEADER,
+    SESSION_ID_HEADER,
+    WORKSPACE_PATH_HEADER,
+    _merge_request_headers,
     aiida_worker_client,
+    build_bridge_context_headers,
     bridge_service,
     get_aiida_worker_client,
 )
@@ -16,6 +24,42 @@ def test_worker_client_singleton_aliases_are_stable() -> None:
     assert first is second
     assert aiida_worker_client is first
     assert bridge_service is first
+
+
+def test_build_bridge_context_headers_emits_canonical_and_legacy_aliases() -> None:
+    headers = build_bridge_context_headers(
+        session_id="chat-0308",
+        project_id="proj-0308",
+        workspace_path="/tmp/aris-session",
+    )
+
+    assert headers == {
+        SESSION_ID_HEADER: "chat-0308",
+        LEGACY_SESSION_ID_HEADER: "chat-0308",
+        PROJECT_ID_HEADER: "proj-0308",
+        LEGACY_PROJECT_ID_HEADER: "proj-0308",
+        WORKSPACE_PATH_HEADER: "/tmp/aris-session",
+        LEGACY_WORKSPACE_PATH_HEADER: "/tmp/aris-session",
+    }
+
+
+def test_merge_request_headers_upgrades_legacy_bridge_headers() -> None:
+    headers = _merge_request_headers(
+        {
+            LEGACY_SESSION_ID_HEADER: "chat-0308",
+            LEGACY_PROJECT_ID_HEADER: "proj-0308",
+            LEGACY_WORKSPACE_PATH_HEADER: "/tmp/legacy-session",
+        }
+    )
+
+    assert headers == {
+        SESSION_ID_HEADER: "chat-0308",
+        LEGACY_SESSION_ID_HEADER: "chat-0308",
+        PROJECT_ID_HEADER: "proj-0308",
+        LEGACY_PROJECT_ID_HEADER: "proj-0308",
+        WORKSPACE_PATH_HEADER: "/tmp/legacy-session",
+        LEGACY_WORKSPACE_PATH_HEADER: "/tmp/legacy-session",
+    }
 
 
 def test_worker_client_is_connected_property_tracks_status() -> None:

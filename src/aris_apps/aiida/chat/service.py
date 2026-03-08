@@ -17,13 +17,11 @@ from loguru import logger
 from pydantic_ai.settings import ModelSettings
 
 from src.aris_apps.aiida.client import (
-    PROJECT_ID_HEADER,
+    build_bridge_context_headers,
     reset_bridge_call_listener,
     reset_bridge_request_headers,
-    SESSION_ID_HEADER,
     set_bridge_call_listener,
     set_bridge_request_headers,
-    WORKSPACE_PATH_HEADER,
 )
 from src.aris_apps.aiida.frontend_bridge import inspect_group, list_groups, rename_group
 from src.aris_apps.aiida.presenters.workflow_view import enrich_submission_draft_payload
@@ -1390,11 +1388,11 @@ def _build_worker_workspace_headers(state: Any, session_id: str | None = None) -
         return None
     workspace_path = _ensure_session_workspace_dir(store, session)
     project = _get_store_project(store, str(session.get("project_id") or ""))
-    return {
-        WORKSPACE_PATH_HEADER: workspace_path,
-        SESSION_ID_HEADER: str(session.get("id") or ""),
-        PROJECT_ID_HEADER: str(project.get("id") or ""),
-    }
+    return build_bridge_context_headers(
+        workspace_path=workspace_path,
+        session_id=session.get("id"),
+        project_id=project.get("id"),
+    )
 
 
 def _resolve_workspace_target_path(workspace_root: Path, relative_path: str | None = None) -> Path:

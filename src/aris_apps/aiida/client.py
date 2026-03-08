@@ -30,9 +30,17 @@ _bridge_call_listener: contextvars.ContextVar[BridgeCallListener | None] = conte
     "aiida_bridge_call_listener",
     default=None,
 )
-WORKSPACE_PATH_HEADER = "X-SABR-Active-Workspace-Path"
-SESSION_ID_HEADER = "X-SABR-Session-Id"
-PROJECT_ID_HEADER = "X-SABR-Project-Id"
+WORKSPACE_PATH_HEADER = "X-ARIS-Active-Workspace-Path"
+SESSION_ID_HEADER = "X-ARIS-Session-Id"
+PROJECT_ID_HEADER = "X-ARIS-Project-Id"
+LEGACY_WORKSPACE_PATH_HEADER = "X-SABR-Active-Workspace-Path"
+LEGACY_SESSION_ID_HEADER = "X-SABR-Session-Id"
+LEGACY_PROJECT_ID_HEADER = "X-SABR-Project-Id"
+_BRIDGE_HEADER_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
+    (WORKSPACE_PATH_HEADER, LEGACY_WORKSPACE_PATH_HEADER),
+    (SESSION_ID_HEADER, LEGACY_SESSION_ID_HEADER),
+    (PROJECT_ID_HEADER, LEGACY_PROJECT_ID_HEADER),
+)
 _bridge_request_headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "aiida_bridge_request_headers",
     default=None,
@@ -129,18 +137,60 @@ def _extract_error_payload(response: httpx.Response) -> tuple[str, Any]:
     return message, payload
 
 
+def _normalize_header_entries(headers: Mapping[str, Any] | None = None) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    if not headers:
+        return normalized
+    for key, value in headers.items():
+        cleaned_key = str(key or "").strip()
+        cleaned_value = str(value or "").strip()
+        if cleaned_key and cleaned_value:
+            normalized[cleaned_key] = cleaned_value
+    return normalized
+
+
+def _apply_bridge_header_aliases(headers: Mapping[str, str] | None = None) -> dict[str, str] | None:
+    normalized = dict(headers or {})
+    if not normalized:
+        return None
+
+    for header_group in _BRIDGE_HEADER_ALIAS_GROUPS:
+        resolved_value = ""
+        for header_name in header_group:
+            candidate = str(normalized.get(header_name) or "").strip()
+            if candidate:
+                resolved_value = candidate
+                break
+        if not resolved_value:
+            continue
+        for header_name in header_group:
+            normalized[header_name] = resolved_value
+
+    return normalized or None
+
+
+def build_bridge_context_headers(
+    *,
+    session_id: Any = None,
+    project_id: Any = None,
+    workspace_path: Any = None,
+) -> dict[str, str] | None:
+    headers: dict[str, Any] = {}
+    if session_id is not None:
+        headers[SESSION_ID_HEADER] = session_id
+    if project_id is not None:
+        headers[PROJECT_ID_HEADER] = project_id
+    if workspace_path is not None:
+        headers[WORKSPACE_PATH_HEADER] = workspace_path
+    return _apply_bridge_header_aliases(_normalize_header_entries(headers))
+
+
 def _merge_request_headers(headers: Mapping[str, Any] | None = None) -> dict[str, str] | None:
     merged: dict[str, str] = {}
     scoped_headers = _bridge_request_headers.get()
     for payload in (scoped_headers, headers):
-        if not payload:
-            continue
-        for key, value in payload.items():
-            cleaned_key = str(key or "").strip()
-            cleaned_value = str(value or "").strip()
-            if cleaned_key and cleaned_value:
-                merged[cleaned_key] = cleaned_value
-    return merged or None
+        merged.update(_normalize_header_entries(payload))
+    return _apply_bridge_header_aliases(merged)
 
 
 class AiiDAWorkerClient:

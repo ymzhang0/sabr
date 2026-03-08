@@ -47,9 +47,7 @@ from .bridge_client import bridge_endpoint
 from .client import (
     BridgeAPIError,
     BridgeOfflineError,
-    PROJECT_ID_HEADER,
-    SESSION_ID_HEADER,
-    WORKSPACE_PATH_HEADER,
+    build_bridge_context_headers,
     bridge_service,
     request_json,
 )
@@ -455,19 +453,13 @@ def _build_submission_request_headers(state: Any) -> dict[str, str] | None:
     if not session_id:
         return None
 
-    headers: dict[str, str] = {
-        SESSION_ID_HEADER: session_id,
-    }
-
     active_project_id = get_active_chat_project_id(state)
-    if active_project_id:
-        headers[PROJECT_ID_HEADER] = active_project_id
-
     workspace_path = get_chat_session_workspace_path(state, session_id)
-    if workspace_path:
-        headers[WORKSPACE_PATH_HEADER] = workspace_path
-
-    return headers
+    return build_bridge_context_headers(
+        session_id=session_id,
+        project_id=active_project_id,
+        workspace_path=workspace_path,
+    )
 
 
 async def _ensure_submission_group(label: str) -> dict[str, Any] | None:

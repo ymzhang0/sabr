@@ -357,14 +357,14 @@ async def test_submit_bridge_workchain_single_adds_submitted_pk(monkeypatch: pyt
         assert method == "POST"
         assert path == "/submission/submit"
         assert "draft" in json
-        assert headers == {"X-SABR-Session-Id": "chat-0307"}
+        assert headers == {"X-ARIS-Session-Id": "chat-0307"}
         return {"status": "SUBMITTED", "pk": 321}
 
     monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
     monkeypatch.setattr(
         aiida_router,
         "_build_submission_request_headers",
-        lambda _state: {"X-SABR-Session-Id": "chat-0307"},
+        lambda _state: {"X-ARIS-Session-Id": "chat-0307"},
     )
     monkeypatch.setattr(aiida_router, "_auto_assign_submission_groups", _fake_auto_assign_submission_groups)
 
@@ -548,7 +548,7 @@ async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch:
         assert method == "POST"
         assert path == "/submission/submit"
         captured_request["payload"] = json
-        assert headers == {"X-SABR-Session-Id": "chat-0307"}
+        assert headers == {"X-ARIS-Session-Id": "chat-0307"}
         return {
             "status": "SUBMITTED_BATCH",
             "total": 3,
@@ -567,7 +567,7 @@ async def test_submit_bridge_workchain_batch_collects_submitted_pks(monkeypatch:
     monkeypatch.setattr(
         aiida_router,
         "_build_submission_request_headers",
-        lambda _state: {"X-SABR-Session-Id": "chat-0307"},
+        lambda _state: {"X-ARIS-Session-Id": "chat-0307"},
     )
     monkeypatch.setattr(aiida_router, "_auto_assign_submission_groups", _fake_auto_assign_submission_groups)
 

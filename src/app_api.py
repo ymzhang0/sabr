@@ -32,6 +32,17 @@ APP_MANIFESTS = iter_enabled_app_manifests()
 APP_MANIFESTS_BY_NAME = {manifest.name: manifest for manifest in APP_MANIFESTS}
 
 
+def _get_compat_env_value(*env_names: str, default: str | None = None) -> str | None:
+    for env_name in env_names:
+        value = os.getenv(env_name)
+        if value is None:
+            continue
+        cleaned = str(value).strip()
+        if cleaned:
+            return cleaned
+    return default
+
+
 def _configure_proxy_environment() -> None:
     """Normalize proxy environment variables from SABR settings."""
     use_proxy = bool(settings.SABR_USE_OUTBOUND_PROXY)
@@ -227,26 +238,34 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="Run SABR API server.")
+    parser = argparse.ArgumentParser(description="Run ARIS API server.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--reload", action="store_true")
     parser.add_argument(
         "--log-level",
-        default=os.getenv("SABR_LOG_LEVEL", "INFO"),
+        default=_get_compat_env_value(
+            "ARIS_LOG_LEVEL",
+            "SABR_LOG_LEVEL",
+            "ARIS_DEBUG_LEVEL",
+            "SABR_DEBUG_LEVEL",
+            default="INFO",
+        ),
         choices=["TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"],
     )
     args = parser.parse_args()
 
-    os.environ["SABR_LOG_LEVEL"] = str(args.log_level).upper()
-    setup_logging(default_level=str(args.log_level).upper())
+    runtime_log_level = str(args.log_level).upper()
+    os.environ["ARIS_LOG_LEVEL"] = runtime_log_level
+    os.environ["SABR_LOG_LEVEL"] = runtime_log_level
+    setup_logging(default_level=runtime_log_level)
     logger.info(
         log_event(
             "server.run",
             host=args.host,
             port=args.port,
             reload=args.reload,
-            log_level=str(args.log_level).upper(),
+            log_level=runtime_log_level,
         )
     )
     reload_excludes = collect_reload_excludes(settings) if args.reload else None

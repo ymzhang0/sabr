@@ -60,7 +60,30 @@ class _RingLogBuffer:
             return self._version, lines
 
 
-_LOG_BUFFER = _RingLogBuffer(maxlen=max(100, int(os.getenv("SABR_LOG_BUFFER_SIZE", "600"))))
+def _get_compat_env_value(primary_name: str, *legacy_names: str) -> str | None:
+    for env_name in (primary_name, *legacy_names):
+        value = os.getenv(env_name)
+        if value is None:
+            continue
+        cleaned = str(value).strip()
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _get_compat_env_int(primary_name: str, *legacy_names: str, default: int) -> int:
+    raw_value = _get_compat_env_value(primary_name, *legacy_names)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value)
+    except ValueError:
+        return default
+
+
+_LOG_BUFFER = _RingLogBuffer(
+    maxlen=max(100, _get_compat_env_int("ARIS_LOG_BUFFER_SIZE", "SABR_LOG_BUFFER_SIZE", default=600))
+)
 
 
 def _normalize_level(value: str | None, fallback: str = "INFO") -> str:
@@ -338,18 +361,30 @@ def setup_logging(default_level: str = "INFO") -> str:
     Configure unified logging for Loguru + stdlib logging + Uvicorn loggers.
 
     Environment variables:
-    - SABR_LOG_LEVEL: global level for app logs.
-    - SABR_ACCESS_LOG_LEVEL: level for uvicorn access logs.
-    - SABR_HTTPX_LOG_LEVEL: level for httpx/httpcore logs.
+    - ARIS_LOG_LEVEL / SABR_LOG_LEVEL: global level for app logs.
+    - ARIS_ACCESS_LOG_LEVEL / SABR_ACCESS_LOG_LEVEL: level for uvicorn access logs.
+    - ARIS_HTTPX_LOG_LEVEL / SABR_HTTPX_LOG_LEVEL: level for httpx/httpcore logs.
     """
     global_level = _normalize_level(
-        os.getenv("SABR_LOG_LEVEL") or os.getenv("SABR_DEBUG_LEVEL"),
+        _get_compat_env_value("ARIS_LOG_LEVEL", "SABR_LOG_LEVEL", "ARIS_DEBUG_LEVEL", "SABR_DEBUG_LEVEL"),
         fallback=_normalize_level(default_level),
     )
-    access_level = _normalize_level(os.getenv("SABR_ACCESS_LOG_LEVEL"), fallback="WARNING")
-    httpx_level = _normalize_level(os.getenv("SABR_HTTPX_LOG_LEVEL"), fallback="WARNING")
-    alembic_level = _normalize_level(os.getenv("SABR_ALEMBIC_LOG_LEVEL"), fallback="WARNING")
-    watchfiles_level = _normalize_level(os.getenv("SABR_WATCHFILES_LOG_LEVEL"), fallback="WARNING")
+    access_level = _normalize_level(
+        _get_compat_env_value("ARIS_ACCESS_LOG_LEVEL", "SABR_ACCESS_LOG_LEVEL"),
+        fallback="WARNING",
+    )
+    httpx_level = _normalize_level(
+        _get_compat_env_value("ARIS_HTTPX_LOG_LEVEL", "SABR_HTTPX_LOG_LEVEL"),
+        fallback="WARNING",
+    )
+    alembic_level = _normalize_level(
+        _get_compat_env_value("ARIS_ALEMBIC_LOG_LEVEL", "SABR_ALEMBIC_LOG_LEVEL"),
+        fallback="WARNING",
+    )
+    watchfiles_level = _normalize_level(
+        _get_compat_env_value("ARIS_WATCHFILES_LOG_LEVEL", "SABR_WATCHFILES_LOG_LEVEL"),
+        fallback="WARNING",
+    )
 
     logger.remove()
     logger.configure(patcher=_patch_record)
