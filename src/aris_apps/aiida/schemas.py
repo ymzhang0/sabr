@@ -44,8 +44,21 @@ class FrontendChatDeleteRequest(BaseModel):
     session_ids: list[str] = Field(default_factory=list)
 
 
+class InterpreterInfoPayload(BaseModel):
+    python_path: str | None = None
+    workspace_path: str | None = None
+
+
 class SubmissionDraftRequest(BaseModel):
     draft: dict[str, Any] | list[dict[str, Any]] = Field(default_factory=dict)
+    interpreter_info: InterpreterInfoPayload | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class EnvironmentInspectRequest(BaseModel):
+    python_path: str | None = None
+    workspace_path: str | None = None
+    use_worker_default: bool = False
 
 
 class SystemCountsResponse(BaseModel):

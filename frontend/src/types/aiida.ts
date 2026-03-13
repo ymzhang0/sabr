@@ -282,6 +282,51 @@ export type SendChatRequest = {
   metadata?: Record<string, unknown>;
 };
 
+export type InterpreterInfo = {
+  python_path: string | null;
+  workspace_path: string | null;
+};
+
+export type EnvironmentPluginGroups = {
+  calculations: string[];
+  workflows: string[];
+  data: string[];
+};
+
+export type EnvironmentInspectionCode = {
+  label?: string | null;
+  default_plugin?: string | null;
+  computer_label?: string | null;
+  [key: string]: unknown;
+};
+
+export type EnvironmentInspectionComputer = {
+  label?: string | null;
+  hostname?: string | null;
+  description?: string | null;
+  is_enabled?: boolean | null;
+  [key: string]: unknown;
+};
+
+export type EnvironmentInspectionResponse = {
+  success: boolean;
+  mode: "project" | "worker-default";
+  source: string;
+  python_path: string | null;
+  workspace_path: string | null;
+  python_interpreter_path?: string | null;
+  python_version?: string | null;
+  aiida_core_version?: string | null;
+  profile?: string | null;
+  plugins: string[];
+  plugin_groups?: Partial<EnvironmentPluginGroups> | null;
+  codes: EnvironmentInspectionCode[];
+  computers: EnvironmentInspectionComputer[];
+  errors?: Array<Record<string, unknown>>;
+  cached?: boolean;
+  cached_at?: string | null;
+};
+
 export type SubmissionResponse = Record<string, unknown>;
 
 export type NodeHoverMetadataResponse = {

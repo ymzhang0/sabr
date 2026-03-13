@@ -46,6 +46,7 @@ import {
   type SubmissionModalState,
   type SubmissionSubmitDraft,
 } from "@/components/dashboard/submission-modal";
+import { useProjectEnvironmentSync } from "@/store/EnvironmentStore";
 import type {
   ChatMessage,
   ChatSessionSnapshot,
@@ -668,8 +669,10 @@ export default function App() {
     chatProjects.find((project) => project.id === (activeWorkspaceProjectId ?? activeProjectId ?? "")) ?? null;
   const resolvedActiveChatSessionId = activeChatSessionId ?? chatSessionsQuery.data?.active_session_id ?? null;
   const activeChatSession = chatSessions.find((session) => session.id === resolvedActiveChatSessionId) ?? null;
+  const currentProjectPath = selectedWorkspaceProject?.root_path ?? activeChatSession?.workspace_path ?? null;
   const currentContextGroupLabel = resolveCurrentContextGroupLabel(activeChatSession);
   const selectedGroupLabel = resolveSelectedGroupLabel(selectedGroup, currentContextGroupLabel);
+  useProjectEnvironmentSync(currentProjectPath);
 
   const processesQuery = useQuery({
     queryKey: ["processes", selectedGroup, selectedGroupLabel, processLimit, nodeTypeFilter],

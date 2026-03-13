@@ -84,6 +84,7 @@ from .service import (
 from .specializations import build_active_specializations_payload
 from .infrastructure_manager import infrastructure_manager
 from .schemas import (
+    EnvironmentInspectRequest,
     FrontendChatRequest,
     FrontendStopChatRequest,
     FrontendChatDeleteRequest,
@@ -1505,6 +1506,11 @@ async def _submit_bridge_workchain_impl(
     if require_batch_list and not isinstance(draft_payload, list):
         raise HTTPException(status_code=422, detail="Batch submission draft list is required")
     worker_request_headers = _build_submission_request_headers(request.app.state)
+    worker_payload: dict[str, Any] = {"draft": draft_payload}
+    if payload.interpreter_info is not None:
+        worker_payload["interpreter_info"] = payload.interpreter_info.model_dump()
+    if payload.metadata is not None:
+        worker_payload["metadata"] = payload.metadata
     if isinstance(draft_payload, list):
         if len(draft_payload) == 0:
             raise HTTPException(status_code=422, detail="Submission draft list cannot be empty")
@@ -1512,7 +1518,7 @@ async def _submit_bridge_workchain_impl(
             raw = await request_json(
                 "POST",
                 "/submission/submit",
-                json={"draft": draft_payload},
+                json=worker_payload,
                 headers=worker_request_headers,
             )
         except Exception as exc:
@@ -1539,7 +1545,7 @@ async def _submit_bridge_workchain_impl(
         raw = await request_json(
             "POST",
             "/submission/submit",
-            json={"draft": draft_payload},
+            json=worker_payload,
             headers=worker_request_headers,
         )
         response = format_single_submission_response(raw)
@@ -1567,6 +1573,61 @@ async def submit_bridge_workchain(request: Request, payload: SubmissionDraftRequ
 @router.post("/submission/submit_batch", tags=[WORKER_PROXY_TAG])
 async def submit_bridge_workchain_batch(request: Request, payload: SubmissionDraftRequest):
     return await _submit_bridge_workchain_impl(request, payload, require_batch_list=True)
+
+
+@router.post("/frontend/environment/inspect", tags=[FRONTEND_TAG])
+async def frontend_environment_inspect(payload: EnvironmentInspectRequest):
+    python_path = str(payload.python_path or "").strip() or None
+    workspace_path = str(payload.workspace_path or "").strip() or None
+
+    if payload.use_worker_default or not python_path:
+        try:
+            snapshot = await bridge_service.get_status(force_refresh=True)
+            infrastructure = await bridge_service.inspect_infrastructure(force_refresh=True)
+        except Exception as exc:
+            _raise_worker_http_error(exc)
+
+        computers = infrastructure.get("computers") if isinstance(infrastructure, dict) and isinstance(infrastructure.get("computers"), list) else []
+        codes = infrastructure.get("codes") if isinstance(infrastructure, dict) and isinstance(infrastructure.get("codes"), list) else []
+        plugins = [plugin for plugin in snapshot.plugins if isinstance(plugin, str) and plugin.strip()]
+        return {
+            "success": True,
+            "mode": "worker-default",
+            "source": "worker-bridge",
+            "python_path": None,
+            "workspace_path": workspace_path,
+            "profile": snapshot.profile,
+            "plugins": plugins,
+            "plugin_groups": {
+                "calculations": [],
+                "workflows": plugins,
+                "data": [],
+            },
+            "codes": codes,
+            "computers": computers,
+            "errors": [],
+        }
+
+    try:
+        raw = await request_json(
+            "POST",
+            "/management/environments/inspect",
+            json={
+                "python_interpreter_path": python_path,
+                "force_refresh": False,
+            },
+        )
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=502, detail={"error": "Worker returned invalid environment inspection payload"})
+
+    raw["mode"] = "project"
+    raw["source"] = "environment-inspect"
+    raw["python_path"] = python_path
+    raw["workspace_path"] = workspace_path
+    return raw
 
 
 @router.get("/process/events", tags=[WORKER_PROXY_TAG])

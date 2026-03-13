@@ -38,11 +38,13 @@ import type {
   SendChatRequest,
   SoftDeleteNodeResponse,
   SubmissionResponse,
+  InterpreterInfo,
   UploadArchiveResponse,
   UserInfoResponse,
   ProfileSetupRequest,
   ImportDataResponse,
 } from "@/types/aiida";
+import { getEnvironmentState } from "@/store/EnvironmentStore";
 
 export const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
 export const FRONTEND_API_PREFIX = "/api/aiida/frontend";
@@ -106,6 +108,56 @@ const specializationsApi = axios.create({
 export type SubmissionSubmitDraftPayload =
   | Record<string, unknown>
   | Array<Record<string, unknown>>;
+
+function basenamePath(value: string | null | undefined): string {
+  const normalized = String(value || "").trim().replace(/\\/g, "/");
+  if (!normalized) {
+    return "";
+  }
+  const parts = normalized.split("/").filter(Boolean);
+  return parts[parts.length - 1] || normalized;
+}
+
+function mergePromptOverride(...values: Array<unknown>): string | undefined {
+  const merged = values
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter(Boolean)
+    .join("\n\n");
+  return merged || undefined;
+}
+
+function buildInterpreterInfo(): InterpreterInfo {
+  const state = getEnvironmentState();
+  return {
+    python_path: state.useWorkerDefault ? null : state.pythonPath,
+    workspace_path: state.currentProjectPath,
+  };
+}
+
+function buildEnvironmentSystemPrompt(): string | null {
+  const state = getEnvironmentState();
+  const projectName = basenamePath(state.currentProjectPath) || (state.useWorkerDefault ? "worker-global" : "current-project");
+  const plugins = state.availablePlugins;
+  const pluginList = plugins.length > 0 ? plugins.join(", ") : "aiida-core only";
+  const modeLabel = state.useWorkerDefault ? "Worker Environment (Global)" : "Project Environment (Isolated)";
+  return `Context: Current environment is ${projectName}. Mode: ${modeLabel}. Available AiiDA plugins: ${pluginList}. Please generate code compatible with these plugins.`;
+}
+
+function buildEnvironmentMetadata(): Record<string, unknown> {
+  const state = getEnvironmentState();
+  const interpreterInfo = buildInterpreterInfo();
+  return {
+    interpreter_info: interpreterInfo,
+    environment_mode: state.useWorkerDefault ? "worker-default" : "project",
+    environment_status: state.inspectionStatus,
+    environment_project_path: state.currentProjectPath,
+    environment_python_path: interpreterInfo.python_path,
+    environment_plugins: state.availablePlugins,
+    environment_codes: state.availableCodes,
+    environment_computers: state.availableComputers,
+    environment_last_error: state.lastError,
+  };
+}
 
 export async function getBootstrap(): Promise<BootstrapResponse> {
   const { data } = await frontendApi.get<BootstrapResponse>("/bootstrap");
@@ -368,7 +420,21 @@ export async function sendChat(
   payload: SendChatRequest,
   signal?: AbortSignal,
 ): Promise<{ turn_id: number }> {
-  const { data } = await frontendApi.post<{ turn_id: number }>("/chat", payload, { signal });
+  const payloadMetadata = payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata)
+    ? payload.metadata
+    : {};
+  const environmentMetadata = buildEnvironmentMetadata();
+  const environmentPrompt = buildEnvironmentSystemPrompt();
+  const promptOverride = mergePromptOverride(payloadMetadata.prompt_override, environmentPrompt);
+  const metadata = {
+    ...environmentMetadata,
+    ...payloadMetadata,
+    ...(promptOverride ? { prompt_override: promptOverride } : {}),
+  };
+  const { data } = await frontendApi.post<{ turn_id: number }>("/chat", {
+    ...payload,
+    metadata,
+  }, { signal });
   return data;
 }
 
@@ -450,7 +516,11 @@ export async function submitPreviewDraft(
   draft: SubmissionSubmitDraftPayload,
 ): Promise<SubmissionResponse> {
   const endpoint = Array.isArray(draft) ? "/submission/submit_batch" : "/submission/submit";
-  const { data } = await aiidaApi.post<SubmissionResponse>(endpoint, { draft });
+  const { data } = await aiidaApi.post<SubmissionResponse>(endpoint, {
+    draft,
+    interpreter_info: buildInterpreterInfo(),
+    metadata: buildEnvironmentMetadata(),
+  });
   return data;
 }
 

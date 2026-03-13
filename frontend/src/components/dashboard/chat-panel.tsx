@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, Pin, PlugZap, PlusSquare, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
+import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, Pin, PlugZap, PlusSquare, RefreshCw, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
 import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ActionToolbar } from "@/components/dashboard/action-toolbar";
@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { Panel } from "@/components/ui/panel";
 import { cancelPendingSubmission, getActiveSpecializations, getNodeHoverMetadata, submitPreviewDraft } from "@/lib/api";
+import { useEnvironmentActions, useEnvironmentStore } from "@/store/EnvironmentStore";
 import { cn } from "@/lib/utils";
 import type {
   ActiveSpecializationsResponse,
@@ -1549,6 +1550,10 @@ function buildEnvironmentOptions(payload: ActiveSpecializationsResponse | undefi
   });
 }
 
+function formatEnvironmentModeLabel(useWorkerDefault: boolean): string {
+  return useWorkerDefault ? "Worker Environment (Global)" : "Project Environment (Isolated)";
+}
+
 export function ChatPanel({
   messages,
   models,
@@ -1583,6 +1588,13 @@ export function ChatPanel({
   onSessionParametersChange,
 }: ChatPanelProps) {
   const queryClient = useQueryClient();
+  const environmentState = useEnvironmentStore((state) => state);
+  const {
+    setUseWorkerDefault,
+    setPythonPath,
+    resetPythonPath,
+    refreshInspection,
+  } = useEnvironmentActions();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
@@ -1609,6 +1621,7 @@ export function ChatPanel({
   const [stableSubmissionDraftByTurn, setStableSubmissionDraftByTurn] = useState<
     Record<number, SubmissionDraftPreview>
   >({});
+  const [pythonPathDraft, setPythonPathDraft] = useState(environmentState.pythonPath ?? "");
   const [nodeHoverMetadataByPk, setNodeHoverMetadataByPk] = useState<Record<number, NodeHoverMetadataState>>({});
   const nodeHoverMetadataRef = useRef<Record<number, NodeHoverMetadataState>>({});
   const previewStateByTurnRef = useRef<Record<number, SubmissionModalState>>({});
@@ -1659,6 +1672,10 @@ export function ChatPanel({
     previewStateByTurnRef.current = previewStateByTurn;
   }, [previewStateByTurn]);
 
+  useEffect(() => {
+    setPythonPathDraft(environmentState.pythonPath ?? "");
+  }, [environmentState.pythonPath]);
+
   const activeResourcePlugins = useMemo(() => {
     const values = new Set<string>();
     resourceAttachments.forEach((attachment) => {
@@ -1671,6 +1688,16 @@ export function ChatPanel({
     });
     return [...values];
   }, [resourceAttachments]);
+  const effectiveResourcePlugins = useMemo(() => {
+    const values = new Set<string>(environmentState.availablePlugins.map((value) => value.trim().toLowerCase()).filter(Boolean));
+    activeResourcePlugins.forEach((value) => {
+      const normalized = value.trim().toLowerCase();
+      if (normalized) {
+        values.add(normalized);
+      }
+    });
+    return [...values].sort();
+  }, [activeResourcePlugins, environmentState.availablePlugins]);
   const effectiveContextNodes = useMemo(
     () => dedupeFocusNodes([...pinnedNodes, ...contextNodes]),
     [contextNodes, pinnedNodes],
@@ -1682,7 +1709,7 @@ export function ChatPanel({
       "active",
       effectiveContextNodes.map((node) => node.pk).sort((left, right) => left - right).join(","),
       [...projectTags].sort().join(","),
-      [...activeResourcePlugins].sort().join(","),
+      effectiveResourcePlugins.join(","),
       sessionEnvironment ?? "",
       sessionEnvironmentAuto ? "auto" : "manual",
     ],
@@ -1690,7 +1717,7 @@ export function ChatPanel({
       getActiveSpecializations({
         contextNodeIds: effectiveContextNodes.map((node) => node.pk),
         projectTags,
-        resourcePlugins: activeResourcePlugins,
+        resourcePlugins: effectiveResourcePlugins,
         selectedEnvironment: sessionEnvironment,
         autoSwitch: sessionEnvironmentAuto,
       }),
@@ -1707,6 +1734,13 @@ export function ChatPanel({
   const resolvedEnvironmentLabel =
     environmentOptions.find((item) => item.name === resolvedEnvironmentName)?.label ?? "Generic";
   const selectedEnvironmentName = sessionEnvironment ?? resolvedEnvironmentName;
+  const environmentModeLabel = formatEnvironmentModeLabel(environmentState.useWorkerDefault);
+  const environmentInspection = environmentState.inspection;
+  const environmentStatusTone = environmentState.inspectionStatus === "ready"
+    ? "border-emerald-200/80 bg-emerald-50/60 dark:border-emerald-900/60 dark:bg-emerald-950/20"
+    : environmentState.inspectionStatus === "error"
+      ? "border-rose-200/80 bg-rose-50/60 dark:border-rose-900/60 dark:bg-rose-950/20"
+      : "border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-900/60";
   const slashQuery = useMemo(() => {
     const trimmed = draft.trimStart();
     if (!trimmed.startsWith("/")) {
@@ -2266,6 +2300,9 @@ export function ChatPanel({
     },
     [onSessionEnvironmentAutoChange, onSessionEnvironmentChange],
   );
+  const handleApplyPythonPath = useCallback(() => {
+    setPythonPath(pythonPathDraft);
+  }, [pythonPathDraft, setPythonPath]);
 
   const handleSessionParameterChange = useCallback(
     (index: number, field: "key" | "value", value: string) => {
@@ -2969,6 +3006,111 @@ export function ChatPanel({
                 Environment
               </p>
               <div className="mt-3 space-y-3 text-sm">
+                <div className={cn("rounded-xl border px-3 py-3", environmentStatusTone)}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">{environmentModeLabel}</p>
+                      <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                        {environmentState.currentProjectPath || "No project path selected"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200/80 bg-white/80 text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                      onClick={() => {
+                        void refreshInspection();
+                      }}
+                      disabled={environmentState.inspectionStatus === "loading"}
+                      aria-label="Refresh environment inspection"
+                      title="Refresh environment inspection"
+                    >
+                      <RefreshCw className={cn("h-3.5 w-3.5", environmentState.inspectionStatus === "loading" && "animate-spin")} />
+                    </button>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    <label className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+                        checked={environmentState.useWorkerDefault}
+                        onChange={(event) => setUseWorkerDefault(event.target.checked)}
+                      />
+                      Use worker default environment
+                    </label>
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+                        Interpreter Path
+                      </label>
+                      <input
+                        value={pythonPathDraft}
+                        onChange={(event) => setPythonPathDraft(event.target.value)}
+                        disabled={environmentState.useWorkerDefault}
+                        placeholder="Auto-detected from .venv"
+                        className="w-full rounded-lg border border-zinc-200/80 bg-white/80 px-3 py-2 text-xs text-zinc-800 outline-none focus:border-zinc-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-100 dark:focus:border-zinc-600"
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={handleApplyPythonPath}
+                          disabled={environmentState.useWorkerDefault}
+                        >
+                          Apply
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={resetPythonPath}
+                          disabled={environmentState.useWorkerDefault}
+                        >
+                          Reset Auto
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-2 text-[11px] text-zinc-600 dark:text-zinc-300">
+                      <div className="rounded-lg border border-zinc-200/80 bg-white/70 px-2 py-2 dark:border-zinc-800 dark:bg-zinc-950/60">
+                        <div className="text-zinc-400 dark:text-zinc-500">Plugins</div>
+                        <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{environmentState.availablePlugins.length}</div>
+                      </div>
+                      <div className="rounded-lg border border-zinc-200/80 bg-white/70 px-2 py-2 dark:border-zinc-800 dark:bg-zinc-950/60">
+                        <div className="text-zinc-400 dark:text-zinc-500">Codes</div>
+                        <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{environmentState.availableCodes.length}</div>
+                      </div>
+                      <div className="rounded-lg border border-zinc-200/80 bg-white/70 px-2 py-2 dark:border-zinc-800 dark:bg-zinc-950/60">
+                        <div className="text-zinc-400 dark:text-zinc-500">Computers</div>
+                        <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{environmentState.availableComputers.length}</div>
+                      </div>
+                    </div>
+                    {environmentInspection?.aiida_core_version ? (
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        aiida-core {environmentInspection.aiida_core_version}
+                        {environmentInspection.profile ? ` · profile ${environmentInspection.profile}` : ""}
+                      </p>
+                    ) : null}
+                    {environmentState.availablePlugins.length > 0 ? (
+                      <div className="flex flex-wrap gap-1.5">
+                        {environmentState.availablePlugins.slice(0, 8).map((plugin) => (
+                          <span
+                            key={`environment-plugin-${plugin}`}
+                            className="inline-flex items-center rounded-full border border-sky-300/80 bg-sky-50/95 px-2 py-1 text-[10px] font-medium text-sky-700 dark:border-sky-800/70 dark:bg-sky-950/40 dark:text-sky-200"
+                          >
+                            {plugin}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {environmentState.lastError ? (
+                      <p className="text-[11px] text-rose-600 dark:text-rose-300">{environmentState.lastError}</p>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="border-t border-dashed border-zinc-200 pt-3 dark:border-zinc-800">
+                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+                    Agent Routing
+                  </p>
+                </div>
                 <CommandPaletteSelect
                   value={selectedEnvironmentName}
                   options={environmentOptions.map((option) => ({
