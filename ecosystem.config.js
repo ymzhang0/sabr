@@ -23,7 +23,7 @@ module.exports = {
             name: 'aris-web',
             cwd: '/Users/yimingzhang/Developer/aris-workspace/aris/apps/web',
             script: 'npm',
-            args: 'run dev',
+            args: 'run dev -- --host 127.0.0.1 --port 5173',
         },
         {
             name: "aris-tunnel",
