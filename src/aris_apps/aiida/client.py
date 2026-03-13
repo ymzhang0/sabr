@@ -549,6 +549,13 @@ class AiiDAWorkerClient:
         payload = await self._fetch_json("/management/infrastructure", timeout_seconds=max(8.0, self._request_timeout_seconds))
         return payload if isinstance(payload, list) else []
 
+    async def get_infrastructure_capabilities(self) -> dict[str, Any]:
+        payload = await self._fetch_json(
+            "/management/infrastructure/capabilities",
+            timeout_seconds=max(5.0, self._request_timeout_seconds),
+        )
+        return payload if isinstance(payload, dict) else {}
+
     async def setup_infrastructure(self, config: dict[str, Any]) -> dict[str, Any]:
         return await self._post_json(
             "/management/infrastructure/setup",

@@ -19,7 +19,13 @@ import { Button } from "@/components/ui/button";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import type { ParseInfrastructureResponse } from "@/types/aiida";
 import { cn } from "@/lib/utils";
-import { parseInfrastructure, setupInfrastructure, getSshHosts, type SSHHostDetails } from "@/lib/api";
+import {
+    getInfrastructureCapabilities,
+    getSshHosts,
+    parseInfrastructure,
+    setupInfrastructure,
+    type SSHHostDetails,
+} from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
 
 type QuickAddModalProps = {
@@ -29,29 +35,41 @@ type QuickAddModalProps = {
 };
 
 type InfrastructureParseData = ParseInfrastructureResponse["data"];
+const SYNC_SSH_TRANSPORT = "core.ssh";
+const ASYNC_SSH_TRANSPORT = "core.ssh_async";
+const LOCAL_TRANSPORT = "core.local";
 
-const DEFAULT_COMPUTER_CONFIG: NonNullable<InfrastructureParseData["computer"]> = {
-    label: "",
-    hostname: "",
-    username: "",
-    description: "",
-    transport_type: "core.ssh",
-    scheduler_type: "core.direct",
-    shebang: "#!/bin/bash",
-    work_dir: "/tmp/aiida",
-    mpiprocs_per_machine: 1,
-    mpirun_command: "mpirun -np {tot_num_mpiprocs}",
-    default_memory_per_machine: null,
-    use_double_quotes: false,
-    prepend_text: "",
-    append_text: "",
-    key_filename: "",
-    proxy_command: "",
-    proxy_jump: "",
-    safe_interval: 0,
-    use_login_shell: true,
-    connection_timeout: 60,
-};
+function buildDefaultComputerConfig(
+    recommendedTransport = SYNC_SSH_TRANSPORT,
+): NonNullable<InfrastructureParseData["computer"]> {
+    const isAsyncTransport = recommendedTransport === ASYNC_SSH_TRANSPORT;
+    return {
+        label: "",
+        hostname: "",
+        username: "",
+        description: "",
+        transport_type: recommendedTransport,
+        scheduler_type: "core.direct",
+        shebang: "#!/bin/bash",
+        work_dir: "/tmp/aiida",
+        mpiprocs_per_machine: 1,
+        mpirun_command: "mpirun -np {tot_num_mpiprocs}",
+        default_memory_per_machine: null,
+        use_double_quotes: false,
+        prepend_text: "",
+        append_text: "",
+        key_filename: "",
+        proxy_command: "",
+        proxy_jump: "",
+        safe_interval: 0,
+        use_login_shell: true,
+        connection_timeout: isAsyncTransport ? null : 60,
+        host: "",
+        max_io_allowed: null,
+        authentication_script: "",
+        backend: isAsyncTransport ? "asyncssh" : "",
+    };
+}
 
 const DEFAULT_CODE_CONFIG: NonNullable<InfrastructureParseData["code"]> = {
     label: "",
@@ -62,23 +80,27 @@ const DEFAULT_CODE_CONFIG: NonNullable<InfrastructureParseData["code"]> = {
     append_text: "",
 };
 
-function createEmptyParseResult(): InfrastructureParseData {
+function createEmptyParseResult(recommendedTransport = SYNC_SSH_TRANSPORT): InfrastructureParseData {
     return {
         type: "computer",
         preset_matched: false,
         preset_domain: "",
-        computer: { ...DEFAULT_COMPUTER_CONFIG },
+        computer: { ...buildDefaultComputerConfig(recommendedTransport) },
         code: { ...DEFAULT_CODE_CONFIG },
     };
 }
 
-function mergeParseResult(raw?: InfrastructureParseData | null): InfrastructureParseData {
+function mergeParseResult(
+    raw?: InfrastructureParseData | null,
+    recommendedTransport = SYNC_SSH_TRANSPORT,
+): InfrastructureParseData {
+    const defaultComputerConfig = buildDefaultComputerConfig(recommendedTransport);
     return {
         type: raw?.type ?? "computer",
         preset_matched: Boolean(raw?.preset_matched),
         preset_domain: raw?.preset_domain ?? "",
         computer: {
-            ...DEFAULT_COMPUTER_CONFIG,
+            ...defaultComputerConfig,
             ...(raw?.computer ?? {}),
         },
         code: {
@@ -99,6 +121,16 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
     const [showAdvanced, setShowAdvanced] = useState(false);
     const [selectedSshHost, setSelectedSshHost] = useState<string>("");
 
+    const capabilitiesQuery = useQuery({
+        queryKey: ["infrastructure-capabilities"],
+        queryFn: getInfrastructureCapabilities,
+    });
+    const capabilities = capabilitiesQuery.data;
+    const recommendedTransport = capabilities?.recommended_transport || SYNC_SSH_TRANSPORT;
+    const availableTransports = capabilities?.available_transports?.length
+        ? capabilities.available_transports
+        : [LOCAL_TRANSPORT, SYNC_SSH_TRANSPORT];
+
     const sshHostsQuery = useQuery({
         queryKey: ["ssh-hosts"],
         queryFn: getSshHosts,
@@ -116,19 +148,33 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
         setActiveTab("paste");
         setShowAdvanced(false);
         setSelectedSshHost("");
-        setParseResult(createEmptyParseResult());
-    }, [isOpen]);
+        setParseResult(createEmptyParseResult(recommendedTransport));
+    }, [isOpen, recommendedTransport]);
+
+    useEffect(() => {
+        if (!isOpen || !capabilities) {
+            return;
+        }
+        setParseResult((current) => {
+            const computer = current.computer ?? {};
+            const isPristine = !computer.label && !computer.hostname && !computer.username;
+            if (!isPristine || (computer.transport_type && computer.transport_type !== SYNC_SSH_TRANSPORT)) {
+                return current;
+            }
+            return mergeParseResult(current, recommendedTransport);
+        });
+    }, [capabilities, isOpen, recommendedTransport]);
 
     const updateComputer = useCallback((patch: Partial<NonNullable<InfrastructureParseData["computer"]>>) => {
         setParseResult((current) => ({
             ...current,
             computer: {
-                ...DEFAULT_COMPUTER_CONFIG,
+                ...buildDefaultComputerConfig(recommendedTransport),
                 ...(current.computer ?? {}),
                 ...patch,
             },
         }));
-    }, []);
+    }, [recommendedTransport]);
 
     const updateCode = useCallback((patch: Partial<NonNullable<InfrastructureParseData["code"]>>) => {
         setParseResult((current) => ({
@@ -141,18 +187,73 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
         }));
     }, []);
 
+    const handleTransportChange = useCallback((nextTransport: string) => {
+        setParseResult((current) => {
+            const base = {
+                ...buildDefaultComputerConfig(recommendedTransport),
+                ...(current.computer ?? {}),
+                transport_type: nextTransport,
+            };
+
+            if (nextTransport === ASYNC_SSH_TRANSPORT) {
+                return {
+                    ...current,
+                    computer: {
+                        ...base,
+                        username: "",
+                        key_filename: "",
+                        proxy_command: "",
+                        proxy_jump: "",
+                        connection_timeout: null,
+                        host: base.host || base.hostname || selectedSshHost || "",
+                        backend: base.backend || "asyncssh",
+                    },
+                };
+            }
+
+            if (nextTransport === LOCAL_TRANSPORT) {
+                return {
+                    ...current,
+                    computer: {
+                        ...base,
+                        username: "",
+                        key_filename: "",
+                        proxy_command: "",
+                        proxy_jump: "",
+                        host: "",
+                        max_io_allowed: null,
+                        authentication_script: "",
+                        backend: "",
+                        connection_timeout: null,
+                    },
+                };
+            }
+
+            return {
+                ...current,
+                computer: {
+                    ...base,
+                    host: "",
+                    max_io_allowed: null,
+                    authentication_script: "",
+                    backend: "",
+                    connection_timeout: base.connection_timeout ?? 60,
+                },
+            };
+        });
+    }, [recommendedTransport, selectedSshHost]);
+
     const handleParse = async () => {
         if (!pasteText.trim() && !selectedSshHost) return;
         setIsParsing(true);
         setError(null);
         try {
             const hostDetails = sshHosts.find(h => h.alias === selectedSshHost) || null;
-            // If we have an SSH host selected but no paste text, use a dummy text to trigger parse
             const textToParse = pasteText.trim() || `Configure computer for SSH host ${selectedSshHost}`;
 
             const response = await parseInfrastructure(textToParse, hostDetails);
             if (response.status === "success" && response.data) {
-                setParseResult(mergeParseResult(response.data));
+                setParseResult(mergeParseResult(response.data, recommendedTransport));
                 setActiveTab("form");
             } else {
                 setError("Failed to parse input. Please try again or fill manually.");
@@ -169,6 +270,26 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
             setError("Computer configuration is missing.");
             return;
         }
+        const transportType = parseResult.computer.transport_type || recommendedTransport;
+        if (!availableTransports.includes(transportType)) {
+            setError(
+                `Transport ${transportType} is not available for aiida-core ${capabilities?.aiida_core_version || "this installation"}.`,
+            );
+            return;
+        }
+        if (transportType === ASYNC_SSH_TRANSPORT) {
+            const legacyFields = ["username", "key_filename", "proxy_command", "proxy_jump", "connection_timeout"]
+                .filter((field) => {
+                    const value = (parseResult.computer as Record<string, unknown>)[field];
+                    return value !== null && value !== undefined && value !== "";
+                });
+            if (legacyFields.length > 0) {
+                setError(
+                    `core.ssh_async does not accept legacy SSH fields: ${legacyFields.join(", ")}. Use SSH host alias, backend, authentication script, and max I/O instead.`,
+                );
+                return;
+            }
+        }
         setIsSubmitting(true);
         setError(null);
 
@@ -178,7 +299,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                 hostname: parseResult.computer.hostname || "unknown_host",
                 username: parseResult.computer.username || "",
                 computer_description: parseResult.computer.description || "",
-                transport_type: parseResult.computer.transport_type || "core.ssh",
+                transport_type: transportType,
                 scheduler_type: parseResult.computer.scheduler_type || "core.direct",
                 shebang: parseResult.computer.shebang || "#!/bin/bash",
                 work_dir: parseResult.computer.work_dir || "/tmp/aiida",
@@ -190,10 +311,14 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                 append_text: parseResult.computer.append_text || "",
                 use_login_shell: parseResult.computer.use_login_shell !== false,
                 safe_interval: parseResult.computer.safe_interval || 0.0,
-                connection_timeout: parseResult.computer.connection_timeout || 60,
+                connection_timeout: parseResult.computer.connection_timeout ?? null,
                 key_filename: parseResult.computer.key_filename || "",
                 proxy_command: parseResult.computer.proxy_command || "",
-                proxy_jump: parseResult.computer.proxy_jump || ""
+                proxy_jump: parseResult.computer.proxy_jump || "",
+                host: parseResult.computer.host || "",
+                max_io_allowed: parseResult.computer.max_io_allowed ?? null,
+                authentication_script: parseResult.computer.authentication_script || "",
+                backend: parseResult.computer.backend || "",
             };
 
             const code = parseResult.code;
@@ -220,6 +345,10 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
         }
     };
 
+
+    const selectedTransport = parseResult.computer?.transport_type || recommendedTransport;
+    const isAsyncTransport = selectedTransport === ASYNC_SSH_TRANSPORT;
+    const isLocalTransport = selectedTransport === LOCAL_TRANSPORT;
 
     if (!isOpen) return null;
 
@@ -301,9 +430,16 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
 
                             <div className="bg-blue-50/50 dark:bg-blue-900/20 border border-blue-100/50 dark:border-blue-900/30 rounded-xl p-4 flex gap-3">
                                 <Wand2 className="h-5 w-5 text-blue-500 shrink-0" />
-                                <p className="text-sm text-blue-700 dark:text-blue-300">
-                                    Tip: Direct SSH aliases or job scheduler configs work best. Gemini will auto-extract labels, hostnames, and paths.
-                                </p>
+                                <div className="space-y-1 text-sm text-blue-700 dark:text-blue-300">
+                                    <p>
+                                        Tip: paste exported computer YAML, scheduler snippets, or select an SSH host alias. Structured YAML is parsed locally before AI fallback.
+                                    </p>
+                                    <p className="text-xs">
+                                        aiida-core: <span className="font-mono">{capabilities?.aiida_core_version || "detecting..."}</span>
+                                        {" · "}
+                                        transports: <span className="font-mono">{availableTransports.join(", ")}</span>
+                                    </p>
+                                </div>
                             </div>
 
                             <Button
@@ -362,11 +498,15 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                 </div>
                                                 <div className="space-y-1">
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Transport Type</label>
-                                                    <input
-                                                        value={parseResult.computer.transport_type || ""}
-                                                        onChange={(e) => updateComputer({ transport_type: e.target.value })}
+                                                    <select
+                                                        value={selectedTransport}
+                                                        onChange={(e) => handleTransportChange(e.target.value)}
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
+                                                    >
+                                                        {availableTransports.map((transport) => (
+                                                            <option key={transport} value={transport}>{transport}</option>
+                                                        ))}
+                                                    </select>
                                                 </div>
                                                 <div className="space-y-1">
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Scheduler Type</label>
@@ -376,14 +516,30 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                                                     />
                                                 </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Username</label>
-                                                    <input
-                                                        value={parseResult.computer.username || ""}
-                                                        onChange={(e) => updateComputer({ username: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
+                                                {isAsyncTransport ? (
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">SSH Host Alias</label>
+                                                        <input
+                                                            value={parseResult.computer.host || ""}
+                                                            onChange={(e) => updateComputer({ host: e.target.value })}
+                                                            placeholder="Host entry from ~/.ssh/config"
+                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                        />
+                                                    </div>
+                                                ) : !isLocalTransport ? (
+                                                    <div className="space-y-1">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Username</label>
+                                                        <input
+                                                            value={parseResult.computer.username || ""}
+                                                            onChange={(e) => updateComputer({ username: e.target.value })}
+                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                        />
+                                                    </div>
+                                                ) : (
+                                                    <div className="rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                                                        Local transport does not require remote SSH authentication fields.
+                                                    </div>
+                                                )}
                                                 <div className="space-y-1 col-span-2">
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Work Directory</label>
                                                     <input
@@ -420,6 +576,12 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                 </div>
                                             </div>
 
+                                            {isAsyncTransport && (
+                                                <div className="rounded-lg border border-amber-200/70 bg-amber-50/80 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+                                                    <span className="font-semibold">core.ssh_async</span> follows the async SSH configure model from AiiDA 2.7+: it uses an SSH config alias and does not use legacy fields like <code className="font-mono">username</code>, <code className="font-mono">key_filename</code>, or <code className="font-mono">proxy_jump</code>.
+                                                </div>
+                                            )}
+
                                             <button
                                                 onClick={() => setShowAdvanced(!showAdvanced)}
                                                 className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 pt-2 transition-colors"
@@ -435,25 +597,51 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                         <input value={parseResult.computer.shebang || ""} onChange={(e) => updateComputer({ shebang: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
                                                     </div>
                                                     <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Key File</label>
-                                                        <input value={parseResult.computer.key_filename || ""} onChange={(e) => updateComputer({ key_filename: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                    </div>
-                                                    <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Command</label>
-                                                        <input value={parseResult.computer.proxy_command || ""} onChange={(e) => updateComputer({ proxy_command: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                    </div>
-                                                    <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Jump</label>
-                                                        <input value={parseResult.computer.proxy_jump || ""} onChange={(e) => updateComputer({ proxy_jump: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                    </div>
-                                                    <div className="space-y-1">
                                                         <label className="text-[10px] uppercase font-bold text-zinc-400">Safe Interval</label>
                                                         <input type="number" step="0.1" value={parseResult.computer.safe_interval ?? ""} onChange={(e) => updateComputer({ safe_interval: parseFloat(e.target.value) || 0 })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
                                                     </div>
-                                                    <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Connection Timeout</label>
-                                                        <input type="number" value={parseResult.computer.connection_timeout ?? ""} onChange={(e) => updateComputer({ connection_timeout: parseInt(e.target.value, 10) || 60 })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                    </div>
+                                                    {isAsyncTransport ? (
+                                                        <>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Max I/O Allowed</label>
+                                                                <input type="number" value={parseResult.computer.max_io_allowed ?? ""} onChange={(e) => updateComputer({ max_io_allowed: e.target.value ? parseInt(e.target.value, 10) || null : null })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Authentication Script</label>
+                                                                <input value={parseResult.computer.authentication_script || ""} onChange={(e) => updateComputer({ authentication_script: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Async Backend</label>
+                                                                <select value={parseResult.computer.backend || "asyncssh"} onChange={(e) => updateComputer({ backend: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400">
+                                                                    <option value="asyncssh">asyncssh</option>
+                                                                    <option value="openssh">openssh</option>
+                                                                </select>
+                                                            </div>
+                                                        </>
+                                                    ) : !isLocalTransport ? (
+                                                        <>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Key File</label>
+                                                                <input value={parseResult.computer.key_filename || ""} onChange={(e) => updateComputer({ key_filename: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Command</label>
+                                                                <input value={parseResult.computer.proxy_command || ""} onChange={(e) => updateComputer({ proxy_command: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Jump</label>
+                                                                <input value={parseResult.computer.proxy_jump || ""} onChange={(e) => updateComputer({ proxy_jump: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Connection Timeout</label>
+                                                                <input type="number" value={parseResult.computer.connection_timeout ?? ""} onChange={(e) => updateComputer({ connection_timeout: e.target.value ? parseInt(e.target.value, 10) || 60 : null })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                            </div>
+                                                        </>
+                                                    ) : (
+                                                        <div className="col-span-1 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                                                            No additional transport-specific authentication fields are required for <code className="font-mono">core.local</code>.
+                                                        </div>
+                                                    )}
                                                     <button
                                                         type="button"
                                                         onClick={() => updateComputer({ use_double_quotes: !parseResult.computer?.use_double_quotes })}

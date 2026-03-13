@@ -4,6 +4,8 @@ import JsonView from "@uiw/react-json-view";
 import { nordTheme } from "@uiw/react-json-view/nord";
 import { vscodeTheme } from "@uiw/react-json-view/vscode";
 import {
+  AlertTriangle,
+  Bot,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -24,6 +26,7 @@ import {
 import {
   getBandsPlotData,
   getProcessDetail,
+  getProcessDiagnostics,
   getProcessLogs,
   getRemoteFileContent,
   getRemoteFiles,
@@ -39,6 +42,7 @@ import type {
   NodeFileContentResponse,
   NodeFileListResponse,
   ProcessDetailResponse,
+  ProcessDiagnosticsResponse,
   ProcessItem,
   ProcessLogsResponse,
   ProcessNodeLink,
@@ -49,6 +53,7 @@ type ProcessDetailDrawerProps = {
   process: ProcessItem | null;
   onClose: () => void;
   onAddContextNode: (node: FocusNode) => void;
+  onExplainFailure: (process: ProcessItem, diagnostics: ProcessDiagnosticsResponse | null) => void;
 };
 
 type PreviewableNode = {
@@ -76,6 +81,8 @@ type InspectorPanelProps = {
   fallbackPreviewNode: PreviewableNode | null;
   onOpenNodeDetail: (link: ProcessNodeLink, direction: InspectorLinkDirection) => void;
   onAddContextNode: (node: FocusNode) => void;
+  onExplainFailure: (process: ProcessItem, diagnostics: ProcessDiagnosticsResponse | null) => void;
+  preferredMode?: InspectorMode;
 };
 
 type ProcessTreeNodeViewProps = {
@@ -101,6 +108,8 @@ const RUNNING_STATES = new Set(["running", "created", "waiting"]);
 const FINISHED_STATES = new Set(["finished", "success", "completed", "ok"]);
 const FAILED_STATES = new Set(["failed", "excepted", "killed", "error"]);
 const WORKCHAIN_NODE_HINTS = ["workchain", "workflow"];
+
+type InspectorMode = "overview" | "diagnostics";
 
 type StatusTone = {
   dotClassName: string;
@@ -1089,6 +1098,26 @@ function buildLinkTarget(link: ProcessNodeLink, direction: InspectorLinkDirectio
   };
 }
 
+function buildProcessItemFromInspector(
+  target: InspectorTarget,
+  detail: ProcessDetailResponse | undefined,
+): ProcessItem {
+  const summary = detail?.summary;
+  const state = String(summary?.state || "failed");
+  return {
+    pk: target.pk,
+    label: String(summary?.label || target.label || `Node #${target.pk}`),
+    state,
+    status_color: FAILED_STATES.has(normalizeState(state)) ? "error" : "idle",
+    node_type: String(summary?.node_type || summary?.type || target.nodeType || "Node"),
+    process_label: summary?.process_label ?? null,
+    process_state: state,
+    formula: null,
+    preview: (summary?.preview as Record<string, unknown> | null | undefined) ?? target.preview ?? null,
+    preview_info: (summary?.preview_info as Record<string, unknown> | null | undefined) ?? target.previewInfo ?? null,
+  };
+}
+
 function iconForNodeType(nodeType: string): { icon: string; ariaLabel: string } {
   const loType = nodeType.toLowerCase();
   if (loType.includes("structure")) {
@@ -1432,7 +1461,20 @@ function renderProcessTree(
   );
 }
 
-function InspectorPanel({ target, fallbackPreviewNode, onOpenNodeDetail, onAddContextNode }: InspectorPanelProps) {
+function InspectorPanel({
+  target,
+  fallbackPreviewNode,
+  onOpenNodeDetail,
+  onAddContextNode,
+  onExplainFailure,
+  preferredMode = "overview",
+}: InspectorPanelProps) {
+  const [panelMode, setPanelMode] = useState<InspectorMode>(preferredMode);
+
+  useEffect(() => {
+    setPanelMode(preferredMode);
+  }, [preferredMode, target.pk]);
+
   const detailQuery = useQuery({
     queryKey: ["process-detail", target.pk],
     queryFn: () => getProcessDetail(target.pk),
@@ -1452,6 +1494,7 @@ function InspectorPanel({ target, fallbackPreviewNode, onOpenNodeDetail, onAddCo
   });
 
   const summaryState = summary?.state ?? "unknown";
+  const isFailedTarget = isProcessTarget && FAILED_STATES.has(normalizeState(summaryState));
   const panelLabel = summary?.label || target.label || `Node #${target.pk}`;
   const previewNode: PreviewableNode = {
     pk: target.pk,
@@ -1470,106 +1513,268 @@ function InspectorPanel({ target, fallbackPreviewNode, onOpenNodeDetail, onAddCo
     isProcessTarget ||
     isWorkChainType(nodeType) ||
     Boolean(detailQuery.data?.workchain?.provenance_tree);
+  const diagnosticsQuery = useQuery({
+    queryKey: ["process-diagnostics", target.pk],
+    queryFn: () => getProcessDiagnostics(target.pk),
+    enabled: Boolean(target.pk) && isProcessTarget && (panelMode === "diagnostics" || isFailedTarget),
+    staleTime: 4_000,
+  });
+  const processItemForFailure = buildProcessItemFromInspector(target, detailQuery.data);
+
+  useEffect(() => {
+    if (isFailedTarget) {
+      setPanelMode("diagnostics");
+    } else if (preferredMode === "overview") {
+      setPanelMode("overview");
+    }
+  }, [isFailedTarget, preferredMode, target.pk]);
+
+  const overviewContent = (
+    <>
+      {(previewNode.preview_info || previewNode.preview) && (
+        <section className="space-y-3">
+          {processMeta && (processMeta.state || processMeta.duration) ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {processMeta.state ? (
+                <span
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium dark:border-zinc-800 dark:bg-zinc-900/60",
+                    processMetaTone.textClassName,
+                  )}
+                >
+                  <span className={cn("h-1.5 w-1.5 rounded-full", processMetaTone.dotClassName)} />
+                  {processMeta.state}
+                </span>
+              ) : null}
+              {processMeta.duration ? (
+                <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-mono text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+                  {processMeta.duration}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          <NodePreviewContent node={previewNode} />
+        </section>
+      )}
+
+      {showProcessTree && (
+        <section>
+          {detailQuery.isError ? (
+            <p className="text-sm font-sans tracking-tight text-rose-500">Failed to load process tree.</p>
+          ) : detailQuery.isPending ? (
+            <p className="animate-pulse text-sm font-sans text-zinc-500 dark:text-zinc-400">Loading process tree...</p>
+          ) : (
+            renderProcessTree(detailQuery.data, onOpenNodeDetail, onAddContextNode)
+          )}
+        </section>
+      )}
+
+      {!showProcessTree && (
+        <section className="space-y-3">
+          <div className="mb-1 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Connections</h3>
+            {detailQuery.isFetching ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
+            ) : null}
+          </div>
+          {detailQuery.isError ? (
+            <p className="text-sm font-sans tracking-tight text-rose-500">Failed to load node links.</p>
+          ) : detailQuery.isPending ? (
+            <p className="animate-pulse text-sm font-sans text-zinc-500 dark:text-zinc-400">Loading inputs and outputs...</p>
+          ) : hasStandaloneLinks ? (
+            <div className="space-y-2">
+              <NodeLinksBlock
+                title="Inputs"
+                links={directInputs}
+                onOpenNodeDetail={onOpenNodeDetail}
+                onAddContextNode={onAddContextNode}
+                emptyText="No incoming links reported."
+              />
+              <NodeLinksBlock
+                title="Outputs"
+                links={directOutputs}
+                onOpenNodeDetail={onOpenNodeDetail}
+                onAddContextNode={onAddContextNode}
+                emptyText="No outgoing links reported."
+              />
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">No inputs or outputs are available for this node.</p>
+          )}
+        </section>
+      )}
+
+      {isProcessTarget && (
+        <section>
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Execution Logs</h3>
+            {logsQuery.isFetching ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
+            ) : null}
+          </div>
+          {logsQuery.isError ? (
+            <p className="text-sm font-sans tracking-tight text-rose-500">Failed to load execution logs.</p>
+          ) : logsQuery.isPending ? (
+            <p className="animate-pulse text-sm font-sans text-zinc-500 dark:text-zinc-400">Loading execution logs...</p>
+          ) : (
+            renderLogs(logsQuery.data ?? detailQuery.data?.logs)
+          )}
+        </section>
+      )}
+    </>
+  );
 
   return (
     <div className="minimal-scrollbar h-full overflow-y-auto px-6 py-6">
       <div className="space-y-5">
-        {(previewNode.preview_info || previewNode.preview) && (
-          <section className="space-y-3">
-            {processMeta && (processMeta.state || processMeta.duration) ? (
-              <div className="flex flex-wrap items-center gap-2">
-                {processMeta.state ? (
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium dark:border-zinc-800 dark:bg-zinc-900/60",
-                      processMetaTone.textClassName,
-                    )}
-                  >
-                    <span className={cn("h-1.5 w-1.5 rounded-full", processMetaTone.dotClassName)} />
-                    {processMeta.state}
-                  </span>
-                ) : null}
-                {processMeta.duration ? (
-                  <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-mono text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
-                    {processMeta.duration}
-                  </span>
-                ) : null}
+        {isProcessTarget ? (
+          <section className="rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-1 dark:border-zinc-800 dark:bg-zinc-900/50">
+            <div className="grid grid-cols-2 gap-1">
+              <button
+                type="button"
+                onClick={() => setPanelMode("overview")}
+                className={cn(
+                  "rounded-lg px-3 py-2 text-xs font-medium transition-colors",
+                  panelMode === "overview"
+                    ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
+                    : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
+                )}
+              >
+                Overview
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (isFailedTarget) {
+                    setPanelMode("diagnostics");
+                  }
+                }}
+                disabled={!isFailedTarget}
+                className={cn(
+                  "rounded-lg px-3 py-2 text-xs font-medium transition-colors",
+                  panelMode === "diagnostics" && isFailedTarget
+                    ? "bg-white text-rose-700 shadow-sm dark:bg-zinc-800 dark:text-rose-300"
+                    : "text-zinc-500 hover:text-zinc-700 disabled:cursor-not-allowed disabled:text-zinc-300 dark:text-zinc-400 dark:hover:text-zinc-200 dark:disabled:text-zinc-600",
+                )}
+              >
+                Diagnostic Tool
+              </button>
+            </div>
+          </section>
+        ) : null}
+
+        {panelMode === "diagnostics" && isFailedTarget ? (
+          <section className="space-y-4">
+            <div className="rounded-xl border border-rose-200/80 bg-rose-50/80 p-4 dark:border-rose-900/70 dark:bg-rose-950/25">
+              <div className="flex items-start justify-between gap-3">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <AlertTriangle className="h-4 w-4 text-rose-500" />
+                    <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Scientific Troubleshooter</h3>
+                  </div>
+                  <p className="text-sm text-zinc-600 dark:text-zinc-300">
+                    Exit metadata, stdout tail, and execution logs are bundled for failure analysis.
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className="rounded-full border border-rose-200/80 bg-white/80 px-2.5 py-1 font-medium text-rose-700 dark:border-rose-900/70 dark:bg-zinc-900/60 dark:text-rose-300">
+                      {toDisplayStatus(summaryState)}
+                    </span>
+                    {diagnosticsQuery.data?.exit_status !== null && diagnosticsQuery.data?.exit_status !== undefined ? (
+                      <span className="rounded-full border border-zinc-200/80 bg-white/80 px-2.5 py-1 font-mono text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-200">
+                        exit_status={diagnosticsQuery.data.exit_status}
+                      </span>
+                    ) : null}
+                    {diagnosticsQuery.data?.computer_label ? (
+                      <span className="rounded-full border border-zinc-200/80 bg-white/80 px-2.5 py-1 text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+                        {diagnosticsQuery.data.computer_label}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onExplainFailure(processItemForFailure, diagnosticsQuery.data ?? null)}
+                  disabled={diagnosticsQuery.isPending}
+                  className="inline-flex items-center gap-2 rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-zinc-800 disabled:cursor-wait disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-white"
+                >
+                  <Bot className="h-3.5 w-3.5" />
+                  Explain Failure
+                </button>
               </div>
+            </div>
+
+            {diagnosticsQuery.isError ? (
+              <div className="rounded-xl border border-rose-200/80 bg-rose-50/80 px-4 py-3 text-sm text-rose-600 dark:border-rose-900/70 dark:bg-rose-950/25 dark:text-rose-300">
+                Failed to collect diagnostic artifacts.
+              </div>
+            ) : diagnosticsQuery.isPending ? (
+              <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-4 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+                Collecting exit status, stdout tail, and process logs...
+              </div>
+            ) : diagnosticsQuery.data ? (
+              <>
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Failure Summary</h3>
+                  <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-4 py-3 dark:border-zinc-800 dark:bg-zinc-900/60">
+                    <p className="text-xs uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">Exit Message</p>
+                    <p className="mt-2 text-sm leading-6 text-zinc-800 dark:text-zinc-200">
+                      {diagnosticsQuery.data.exit_message || "Worker did not report an exit_message."}
+                    </p>
+                  </div>
+                </section>
+
+                <section className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+                    <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                      STDOUT Tail
+                      {diagnosticsQuery.data.stdout_excerpt.filename ? ` · ${diagnosticsQuery.data.stdout_excerpt.filename}` : ""}
+                    </h3>
+                  </div>
+                  {diagnosticsQuery.data.stdout_excerpt.text ? (
+                    <pre className="max-h-[18rem] overflow-auto rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-3 text-xs leading-5 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900/65 dark:text-zinc-200">
+                      {diagnosticsQuery.data.stdout_excerpt.text}
+                    </pre>
+                  ) : (
+                    <p className="rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-4 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+                      No stdout artifact was recovered for this failed process.
+                    </p>
+                  )}
+                </section>
+
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Execution Log Excerpt</h3>
+                  {diagnosticsQuery.data.log_excerpt.text ? (
+                    <pre className="max-h-[14rem] overflow-auto rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-3 text-xs leading-5 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900/65 dark:text-zinc-200">
+                      {diagnosticsQuery.data.log_excerpt.text}
+                    </pre>
+                  ) : (
+                    <p className="rounded-xl border border-zinc-200/80 bg-zinc-50/80 px-4 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+                      No process log excerpt is available.
+                    </p>
+                  )}
+                </section>
+
+                {diagnosticsQuery.data.stderr_excerpt ? (
+                  <section className="space-y-2">
+                    <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Scheduler STDERR</h3>
+                    <pre className="max-h-[10rem] overflow-auto rounded-lg border border-zinc-200/80 bg-zinc-50/70 p-3 text-xs leading-5 text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900/65 dark:text-zinc-200">
+                      {diagnosticsQuery.data.stderr_excerpt}
+                    </pre>
+                  </section>
+                ) : null}
+              </>
             ) : null}
-            <NodePreviewContent node={previewNode} />
           </section>
-        )}
-
-        {showProcessTree && (
-          <section>
-            {detailQuery.isError ? (
-              <p className="text-sm font-sans tracking-tight text-rose-500">Failed to load process tree.</p>
-            ) : detailQuery.isPending ? (
-              <p className="animate-pulse text-sm font-sans text-zinc-500 dark:text-zinc-400">Loading process tree...</p>
-            ) : (
-              renderProcessTree(detailQuery.data, onOpenNodeDetail, onAddContextNode)
-            )}
-          </section>
-        )}
-
-        {!showProcessTree && (
-          <section className="space-y-3">
-            <div className="mb-1 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Connections</h3>
-              {detailQuery.isFetching ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
-              ) : null}
-            </div>
-            {detailQuery.isError ? (
-              <p className="text-sm font-sans tracking-tight text-rose-500">Failed to load node links.</p>
-            ) : detailQuery.isPending ? (
-              <p className="animate-pulse text-sm font-sans text-zinc-500 dark:text-zinc-400">Loading inputs and outputs...</p>
-            ) : hasStandaloneLinks ? (
-              <div className="space-y-2">
-                <NodeLinksBlock
-                  title="Inputs"
-                  links={directInputs}
-                  onOpenNodeDetail={onOpenNodeDetail}
-                  onAddContextNode={onAddContextNode}
-                  emptyText="No incoming links reported."
-                />
-                <NodeLinksBlock
-                  title="Outputs"
-                  links={directOutputs}
-                  onOpenNodeDetail={onOpenNodeDetail}
-                  onAddContextNode={onAddContextNode}
-                  emptyText="No outgoing links reported."
-                />
-              </div>
-            ) : (
-              <p className="text-sm text-zinc-500 dark:text-zinc-400">No inputs or outputs are available for this node.</p>
-            )}
-          </section>
-        )}
-
-        {isProcessTarget && (
-          <section>
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Execution Logs</h3>
-              {logsQuery.isFetching ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
-              ) : null}
-            </div>
-            {logsQuery.isError ? (
-              <p className="text-sm font-sans tracking-tight text-rose-500">Failed to load execution logs.</p>
-            ) : logsQuery.isPending ? (
-              <p className="animate-pulse text-sm font-sans text-zinc-500 dark:text-zinc-400">Loading execution logs...</p>
-            ) : (
-              renderLogs(logsQuery.data ?? detailQuery.data?.logs)
-            )}
-          </section>
+        ) : (
+          overviewContent
         )}
       </div>
     </div>
   );
 }
 
-export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: ProcessDetailDrawerProps) {
+export function ProcessDetailDrawer({ process, onClose, onAddContextNode, onExplainFailure }: ProcessDetailDrawerProps) {
   const isOpen = process !== null;
   const [stack, setStack] = useState<InspectorTarget[]>([]);
 
@@ -1681,6 +1886,12 @@ export function ProcessDetailDrawer({ process, onClose, onAddContextNode }: Proc
                     fallbackPreviewNode={index === 0 && process ? process : null}
                     onOpenNodeDetail={handleOpenNodeDetail}
                     onAddContextNode={onAddContextNode}
+                    onExplainFailure={onExplainFailure}
+                    preferredMode={
+                      index === 0 && process && FAILED_STATES.has(normalizeState(process.process_state || process.state))
+                        ? "diagnostics"
+                        : "overview"
+                    }
                   />
                 </div>
               ))}

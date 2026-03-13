@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 from pprint import pformat
+import re
+from statistics import median
 import tempfile
 import time
 from pathlib import Path
@@ -104,8 +106,14 @@ from .schemas import (
     NodeHoverMetadataResponse,
     NodeScriptResponse,
     InfrastructureComputer,
+    InfrastructureCapabilitiesResponse,
     InfrastructureExportResponse,
+    ComputeHealthEstimateResponse,
+    ComputeHealthQueueSnapshot,
+    ComputeHealthResponse,
     ParseInfrastructureRequest,
+    ProcessDiagnosticsExcerpt,
+    ProcessDiagnosticsResponse,
     UserInfoResponse,
     ProfileSetupRequest,
     CodeSetupRequest,
@@ -118,6 +126,28 @@ WORKER_PROXY_TAG = "AiiDA-Worker-Proxy"
 router = APIRouter()
 DEFAULT_MODELS = [settings.DEFAULT_MODEL]
 ARCHIVE_EXTENSIONS = {".aiida", ".zip"}
+QUEUE_CONGESTION_THRESHOLD = 1000
+ESTIMATE_HISTORY_LIMIT = 240
+ESTIMATE_MATCH_LIMIT = 12
+DIAGNOSTIC_STDOUT_TAIL_LIMIT = 100
+WORKER_JSON_MARKER = "__ARIS_JSON__:"
+COMPUTE_HEALTH_REFERENCE_TIMEOUT_SECONDS = 3.0
+COMPUTE_HEALTH_INFRA_TIMEOUT_SECONDS = 2.5
+COMPUTE_HEALTH_SCHEDULER_TIMEOUT_SECONDS = 6.0
+STDOUT_CANDIDATE_FILENAMES = (
+    "aiida.out",
+    "stdout",
+    "stdout.txt",
+    "_scheduler-stdout.txt",
+    "scheduler.stdout",
+    "scheduler-stdout.txt",
+)
+STDERR_CANDIDATE_FILENAMES = (
+    "scheduler.stderr",
+    "_scheduler-stderr.txt",
+    "stderr",
+    "stderr.txt",
+)
 PENDING_SUBMISSION_KEY = "aiida_pending_submission"
 
 
@@ -350,6 +380,684 @@ def _get_frontend_nodes(
     if not hub.current_profile:
         hub.start()
     return get_recent_nodes(limit=limit, group_label=group_label, node_type=node_type, root_only=root_only)
+
+
+def _coerce_text_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _coerce_int_value(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_float_value(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_lookup_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.strip().lower())
+
+
+def _extract_preview_mapping(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    for key in ("preview_info", "preview"):
+        candidate = payload.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
+def _normalize_process_state_value(value: Any) -> str:
+    return str(value or "unknown").strip().lower().replace("_", " ")
+
+
+def _is_failed_process_state(value: Any) -> bool:
+    return _normalize_process_state_value(value) in {"failed", "excepted", "killed", "error"}
+
+
+def _split_output_lines(text: Any) -> list[str]:
+    if text is None:
+        return []
+    if isinstance(text, list):
+        return [str(item) for item in text]
+    return str(text).splitlines()
+
+
+def _tail_text_lines(text: Any, limit: int) -> str | None:
+    lines = [line.rstrip("\n") for line in _split_output_lines(text)]
+    if not lines:
+        return None
+    return "\n".join(lines[-limit:])
+
+
+def _format_duration_compact(seconds: float | int | None) -> str | None:
+    if seconds is None:
+        return None
+    total_seconds = int(round(max(0.0, float(seconds))))
+    if total_seconds < 60:
+        return f"~{total_seconds} sec"
+    if total_seconds < 3600:
+        minutes = max(1, int(round(total_seconds / 60)))
+        return f"~{minutes} mins"
+    hours = total_seconds / 3600
+    if hours < 10:
+        return f"~{hours:.1f} hrs"
+    return f"~{int(round(hours))} hrs"
+
+
+def _format_estimate_display(seconds: float | None, num_machines: int | None = None) -> str | None:
+    duration_label = _format_duration_compact(seconds)
+    if not duration_label:
+        return None
+    if num_machines and num_machines > 0:
+        node_label = "node" if num_machines == 1 else "nodes"
+        return f"{duration_label} on {num_machines} {node_label}"
+    return duration_label
+
+
+def _find_named_value(payload: Any, *candidate_keys: str, max_depth: int = 5) -> Any:
+    normalized_targets = {_normalize_lookup_key(key) for key in candidate_keys if key}
+    if not normalized_targets:
+        return None
+
+    queue: list[tuple[Any, int]] = [(payload, 0)]
+    while queue:
+        current, depth = queue.pop(0)
+        if depth > max_depth:
+            continue
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if _normalize_lookup_key(str(key)) in normalized_targets:
+                    return value
+                queue.append((value, depth + 1))
+        elif isinstance(current, list):
+            for item in current:
+                queue.append((item, depth + 1))
+    return None
+
+
+def _extract_duration_seconds(payload: dict[str, Any] | None) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    preview = _extract_preview_mapping(payload)
+    for container in (preview, payload, payload.get("summary") if isinstance(payload.get("summary"), dict) else None):
+        if not isinstance(container, dict):
+            continue
+        for key in (
+            "execution_time_seconds",
+            "wall_time_seconds",
+            "duration_seconds",
+            "runtime_seconds",
+            "elapsed_seconds",
+            "duration",
+            "elapsed",
+        ):
+            value = _coerce_float_value(container.get(key))
+            if value is not None and value >= 0:
+                return value
+    return None
+
+
+def _extract_computer_label(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    preview = _extract_preview_mapping(payload)
+    for container in (
+        preview,
+        payload.get("summary") if isinstance(payload.get("summary"), dict) else None,
+        payload,
+    ):
+        if not isinstance(container, dict):
+            continue
+        for key in ("computer_label", "computer_name", "computer", "machine_label", "hostname", "host"):
+            value = container.get(key)
+            if isinstance(value, dict):
+                label = _coerce_text_value(value.get("label") or value.get("name") or value.get("computer_label"))
+            else:
+                label = _coerce_text_value(value)
+            if label:
+                return label
+    nested = _find_named_value(payload, "computer_label", "computer_name", "machine_label", "hostname")
+    return _coerce_text_value(nested)
+
+
+def _extract_process_features(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    preview = _extract_preview_mapping(payload)
+    return {
+        "pk": _coerce_int_value(summary.get("pk") if isinstance(summary, dict) else payload.get("pk")),
+        "process_label": _coerce_text_value(
+            (summary.get("process_label") if isinstance(summary, dict) else None) or payload.get("process_label")
+        ),
+        "node_type": _coerce_text_value(
+            (summary.get("node_type") if isinstance(summary, dict) else None)
+            or (summary.get("type") if isinstance(summary, dict) else None)
+            or payload.get("node_type")
+            or payload.get("type")
+        ),
+        "computer_label": _extract_computer_label(payload),
+        "atom_count": _coerce_int_value(_find_named_value(preview or payload, "atom_count", "num_atoms", "natoms", "sites_count")),
+        "ecutwfc": _coerce_float_value(_find_named_value(payload, "ecutwfc")),
+        "ecutrho": _coerce_float_value(_find_named_value(payload, "ecutrho")),
+        "kpoints_distance": _coerce_float_value(
+            _find_named_value(payload, "kpoints_distance", "kpoint_distance", "bands_kpoints_distance")
+        ),
+        "num_kpoints": _coerce_int_value(_find_named_value(preview or payload, "num_kpoints", "kpoints_count")),
+        "num_bands": _coerce_int_value(_find_named_value(preview or payload, "num_bands", "nbands", "number_of_bands")),
+        "num_machines": _coerce_int_value(
+            _find_named_value(payload, "num_machines", "nodes", "num_nodes", "metadata_options_resources_num_machines")
+        ),
+        "runtime_seconds": _extract_duration_seconds(payload),
+    }
+
+
+def _string_similarity(left: str | None, right: str | None) -> float:
+    left_text = _coerce_text_value(left)
+    right_text = _coerce_text_value(right)
+    if not left_text or not right_text:
+        return 0.0
+    normalized_left = left_text.lower()
+    normalized_right = right_text.lower()
+    if normalized_left == normalized_right:
+        return 1.0
+    if normalized_left in normalized_right or normalized_right in normalized_left:
+        return 0.7
+    left_tokens = {token for token in re.split(r"[\W_]+", normalized_left) if token}
+    right_tokens = {token for token in re.split(r"[\W_]+", normalized_right) if token}
+    if not left_tokens or not right_tokens:
+        return 0.0
+    intersection = left_tokens & right_tokens
+    return len(intersection) / max(len(left_tokens), len(right_tokens))
+
+
+def _numeric_similarity(reference: int | float | None, candidate: int | float | None) -> float:
+    if reference is None or candidate is None:
+        return 0.0
+    denominator = max(abs(float(reference)), 1.0)
+    relative_error = abs(float(candidate) - float(reference)) / denominator
+    return max(0.0, 1.0 - relative_error)
+
+
+def _score_runtime_match(reference: dict[str, Any], candidate: dict[str, Any]) -> float:
+    score = 0.0
+    score += 3.0 * _string_similarity(reference.get("computer_label"), candidate.get("computer_label"))
+    score += 3.0 * _string_similarity(reference.get("process_label"), candidate.get("process_label"))
+    score += 2.0 * _string_similarity(reference.get("node_type"), candidate.get("node_type"))
+    score += 2.5 * _numeric_similarity(reference.get("atom_count"), candidate.get("atom_count"))
+    score += 1.5 * _numeric_similarity(reference.get("ecutwfc"), candidate.get("ecutwfc"))
+    score += 1.0 * _numeric_similarity(reference.get("ecutrho"), candidate.get("ecutrho"))
+    score += 1.5 * _numeric_similarity(reference.get("kpoints_distance"), candidate.get("kpoints_distance"))
+    score += 1.0 * _numeric_similarity(reference.get("num_kpoints"), candidate.get("num_kpoints"))
+    score += 1.0 * _numeric_similarity(reference.get("num_bands"), candidate.get("num_bands"))
+    score += 1.0 * _numeric_similarity(reference.get("num_machines"), candidate.get("num_machines"))
+    return score
+
+
+def _estimate_runtime_from_history(
+    reference_features: dict[str, Any],
+    *,
+    computer_label: str | None = None,
+    reference_process_pk: int | None = None,
+) -> ComputeHealthEstimateResponse:
+    if not reference_features:
+        return ComputeHealthEstimateResponse()
+
+    try:
+        recent_nodes = _get_frontend_nodes(limit=ESTIMATE_HISTORY_LIMIT, root_only=False)
+    except Exception as error:  # noqa: BLE001
+        logger.warning(log_event("aiida.frontend.compute_health.history_failed", error=str(error)))
+        return ComputeHealthEstimateResponse()
+
+    scored_matches: list[tuple[float, float, dict[str, Any]]] = []
+    for candidate in recent_nodes:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_pk = _coerce_int_value(candidate.get("pk"))
+        if reference_process_pk is not None and candidate_pk == reference_process_pk:
+            continue
+        candidate_features = _extract_process_features(candidate)
+        runtime_seconds = _coerce_float_value(candidate_features.get("runtime_seconds"))
+        if runtime_seconds is None or runtime_seconds <= 0:
+            continue
+        if _is_failed_process_state(candidate.get("process_state") or candidate.get("state")):
+            continue
+        if computer_label:
+            candidate_computer = _coerce_text_value(candidate_features.get("computer_label"))
+            if candidate_computer and candidate_computer != computer_label:
+                continue
+        score = _score_runtime_match(reference_features, candidate_features)
+        if score < 2.0:
+            continue
+        scored_matches.append((score, runtime_seconds, candidate_features))
+
+    if not scored_matches:
+        return ComputeHealthEstimateResponse()
+
+    scored_matches.sort(key=lambda item: item[0], reverse=True)
+    top_matches = scored_matches[:ESTIMATE_MATCH_LIMIT]
+    weighted_runtime = sum(score * runtime for score, runtime, _ in top_matches) / sum(score for score, _, _ in top_matches)
+    num_machine_votes = [
+        _coerce_int_value(features.get("num_machines"))
+        for _, _, features in top_matches
+        if _coerce_int_value(features.get("num_machines"))
+    ]
+    reference_num_machines = _coerce_int_value(reference_features.get("num_machines"))
+    resolved_num_machines = reference_num_machines
+    if resolved_num_machines is None and num_machine_votes:
+        try:
+            resolved_num_machines = int(round(median(num_machine_votes)))
+        except Exception:  # noqa: BLE001
+            resolved_num_machines = num_machine_votes[0]
+    matched_process_label = _coerce_text_value(reference_features.get("process_label")) or _coerce_text_value(
+        top_matches[0][2].get("process_label")
+    )
+    return ComputeHealthEstimateResponse(
+        available=True,
+        duration_seconds=weighted_runtime,
+        display=_format_estimate_display(weighted_runtime, resolved_num_machines),
+        num_machines=resolved_num_machines,
+        sample_size=len(top_matches),
+        basis="Historical runs matched by computer, workflow, and task scale",
+        matched_process_label=matched_process_label,
+    )
+
+
+def _parse_worker_json_output(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    output_text = _coerce_text_value(payload.get("output"))
+    if not output_text:
+        return None
+    for line in reversed(output_text.splitlines()):
+        cleaned_line = line.strip()
+        if not cleaned_line.startswith(WORKER_JSON_MARKER):
+            continue
+        raw_json = cleaned_line[len(WORKER_JSON_MARKER):].strip()
+        if not raw_json:
+            continue
+        try:
+            parsed = json.loads(raw_json)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+async def _run_worker_json_script(script: str, *, timeout: float = 90.0) -> dict[str, Any] | None:
+    payload = await asyncio.wait_for(
+        request_json(
+            "POST",
+            "/management/run-python",
+            json={"script": script},
+            timeout=timeout,
+        ),
+        timeout=max(timeout + 0.5, 1.0),
+    )
+    return _parse_worker_json_output(payload)
+
+
+async def _resolve_compute_health_computer_label(
+    *,
+    explicit_computer_label: str | None = None,
+    reference_features: dict[str, Any] | None = None,
+) -> str | None:
+    if explicit_computer_label:
+        return explicit_computer_label
+    reference_label = _coerce_text_value((reference_features or {}).get("computer_label"))
+    if reference_label:
+        return reference_label
+    try:
+        computers = await asyncio.wait_for(
+            bridge_service.inspect_infrastructure_v2(),
+            timeout=COMPUTE_HEALTH_INFRA_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(log_event("aiida.frontend.compute_health.infrastructure_timeout"))
+        return None
+    except Exception as error:  # noqa: BLE001
+        logger.warning(log_event("aiida.frontend.compute_health.infrastructure_failed", error=str(error)))
+        return None
+    if not isinstance(computers, list):
+        return None
+    enabled = [item for item in computers if isinstance(item, dict) and bool(item.get("is_enabled"))]
+    for item in [*enabled, *computers]:
+        if isinstance(item, dict):
+            label = _coerce_text_value(item.get("label"))
+            if label:
+                return label
+    return None
+
+
+def _build_scheduler_probe_script(computer_label: str | None) -> str:
+    target_literal = json.dumps(computer_label)
+    return f"""
+import json
+
+payload = {{
+    "available": False,
+    "computer_label": {target_literal},
+    "scheduler_type": None,
+    "queue": {{"running": 0, "pending": 0, "queued": 0, "total": 0}},
+}}
+
+def _state_name(job):
+    raw_state = getattr(job, "job_state", None)
+    if raw_state is None:
+        return ""
+    value = getattr(raw_state, "value", raw_state)
+    return str(value).strip().lower()
+
+try:
+    from aiida.orm import Computer, QueryBuilder, load_computer
+
+    selected = None
+    qb = QueryBuilder()
+    qb.append(Computer, project=["label", "is_enabled"])
+    computer_rows = qb.all()
+    if payload["computer_label"]:
+        try:
+            selected = load_computer(payload["computer_label"])
+        except Exception:
+            selected = None
+    if selected is None:
+        enabled_labels = [row[0] for row in computer_rows if len(row) > 1 and row[1]]
+        fallback_labels = enabled_labels or [row[0] for row in computer_rows if row]
+        if fallback_labels:
+            selected = load_computer(fallback_labels[0])
+    if selected is None:
+        payload["error"] = "No configured AiiDA computer available"
+    else:
+        payload["computer_label"] = selected.label
+        payload["scheduler_type"] = selected.scheduler_type
+        with selected.get_transport() as transport:
+            scheduler = selected.get_scheduler()
+            scheduler.set_transport(transport)
+            jobs = scheduler.get_jobs(as_dict=True) or {{}}
+        running = 0
+        pending = 0
+        queued = 0
+        job_iterable = jobs.values() if isinstance(jobs, dict) else (jobs or [])
+        for job in job_iterable:
+            state_name = _state_name(job)
+            if any(token in state_name for token in ("run", "active", "exec")):
+                running += 1
+            elif any(token in state_name for token in ("pend", "wait")):
+                pending += 1
+            elif any(token in state_name for token in ("queue", "hold", "suspend")):
+                queued += 1
+            else:
+                queued += 1
+        payload["available"] = True
+        payload["queue"] = {{
+            "running": running,
+            "pending": pending,
+            "queued": queued,
+            "total": running + pending + queued,
+        }}
+except Exception as exc:
+    payload["error"] = f"{{type(exc).__name__}}: {{exc}}"
+
+print("{WORKER_JSON_MARKER}" + json.dumps(payload, ensure_ascii=False))
+""".strip()
+
+
+async def _fetch_scheduler_snapshot(computer_label: str | None) -> dict[str, Any] | None:
+    try:
+        return await _run_worker_json_script(
+            _build_scheduler_probe_script(computer_label),
+            timeout=COMPUTE_HEALTH_SCHEDULER_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.warning(
+            log_event(
+                "aiida.frontend.compute_health.scheduler_timeout",
+                computer_label=computer_label,
+            )
+        )
+        return None
+    except BridgeOfflineError:
+        raise
+    except BridgeAPIError as error:
+        logger.warning(
+            log_event(
+                "aiida.frontend.compute_health.scheduler_failed",
+                computer_label=computer_label,
+                error=str(error),
+            )
+        )
+        return None
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            log_event(
+                "aiida.frontend.compute_health.scheduler_failed",
+                computer_label=computer_label,
+                error=str(error),
+            )
+        )
+        return None
+
+
+async def _request_optional_json(
+    method: str,
+    path: str,
+    *,
+    params: dict[str, Any] | None = None,
+    json_payload: dict[str, Any] | None = None,
+    timeout: float = 10.0,
+) -> Any | None:
+    try:
+        return await request_json(method, path, params=params, json=json_payload, timeout=timeout)
+    except BridgeAPIError as error:
+        if int(error.status_code or 0) in {400, 404, 422, 501}:
+            return None
+        raise
+
+
+def _normalize_link_mapping(raw: Any) -> dict[str, dict[str, Any]]:
+    if isinstance(raw, dict):
+        result: dict[str, dict[str, Any]] = {}
+        for key, value in raw.items():
+            if isinstance(value, dict):
+                result[str(key)] = value
+        return result
+    return {}
+
+
+def _select_process_output_link(
+    detail: dict[str, Any],
+    *,
+    preferred_labels: tuple[str, ...] = (),
+    node_types: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    label_targets = {label.lower() for label in preferred_labels}
+    type_targets = {node_type.lower() for node_type in node_types}
+    for block_name in ("direct_outputs", "outputs"):
+        links = _normalize_link_mapping(detail.get(block_name))
+        for port_name, link in links.items():
+            link_label = _coerce_text_value(link.get("link_label") or port_name)
+            node_type = _coerce_text_value(link.get("node_type"))
+            if label_targets and link_label and link_label.lower() in label_targets:
+                return link
+            if type_targets and node_type and node_type.lower() in type_targets:
+                return link
+    return None
+
+
+def _pick_candidate_filename(files: list[str], *, stderr: bool = False) -> str | None:
+    normalized_files = [str(item).strip() for item in files if str(item).strip()]
+    if not normalized_files:
+        return None
+    preferred = STDERR_CANDIDATE_FILENAMES if stderr else STDOUT_CANDIDATE_FILENAMES
+    lowered = {item.lower(): item for item in normalized_files}
+    for candidate in preferred:
+        if candidate.lower() in lowered:
+            return lowered[candidate.lower()]
+    ranked = sorted(
+        normalized_files,
+        key=lambda name: (
+            0 if ("stderr" in name.lower()) == stderr else 1,
+            0 if ("stdout" in name.lower() or name.lower().endswith(".out")) and not stderr else 1,
+            len(name),
+        ),
+    )
+    return ranked[0] if ranked else None
+
+
+async def _fetch_repository_excerpt(node_pk: int) -> ProcessDiagnosticsExcerpt:
+    listing = await _request_optional_json("GET", f"/data/repository/{node_pk}/files", params={"source": "folder"})
+    files = []
+    if isinstance(listing, dict):
+        raw_files = listing.get("files")
+        if isinstance(raw_files, list):
+            files = [str(item.get("name") if isinstance(item, dict) else item).strip() for item in raw_files]
+    filename = _pick_candidate_filename(files)
+    if not filename:
+        return ProcessDiagnosticsExcerpt(source="repository")
+    content = await _request_optional_json(
+        "GET",
+        f"/data/repository/{node_pk}/files/{filename}",
+        params={"source": "folder"},
+        timeout=20.0,
+    )
+    text = None
+    if isinstance(content, dict):
+        text = _tail_text_lines(content.get("content"), DIAGNOSTIC_STDOUT_TAIL_LIMIT)
+    return ProcessDiagnosticsExcerpt(
+        source="repository",
+        filename=filename,
+        line_count=len(_split_output_lines(text)),
+        text=text,
+    )
+
+
+async def _fetch_remote_excerpt(node_pk: int) -> ProcessDiagnosticsExcerpt:
+    listing = await _request_optional_json("GET", f"/data/remote/{node_pk}/files")
+    files = []
+    if isinstance(listing, dict):
+        raw_files = listing.get("files")
+        if isinstance(raw_files, list):
+            files = [str(item.get("name") if isinstance(item, dict) else item).strip() for item in raw_files]
+    filename = _pick_candidate_filename(files)
+    if not filename:
+        return ProcessDiagnosticsExcerpt(source="remote")
+    content = await _request_optional_json(
+        "GET",
+        f"/data/remote/{node_pk}/files/{filename}",
+        timeout=20.0,
+    )
+    text = None
+    if isinstance(content, dict):
+        text = _tail_text_lines(content.get("content"), DIAGNOSTIC_STDOUT_TAIL_LIMIT)
+    return ProcessDiagnosticsExcerpt(
+        source="remote",
+        filename=filename,
+        line_count=len(_split_output_lines(text)),
+        text=text,
+    )
+
+
+def _build_log_excerpt(logs_payload: dict[str, Any] | None) -> ProcessDiagnosticsExcerpt:
+    if not isinstance(logs_payload, dict):
+        return ProcessDiagnosticsExcerpt(source="logs")
+    lines = []
+    raw_lines = logs_payload.get("lines")
+    if isinstance(raw_lines, list):
+        lines = [str(item) for item in raw_lines]
+    if not lines:
+        raw_reports = logs_payload.get("reports")
+        if isinstance(raw_reports, list):
+            lines = [str(item) for item in raw_reports]
+    if not lines:
+        text = _tail_text_lines(logs_payload.get("text"), DIAGNOSTIC_STDOUT_TAIL_LIMIT)
+    else:
+        text = "\n".join(lines[-DIAGNOSTIC_STDOUT_TAIL_LIMIT:])
+    return ProcessDiagnosticsExcerpt(
+        source="logs",
+        line_count=len(_split_output_lines(text)),
+        text=text,
+    )
+
+
+async def _fetch_process_detail_payload(identifier: str | int) -> dict[str, Any]:
+    payload = await request_json("GET", f"/process/{identifier}")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail={"error": "Worker returned an invalid process detail payload"})
+    return await _enrich_process_detail_payload(payload)
+
+
+async def _build_process_diagnostics(identifier: str | int) -> ProcessDiagnosticsResponse:
+    detail = await _fetch_process_detail_payload(identifier)
+    summary = detail.get("summary") if isinstance(detail.get("summary"), dict) else {}
+    process_pk = _coerce_int_value(summary.get("pk") if isinstance(summary, dict) else identifier) or _coerce_int_value(identifier) or 0
+    node_type = _coerce_text_value(summary.get("node_type") if isinstance(summary, dict) else None) or _coerce_text_value(
+        summary.get("type") if isinstance(summary, dict) else None
+    )
+    process_label = _coerce_text_value(summary.get("process_label") if isinstance(summary, dict) else None)
+    state = _coerce_text_value(summary.get("state") if isinstance(summary, dict) else None)
+    exit_status = _coerce_int_value(summary.get("exit_status") if isinstance(summary, dict) else None)
+    exit_message = _coerce_text_value(summary.get("exit_message") if isinstance(summary, dict) else None) or _coerce_text_value(
+        detail.get("exit_message")
+    )
+    label = _coerce_text_value(summary.get("label") if isinstance(summary, dict) else None)
+    computer_label = _extract_computer_label(detail)
+    is_calcjob = "calcjob" in _normalize_process_state_value(node_type or process_label)
+
+    logs_payload = await _request_optional_json("GET", f"/process/{identifier}/logs")
+    stdout_excerpt = ProcessDiagnosticsExcerpt()
+    retrieved_link = _select_process_output_link(detail, preferred_labels=("retrieved",), node_types=("FolderData",))
+    remote_link = _select_process_output_link(detail, preferred_labels=("remote_folder",), node_types=("RemoteData",))
+
+    retrieved_pk = _coerce_int_value((retrieved_link or {}).get("pk"))
+    if retrieved_pk:
+        stdout_excerpt = await _fetch_repository_excerpt(retrieved_pk)
+    if not stdout_excerpt.text:
+        remote_pk = _coerce_int_value((remote_link or {}).get("pk"))
+        if remote_pk:
+            stdout_excerpt = await _fetch_remote_excerpt(remote_pk)
+    log_excerpt = _build_log_excerpt(logs_payload if isinstance(logs_payload, dict) else None)
+    if not stdout_excerpt.text and log_excerpt.text:
+        stdout_excerpt = ProcessDiagnosticsExcerpt(
+            source="logs",
+            filename=None,
+            line_count=log_excerpt.line_count,
+            text=log_excerpt.text,
+        )
+
+    stderr_excerpt = None
+    if isinstance(logs_payload, dict):
+        stderr_excerpt = _coerce_text_value(logs_payload.get("stderr_excerpt"))
+
+    return ProcessDiagnosticsResponse(
+        available=bool(exit_status is not None or exit_message or stdout_excerpt.text or log_excerpt.text or stderr_excerpt),
+        process_pk=process_pk,
+        state=state,
+        node_type=node_type,
+        process_label=process_label,
+        label=label,
+        exit_status=exit_status,
+        exit_message=exit_message,
+        computer_label=computer_label,
+        is_calcjob=is_calcjob,
+        stdout_excerpt=stdout_excerpt,
+        log_excerpt=log_excerpt,
+        stderr_excerpt=stderr_excerpt,
+    )
 
 
 def _build_active_submission_group_labels(state: Any) -> dict[str, str] | None:
@@ -682,11 +1390,33 @@ async def get_management_infrastructure():
         _raise_worker_http_error(exc)
 
 
+@router.get(
+    "/management/infrastructure/capabilities",
+    response_model=InfrastructureCapabilitiesResponse,
+    tags=[WORKER_PROXY_TAG],
+)
+async def get_management_infrastructure_capabilities():
+    try:
+        payload = await bridge_service.get_infrastructure_capabilities()
+        return InfrastructureCapabilitiesResponse(**payload)
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+
 @router.post("/management/infrastructure/setup", tags=[WORKER_PROXY_TAG])
 async def setup_management_infrastructure(payload: dict[str, Any]):
     """Proxy to setup a new computer, authentication, and code."""
     try:
         return await bridge_service.setup_infrastructure(payload)
+    except Exception as exc:
+        _raise_worker_http_error(exc)
+
+
+@router.post("/management/infrastructure/test-connection", tags=[WORKER_PROXY_TAG])
+async def test_management_infrastructure_connection(payload: dict[str, Any]):
+    """Proxy to validate a computer/auth configuration without storing final infrastructure."""
+    try:
+        return await request_json("POST", "/management/infrastructure/test-connection", payload=payload)
     except Exception as exc:
         _raise_worker_http_error(exc)
 
@@ -1149,6 +1879,96 @@ async def frontend_processes(
     return {"items": _serialize_processes(processes)}
 
 
+@router.get("/frontend/compute-health", response_model=ComputeHealthResponse, tags=[FRONTEND_TAG])
+async def frontend_compute_health(
+    reference_process_pk: int | None = Query(default=None, ge=1),
+    computer_label: str | None = Query(default=None),
+):
+    reference_payload: dict[str, Any] | None = None
+    if reference_process_pk is not None:
+        try:
+            reference_payload = await asyncio.wait_for(
+                _fetch_process_detail_payload(reference_process_pk),
+                timeout=COMPUTE_HEALTH_REFERENCE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                log_event(
+                    "aiida.frontend.compute_health.reference_timeout",
+                    reference_process_pk=reference_process_pk,
+                )
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(
+                log_event(
+                    "aiida.frontend.compute_health.reference_failed",
+                    reference_process_pk=reference_process_pk,
+                    error=str(error),
+                )
+            )
+
+    reference_features = _extract_process_features(reference_payload)
+    resolved_computer_label = await _resolve_compute_health_computer_label(
+        explicit_computer_label=_coerce_text_value(computer_label),
+        reference_features=reference_features,
+    )
+    estimate = _estimate_runtime_from_history(
+        reference_features,
+        computer_label=resolved_computer_label,
+        reference_process_pk=reference_process_pk,
+    )
+    scheduler_snapshot: dict[str, Any] | None = None
+    offline_warning: str | None = None
+    try:
+        scheduler_snapshot = await _fetch_scheduler_snapshot(resolved_computer_label)
+    except BridgeOfflineError as exc:
+        offline_warning = str(exc)
+    queue_raw = scheduler_snapshot.get("queue") if isinstance(scheduler_snapshot, dict) else {}
+    running = max(0, _coerce_int_value((queue_raw or {}).get("running")) or 0)
+    pending = max(0, _coerce_int_value((queue_raw or {}).get("pending")) or 0)
+    queued = max(0, _coerce_int_value((queue_raw or {}).get("queued")) or 0)
+    total = max(0, _coerce_int_value((queue_raw or {}).get("total")) or (running + pending + queued))
+    congested = queued >= QUEUE_CONGESTION_THRESHOLD
+    scheduler_error = _coerce_text_value((scheduler_snapshot or {}).get("error")) if isinstance(scheduler_snapshot, dict) else None
+    warning_message = (
+        f"Queue congestion detected on {scheduler_snapshot.get('computer_label') or resolved_computer_label}: "
+        f"{queued} jobs are queued."
+        if congested
+        else scheduler_error or offline_warning
+    )
+    queue = ComputeHealthQueueSnapshot(
+        running=running,
+        pending=pending,
+        queued=queued,
+        total=total,
+        congested=congested,
+        threshold=QUEUE_CONGESTION_THRESHOLD,
+    )
+    available = bool((isinstance(scheduler_snapshot, dict) and scheduler_snapshot.get("available")) or estimate.available)
+    source = (
+        "worker-run-python"
+        if isinstance(scheduler_snapshot, dict) and scheduler_snapshot.get("available")
+        else "local-history"
+        if estimate.available
+        else "offline"
+        if offline_warning
+        else "unavailable"
+    )
+    return ComputeHealthResponse(
+        available=available,
+        source=source,
+        computer_label=_coerce_text_value(
+            (scheduler_snapshot or {}).get("computer_label") if isinstance(scheduler_snapshot, dict) else resolved_computer_label
+        )
+        or resolved_computer_label,
+        scheduler_type=_coerce_text_value((scheduler_snapshot or {}).get("scheduler_type")) if isinstance(scheduler_snapshot, dict) else None,
+        warning_message=warning_message,
+        queue=queue,
+        estimate=estimate,
+        reference_process_pk=reference_process_pk,
+    )
+
+
 @router.get("/frontend/processes/{identifier}/clone-draft", tags=[FRONTEND_TAG])
 async def frontend_clone_process_draft(identifier: str):
     try:
@@ -1170,6 +1990,21 @@ async def frontend_clone_process_draft(identifier: str):
             )
         )
         raise HTTPException(status_code=500, detail={"error": "Failed to prepare clone draft", "reason": str(exc)}) from exc
+
+
+@router.get(
+    "/frontend/processes/{identifier}/diagnostics",
+    response_model=ProcessDiagnosticsResponse,
+    tags=[FRONTEND_TAG],
+)
+async def frontend_process_diagnostics(identifier: str):
+    try:
+        return await _build_process_diagnostics(identifier)
+    except BridgeOfflineError as exc:
+        raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
+    except BridgeAPIError as exc:
+        detail = exc.payload if isinstance(exc.payload, dict) else {"error": exc.message, "details": exc.payload}
+        raise HTTPException(status_code=max(400, int(exc.status_code or 502)), detail=detail) from exc
 
 
 @router.get("/frontend/ssh-hosts", tags=[FRONTEND_TAG])

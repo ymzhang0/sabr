@@ -54,6 +54,7 @@ import type {
   ChatSnapshot,
   FocusNode,
   GroupItem,
+  ProcessDiagnosticsResponse,
   ProcessItem,
   ResourceAttachment,
   SendChatRequest,
@@ -112,6 +113,58 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     return null;
   }
   return value as Record<string, unknown>;
+}
+
+function buildFailureConsultPrompt(
+  process: ProcessItem,
+  diagnostics?: ProcessDiagnosticsResponse | null,
+): string {
+  const lines = [
+    "You are a computational materials science expert specializing in Quantum ESPRESSO, AiiDA workflows, and remote HPC scheduler failures.",
+    "Diagnose this failed AiiDA/QE process. Prioritize convergence problems, mixing_beta, starting_magnetization, diagonalization, conv_thr, occupations, walltime/memory pressure, MPI/parallelisation mismatches, parser failures, and missing pseudopotential or file issues.",
+    "Return four sections:",
+    "1. Most likely root cause",
+    "2. Evidence from the logs",
+    "3. Concrete QE/AiiDA parameter changes to try next",
+    "4. Immediate next actions on the HPC side",
+    "",
+    `Node PK: #${process.pk}`,
+    `Label: ${process.label || process.process_label || process.node_type}`,
+    `Node Type: ${process.node_type}`,
+    `Process Label: ${process.process_label || "Unknown"}`,
+    `State: ${process.process_state || process.state || "Unknown"}`,
+  ];
+
+  if (diagnostics?.computer_label) {
+    lines.push(`Computer: ${diagnostics.computer_label}`);
+  }
+  if (diagnostics?.exit_status !== null && diagnostics?.exit_status !== undefined) {
+    lines.push(`Exit Status: ${diagnostics.exit_status}`);
+  }
+  if (diagnostics?.exit_message) {
+    lines.push(`Exit Message: ${diagnostics.exit_message}`);
+  }
+  if (diagnostics?.stdout_excerpt?.text) {
+    lines.push("");
+    lines.push(`STDOUT Tail (${diagnostics.stdout_excerpt.filename || diagnostics.stdout_excerpt.source || "stdout"}):`);
+    lines.push(diagnostics.stdout_excerpt.text);
+  }
+  if (diagnostics?.log_excerpt?.text) {
+    lines.push("");
+    lines.push("Process Log Excerpt:");
+    lines.push(diagnostics.log_excerpt.text);
+  }
+  if (diagnostics?.stderr_excerpt) {
+    lines.push("");
+    lines.push("Scheduler STDERR:");
+    lines.push(diagnostics.stderr_excerpt);
+  }
+  if (!diagnostics) {
+    lines.push("");
+    lines.push("No structured diagnostics payload was available; infer the likely failure mode from the node metadata and explain what extra artifacts should be inspected.");
+  }
+
+  return lines.join("\n");
 }
 
 function normalizeTurnId(message: ChatMessage, index: number): number {
@@ -1490,8 +1543,8 @@ export default function App() {
     }
   }, []);
 
-  const handleConsultFailedProcess = useCallback((process: ProcessItem) => {
-    const prompt = `Please diagnose failed process #${process.pk} (${process.label || process.node_type}). Explain the likely root cause and propose concrete next actions.`;
+  const handleConsultFailedProcess = useCallback((process: ProcessItem, diagnostics?: ProcessDiagnosticsResponse | null) => {
+    const prompt = buildFailureConsultPrompt(process, diagnostics);
     void handleSendMessage(prompt);
   }, [handleSendMessage]);
 
@@ -1625,6 +1678,7 @@ export default function App() {
                 currentContextGroupLabel={currentContextGroupLabel}
                 processLimit={processLimit}
                 contextNodeIds={contextNodeIds}
+                selectedProcess={activeProcess}
                 isUpdatingProcessLimit={pendingProcessLimit !== null}
                 isDarkMode={theme === "dark"}
                 onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
@@ -1733,6 +1787,7 @@ export default function App() {
         process={activeProcess}
         onClose={() => setActiveProcess(null)}
         onAddContextNode={appendContextNode}
+        onExplainFailure={handleConsultFailedProcess}
       />
       <SubmissionModal
         open={Boolean(cloneDraft) && cloneTurnId !== null}

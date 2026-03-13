@@ -465,6 +465,59 @@ export type ProcessDetailResponse = {
   calculation?: Record<string, unknown>;
 };
 
+export type ComputeHealthQueueSnapshot = {
+  running: number;
+  pending: number;
+  queued: number;
+  total: number;
+  congested: boolean;
+  threshold: number;
+};
+
+export type ComputeHealthEstimate = {
+  available: boolean;
+  duration_seconds: number | null;
+  display: string | null;
+  num_machines: number | null;
+  sample_size: number;
+  basis: string | null;
+  matched_process_label: string | null;
+};
+
+export type ComputeHealthResponse = {
+  available: boolean;
+  source: string;
+  computer_label: string | null;
+  scheduler_type: string | null;
+  warning_message: string | null;
+  queue: ComputeHealthQueueSnapshot;
+  estimate: ComputeHealthEstimate;
+  reference_process_pk: number | null;
+};
+
+export type ProcessDiagnosticsExcerpt = {
+  source: string;
+  filename: string | null;
+  line_count: number;
+  text: string | null;
+};
+
+export type ProcessDiagnosticsResponse = {
+  available: boolean;
+  process_pk: number;
+  state: string | null;
+  node_type: string | null;
+  process_label: string | null;
+  label: string | null;
+  exit_status: number | null;
+  exit_message: string | null;
+  computer_label: string | null;
+  is_calcjob: boolean;
+  stdout_excerpt: ProcessDiagnosticsExcerpt;
+  log_excerpt: ProcessDiagnosticsExcerpt;
+  stderr_excerpt: string | null;
+};
+
 export type NodeFileListResponse = {
   pk: number;
   files: string[];
@@ -534,6 +587,14 @@ export type InfrastructureExportResponse = {
   content: string;
 };
 
+export type InfrastructureCapabilitiesResponse = {
+  aiida_core_version: string;
+  available_transports: string[];
+  recommended_transport: string;
+  supports_async_ssh: boolean;
+  transport_auth_fields: Record<string, string[]>;
+};
+
 export type ParseInfrastructureResponse = {
   status: string;
   data: {
@@ -558,9 +619,13 @@ export type ParseInfrastructureResponse = {
       key_filename?: string;
       proxy_command?: string;
       proxy_jump?: string;
-      safe_interval?: number;
+      safe_interval?: number | null;
       use_login_shell?: boolean;
-      connection_timeout?: number;
+      connection_timeout?: number | null;
+      host?: string;
+      max_io_allowed?: number | null;
+      authentication_script?: string;
+      backend?: string;
     };
     code?: {
       label?: string;

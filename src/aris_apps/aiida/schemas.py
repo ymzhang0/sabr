@@ -164,8 +164,71 @@ class InfrastructureExportResponse(BaseModel):
     content: str
 
 
+class InfrastructureCapabilitiesResponse(BaseModel):
+    aiida_core_version: str
+    available_transports: list[str] = Field(default_factory=list)
+    recommended_transport: str = "core.ssh"
+    supports_async_ssh: bool = False
+    transport_auth_fields: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ComputeHealthQueueSnapshot(BaseModel):
+    running: int = 0
+    pending: int = 0
+    queued: int = 0
+    total: int = 0
+    congested: bool = False
+    threshold: int = 1000
+
+
+class ComputeHealthEstimateResponse(BaseModel):
+    available: bool = False
+    duration_seconds: float | None = None
+    display: str | None = None
+    num_machines: int | None = None
+    sample_size: int = 0
+    basis: str | None = None
+    matched_process_label: str | None = None
+
+
+class ComputeHealthResponse(BaseModel):
+    available: bool = False
+    source: str = "unavailable"
+    computer_label: str | None = None
+    scheduler_type: str | None = None
+    warning_message: str | None = None
+    queue: ComputeHealthQueueSnapshot = Field(default_factory=ComputeHealthQueueSnapshot)
+    estimate: ComputeHealthEstimateResponse = Field(default_factory=ComputeHealthEstimateResponse)
+    reference_process_pk: int | None = None
+
+
+class ProcessDiagnosticsExcerpt(BaseModel):
+    source: str = "none"
+    filename: str | None = None
+    line_count: int = 0
+    text: str | None = None
+
+
+class ProcessDiagnosticsResponse(BaseModel):
+    available: bool = False
+    process_pk: int
+    state: str | None = None
+    node_type: str | None = None
+    process_label: str | None = None
+    label: str | None = None
+    exit_status: int | None = None
+    exit_message: str | None = None
+    computer_label: str | None = None
+    is_calcjob: bool = False
+    stdout_excerpt: ProcessDiagnosticsExcerpt = Field(default_factory=ProcessDiagnosticsExcerpt)
+    log_excerpt: ProcessDiagnosticsExcerpt = Field(
+        default_factory=lambda: ProcessDiagnosticsExcerpt(source="logs")
+    )
+    stderr_excerpt: str | None = None
+
+
 class ParseInfrastructureRequest(BaseModel):
-    text: str = Field(..., min_length=1)
+    text: str = Field(...)
     ssh_host_details: dict[str, Any] | None = None
 class UserInfoResponse(BaseModel):
     first_name: str

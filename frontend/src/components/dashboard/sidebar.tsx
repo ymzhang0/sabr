@@ -28,6 +28,7 @@ import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
 import { BridgeStatus } from "@/components/dashboard/bridge-status";
+import { ComputeHealthCard } from "@/components/dashboard/compute-health-card";
 import { cn } from "@/lib/utils";
 import {
   exportCodeConfig,
@@ -532,6 +533,7 @@ type SidebarProps = {
   currentContextGroupLabel: string | null;
   processLimit: number;
   contextNodeIds: number[];
+  selectedProcess: ProcessItem | null;
   isUpdatingProcessLimit: boolean;
   isDarkMode: boolean;
   onToggleTheme: () => void;
@@ -562,6 +564,7 @@ export function Sidebar({
   currentContextGroupLabel,
   processLimit,
   contextNodeIds,
+  selectedProcess,
   isUpdatingProcessLimit,
   isDarkMode,
   onToggleTheme,
@@ -1064,6 +1067,13 @@ export function Sidebar({
                   {computer.codes.length === 0 && (
                     <span className="text-[10px] text-zinc-400 ml-6 italic">No codes configured</span>
                   )}
+                  <div className="ml-2 mt-2">
+                    <ComputeHealthCard
+                      computerLabel={computer.label}
+                      selectedProcess={selectedProcess}
+                      compact
+                    />
+                  </div>
                 </div>
               )}
             </div>
@@ -1139,131 +1149,133 @@ export function Sidebar({
           </div>
         </div>
 
-        <div className="flex flex-col gap-3 shrink-0">
-          <div className="flex flex-col gap-1">
-            <div className="flex items-center justify-between group/groupbtn">
-              <button
-                onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
-                className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
-              >
-                <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
-                Archive
-              </button>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  const label = window.prompt("Enter new group name:");
-                  if (label) onCreateGroup(label);
-                }}
-                className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/groupbtn:opacity-100"
-              >
-                <Plus className="h-3.5 w-3.5 text-zinc-400" />
-              </button>
-            </div>
-
-            {isGroupsExpanded && (
-              <div className="mt-1 flex max-h-[300px] flex-col gap-1 overflow-y-auto minimal-scrollbar">
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={onSelectAllGroups}
-                  className={cn(
-                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                    isAllGroupsSelected
-                      ? "bg-zinc-100 font-medium dark:bg-zinc-800/60"
-                      : "text-zinc-600 hover:bg-zinc-100/50 dark:text-zinc-400 dark:hover:bg-zinc-800/30",
-                  )}
-                >
-                  <FolderOpen className="h-4 w-4" />
-                  <span>All Groups</span>
-                </div>
-                {currentContextGroup ? (
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={onSelectCurrentContext}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        onSelectCurrentContext();
-                      }
-                    }}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      setContextMenuGroup({
-                        pk: currentContextGroup.pk,
-                        ...clampMenuPosition(event.clientX, event.clientY, { width: 176, height: 120 }),
-                      });
-                    }}
-                    className={cn(
-                      "flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors",
-                      "bg-blue-50/50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-200",
-                      isCurrentContextSelected
-                        ? "font-semibold ring-1 ring-blue-300/70 dark:ring-blue-700/70"
-                        : "font-semibold hover:bg-blue-100/60 dark:hover:bg-blue-950/35",
-                    )}
+        <div className="flex min-h-0 flex-1 flex-col gap-4">
+          <div className="minimal-scrollbar min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="flex flex-col gap-4 pb-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center justify-between group/groupbtn">
+                  <button
+                    onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
+                    className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
                   >
-                    <div className="flex min-w-0 items-center gap-2 overflow-hidden">
-                      <div className="h-3.5 w-3.5 shrink-0" />
-                      <span
-                        className="h-2.5 w-2.5 shrink-0 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.75)]"
-                        aria-hidden
-                      />
-                      <span className="truncate">{currentContextGroup.label}</span>
+                    <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
+                    Archive
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const label = window.prompt("Enter new group name:");
+                      if (label) onCreateGroup(label);
+                    }}
+                    className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/groupbtn:opacity-100"
+                  >
+                    <Plus className="h-3.5 w-3.5 text-zinc-400" />
+                  </button>
+                </div>
+
+                {isGroupsExpanded && (
+                  <div className="mt-1 flex flex-col gap-1">
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      onClick={onSelectAllGroups}
+                      className={cn(
+                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
+                        isAllGroupsSelected
+                          ? "bg-zinc-100 font-medium dark:bg-zinc-800/60"
+                          : "text-zinc-600 hover:bg-zinc-100/50 dark:text-zinc-400 dark:hover:bg-zinc-800/30",
+                      )}
+                    >
+                      <FolderOpen className="h-4 w-4" />
+                      <span>All Groups</span>
                     </div>
-                    <span className="shrink-0 text-[10px] text-blue-600 dark:text-blue-300">
-                      {currentContextGroup.count}
-                    </span>
+                    {currentContextGroup ? (
+                      <div
+                        role="button"
+                        tabIndex={0}
+                        onClick={onSelectCurrentContext}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            onSelectCurrentContext();
+                          }
+                        }}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          setContextMenuGroup({
+                            pk: currentContextGroup.pk,
+                            ...clampMenuPosition(event.clientX, event.clientY, { width: 176, height: 120 }),
+                          });
+                        }}
+                        className={cn(
+                          "flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors",
+                          "bg-blue-50/50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-200",
+                          isCurrentContextSelected
+                            ? "font-semibold ring-1 ring-blue-300/70 dark:ring-blue-700/70"
+                            : "font-semibold hover:bg-blue-100/60 dark:hover:bg-blue-950/35",
+                        )}
+                      >
+                        <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+                          <div className="h-3.5 w-3.5 shrink-0" />
+                          <span
+                            className="h-2.5 w-2.5 shrink-0 rounded-full bg-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.75)]"
+                            aria-hidden
+                          />
+                          <span className="truncate">{currentContextGroup.label}</span>
+                        </div>
+                        <span className="shrink-0 text-[10px] text-blue-600 dark:text-blue-300">
+                          {currentContextGroup.count}
+                        </span>
+                      </div>
+                    ) : null}
+                    {renderGroupTree(groupTree)}
                   </div>
-                ) : null}
-                {renderGroupTree(groupTree)}
+                )}
               </div>
-            )}
-          </div>
-        </div>
-
-        <hr className="border-zinc-200/60 dark:border-zinc-800/60 shrink-0" />
-
-        {/* Nodes Section */}
-        <div className="flex min-h-0 flex-1 flex-col gap-2 relative">
-          <div className="flex items-center justify-between shrink-0">
-            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 pl-[18px]">
-              Nodes {isCurrentContextSelected ? (
-                "in Current Context"
-              ) : selectedGroupLabel ? (
-                <>
-                  in <span title={selectedGroupLabel}>
-                    {selectedGroupLabel.split('/').pop()!.length > 20
-                      ? `${selectedGroupLabel.split('/').pop()?.slice(0, 17)}...`
-                      : selectedGroupLabel.split('/').pop()}
-                  </span>
-                </>
-              ) : isAllGroupsSelected ? (
-                "Across Archive"
-              ) : "Recent"}
-            </span>
-            <div className="flex items-center gap-1 text-[11px] text-zinc-500">
-              Limit:
-              <input
-                type="number"
-                min={1}
-                max={200}
-                value={limitInput}
-                className="w-8 bg-transparent border-b border-zinc-300 dark:border-zinc-700 outline-none text-center"
-                onChange={(e) => setLimitInput(e.target.value)}
-                onBlur={() => commitProcessLimit(limitInput)}
-                onKeyDown={(e) => { if (e.key === "Enter") commitProcessLimit(limitInput); }}
-              />
             </div>
-          </div>
 
-          <div className={cn("minimal-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-1 pb-12", isUpdatingProcessLimit && "opacity-70")}>
-            {filteredProcesses.length === 0 ? (
-              <p className="rounded-xl border border-dashed border-zinc-300/60 bg-zinc-50/40 p-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-900/30 dark:text-zinc-400">
-                No matching nodes found.
-              </p>
-            ) : (
-              filteredProcesses.map((process) => {
+            <hr className="border-zinc-200/60 dark:border-zinc-800/60" />
+
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400 pl-[18px]">
+                  Nodes {isCurrentContextSelected ? (
+                    "in Current Context"
+                  ) : selectedGroupLabel ? (
+                    <>
+                      in <span title={selectedGroupLabel}>
+                        {selectedGroupLabel.split('/').pop()!.length > 20
+                          ? `${selectedGroupLabel.split('/').pop()?.slice(0, 17)}...`
+                          : selectedGroupLabel.split('/').pop()}
+                      </span>
+                    </>
+                  ) : isAllGroupsSelected ? (
+                    "Across Archive"
+                  ) : "Recent"}
+                </span>
+                <div className="flex items-center gap-1 text-[11px] text-zinc-500">
+                  Limit:
+                  <input
+                    type="number"
+                    min={1}
+                    max={200}
+                    value={limitInput}
+                    className="w-8 bg-transparent border-b border-zinc-300 dark:border-zinc-700 outline-none text-center"
+                    onChange={(e) => setLimitInput(e.target.value)}
+                    onBlur={() => commitProcessLimit(limitInput)}
+                    onKeyDown={(e) => { if (e.key === "Enter") commitProcessLimit(limitInput); }}
+                  />
+                </div>
+              </div>
+
+              <div className={cn("space-y-2", isUpdatingProcessLimit && "opacity-70")}>
+                {filteredProcesses.length === 0 ? (
+                  <p className="rounded-xl border border-dashed border-zinc-300/60 bg-zinc-50/40 p-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-900/30 dark:text-zinc-400">
+                    No matching nodes found.
+                  </p>
+                ) : (
+                  filteredProcesses.map((process) => {
                 const isSelected = contextNodeIds.includes(process.pk);
                 const isChecked = selectedNodePks.has(process.pk);
                 const canOpenDetail = canInspectNode(process);
@@ -1346,50 +1358,51 @@ export function Sidebar({
                     </div>
                   </div>
                 );
-              })
-            )}
+                  })
+                )}
+              </div>
+
+              {selectedNodePks.size > 0 && (
+                <div className="sticky bottom-2 z-10 mx-auto mt-2 flex w-fit items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-3 py-1.5 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95 animate-in slide-in-from-bottom-5">
+                  <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 px-2 border-r border-zinc-200 dark:border-zinc-800">
+                    {selectedNodePks.size} selected
+                  </span>
+                  <button onClick={handleBulkCreateGroup} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                    <FolderPlus className="h-3.5 w-3.5" /> Group
+                  </button>
+                </div>
+              )}
+            </div>
+            </div>
           </div>
 
-          {/* Bulk Actions Toolbar */}
-          {selectedNodePks.size > 0 && (
-            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-3 py-1.5 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-900/95 animate-in slide-in-from-bottom-5">
-              <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300 px-2 border-r border-zinc-200 dark:border-zinc-800">
-                {selectedNodePks.size} selected
-              </span>
-              <button onClick={handleBulkCreateGroup} className="flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800">
-                <FolderPlus className="h-3.5 w-3.5" /> Group
+          <hr className="border-zinc-200/60 dark:border-zinc-800/60 shrink-0" />
+
+          <div className="flex flex-col gap-1 shrink-0">
+            <div className="flex items-center justify-between group/infra">
+              <button
+                onClick={() => setIsInfraExpanded(!isInfraExpanded)}
+                className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
+              >
+                <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isInfraExpanded && "rotate-90")} />
+                Infrastructure
+              </button>
+              <button
+                onClick={() => setIsQuickAddOpen(true)}
+                className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/infra:opacity-100"
+              >
+                <Plus className="h-3.5 w-3.5 text-zinc-500" />
               </button>
             </div>
-          )}
-        </div>
 
-        <hr className="border-zinc-200/60 dark:border-zinc-800/60 shrink-0" />
-
-        {/* Infrastructure Section */}
-        <div className="flex flex-col gap-1 shrink-0">
-          <div className="flex items-center justify-between group/infra">
-            <button
-              onClick={() => setIsInfraExpanded(!isInfraExpanded)}
-              className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
-            >
-              <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isInfraExpanded && "rotate-90")} />
-              Infrastructure
-            </button>
-            <button
-              onClick={() => setIsQuickAddOpen(true)}
-              className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/infra:opacity-100"
-            >
-              <Plus className="h-3.5 w-3.5 text-zinc-500" />
-            </button>
+            {isInfraExpanded && (
+              <div className="minimal-scrollbar mt-1 max-h-[280px] overflow-y-auto pr-1">
+                {infrastructure.length === 0 ? (
+                  <p className="px-2 py-2 text-[11px] text-zinc-400 italic">No computers configured</p>
+                ) : renderInfrastructureTree()}
+              </div>
+            )}
           </div>
-
-          {isInfraExpanded && (
-            <div className="flex flex-col gap-1 mt-1 max-h-[300px] overflow-y-auto minimal-scrollbar">
-              {infrastructure.length === 0 ? (
-                <p className="px-2 py-2 text-[11px] text-zinc-400 italic">No computers configured</p>
-              ) : renderInfrastructureTree()}
-            </div>
-          )}
         </div>
       </Panel>
 

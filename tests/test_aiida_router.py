@@ -863,6 +863,32 @@ async def test_export_management_computer_proxies_worker_payload(monkeypatch: py
 
 
 @pytest.mark.anyio
+async def test_get_management_infrastructure_capabilities_proxies_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = {
+        "aiida_core_version": "2.7.3",
+        "available_transports": ["core.local", "core.ssh", "core.ssh_async"],
+        "recommended_transport": "core.ssh_async",
+        "supports_async_ssh": True,
+        "transport_auth_fields": {
+            "core.local": [],
+            "core.ssh": ["username", "timeout"],
+            "core.ssh_async": ["host", "backend"],
+        },
+    }
+
+    async def _fake_capabilities() -> dict[str, object]:
+        return expected
+
+    monkeypatch.setattr(aiida_router.bridge_service, "get_infrastructure_capabilities", _fake_capabilities)
+
+    response = await aiida_router.get_management_infrastructure_capabilities()
+
+    assert response.model_dump() == expected
+
+
+@pytest.mark.anyio
 async def test_export_management_code_proxies_worker_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     expected = {
         "kind": "code",
@@ -960,3 +986,180 @@ async def test_frontend_chat_session_batch_progress_returns_404_for_missing_sess
         await aiida_router.frontend_chat_session_batch_progress(request, "missing-session")
 
     assert exc_info.value.status_code == 404
+
+
+def test_estimate_runtime_from_history_prefers_matching_scale(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        aiida_router,
+        "_get_frontend_nodes",
+        lambda **_: [
+            {
+                "pk": 1,
+                "process_label": "PwBandsWorkChain",
+                "node_type": "WorkChainNode",
+                "process_state": "finished",
+                "preview_info": {
+                    "computer_label": "aris",
+                    "atom_count": 88,
+                    "execution_time_seconds": 2700,
+                    "num_machines": 4,
+                },
+            },
+            {
+                "pk": 2,
+                "process_label": "PwBandsWorkChain",
+                "node_type": "WorkChainNode",
+                "process_state": "finished",
+                "preview_info": {
+                    "computer_label": "aris",
+                    "atom_count": 92,
+                    "execution_time_seconds": 3000,
+                    "num_machines": 4,
+                },
+            },
+            {
+                "pk": 3,
+                "process_label": "PwRelaxWorkChain",
+                "node_type": "WorkChainNode",
+                "process_state": "finished",
+                "preview_info": {
+                    "computer_label": "other-cluster",
+                    "atom_count": 12,
+                    "execution_time_seconds": 300,
+                    "num_machines": 1,
+                },
+            },
+        ],
+    )
+
+    estimate = aiida_router._estimate_runtime_from_history(
+        {
+            "pk": 99,
+            "process_label": "PwBandsWorkChain",
+            "node_type": "WorkChainNode",
+            "computer_label": "aris",
+            "atom_count": 90,
+            "num_machines": 4,
+        },
+        computer_label="aris",
+        reference_process_pk=99,
+    )
+
+    assert estimate.available is True
+    assert estimate.sample_size == 2
+    assert estimate.num_machines == 4
+    assert estimate.display == "~48 mins on 4 nodes"
+
+
+@pytest.mark.anyio
+async def test_frontend_compute_health_returns_queue_warning_and_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_fetch_process_detail_payload(identifier: str | int) -> dict[str, object]:
+        assert identifier == 321
+        return {
+            "summary": {
+                "pk": 321,
+                "process_label": "PwBandsWorkChain",
+                "node_type": "WorkChainNode",
+            },
+            "preview_info": {"computer_label": "aris", "atom_count": 88, "num_machines": 4},
+        }
+
+    async def _fake_resolve_compute_health_computer_label(**_: object) -> str:
+        return "aris"
+
+    async def _fake_fetch_scheduler_snapshot(computer_label: str | None) -> dict[str, object]:
+        assert computer_label == "aris"
+        return {
+            "available": True,
+            "computer_label": "aris",
+            "scheduler_type": "core.slurm",
+            "queue": {"running": 12, "pending": 45, "queued": 1204, "total": 1261},
+        }
+
+    monkeypatch.setattr(aiida_router, "_fetch_process_detail_payload", _fake_fetch_process_detail_payload)
+    monkeypatch.setattr(
+        aiida_router,
+        "_resolve_compute_health_computer_label",
+        _fake_resolve_compute_health_computer_label,
+    )
+    monkeypatch.setattr(aiida_router, "_fetch_scheduler_snapshot", _fake_fetch_scheduler_snapshot)
+    monkeypatch.setattr(
+        aiida_router,
+        "_estimate_runtime_from_history",
+        lambda *_args, **_kwargs: aiida_router.ComputeHealthEstimateResponse(
+            available=True,
+            duration_seconds=2700,
+            display="~45 mins on 4 nodes",
+            num_machines=4,
+            sample_size=7,
+            basis="Historical runs matched by computer, workflow, and task scale",
+            matched_process_label="PwBandsWorkChain",
+        ),
+    )
+
+    response = await aiida_router.frontend_compute_health(reference_process_pk=321)
+
+    assert response.available is True
+    assert response.computer_label == "aris"
+    assert response.scheduler_type == "core.slurm"
+    assert response.queue.queued == 1204
+    assert response.queue.congested is True
+    assert response.warning_message is not None
+    assert "1204" in response.warning_message
+    assert response.estimate.display == "~45 mins on 4 nodes"
+
+
+@pytest.mark.anyio
+async def test_build_process_diagnostics_prefers_repository_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _fake_fetch_process_detail_payload(identifier: str | int) -> dict[str, object]:
+        assert identifier == 77
+        return {
+            "summary": {
+                "pk": 77,
+                "node_type": "CalcJobNode",
+                "process_label": "PwCalculation",
+                "state": "failed",
+                "exit_status": 301,
+                "exit_message": "SCF did not converge",
+                "label": "pw.x",
+            },
+            "preview_info": {"computer_label": "aris"},
+            "direct_outputs": {
+                "retrieved": {"link_label": "retrieved", "node_type": "FolderData", "pk": 900},
+                "remote_folder": {"link_label": "remote_folder", "node_type": "RemoteData", "pk": 901},
+            },
+        }
+
+    async def _fake_request_optional_json(method: str, path: str, **_: object) -> dict[str, object] | None:
+        assert method == "GET"
+        if path == "/process/77/logs":
+            return {
+                "lines": ["report line 1", "report line 2"],
+                "stderr_excerpt": "scheduler stderr tail",
+                "text": "report line 1\nreport line 2",
+            }
+        if path == "/data/repository/900/files":
+            return {"files": ["aiida.out", "scheduler.stderr"]}
+        if path == "/data/repository/900/files/aiida.out":
+            return {"content": "line 1\nline 2\nline 3"}
+        raise AssertionError(f"Unexpected path: {path}")
+
+    monkeypatch.setattr(aiida_router, "_fetch_process_detail_payload", _fake_fetch_process_detail_payload)
+    monkeypatch.setattr(aiida_router, "_request_optional_json", _fake_request_optional_json)
+
+    response = await aiida_router._build_process_diagnostics(77)
+
+    assert response.available is True
+    assert response.process_pk == 77
+    assert response.process_label == "PwCalculation"
+    assert response.exit_status == 301
+    assert response.exit_message == "SCF did not converge"
+    assert response.computer_label == "aris"
+    assert response.is_calcjob is True
+    assert response.stdout_excerpt.source == "repository"
+    assert response.stdout_excerpt.filename == "aiida.out"
+    assert response.stdout_excerpt.line_count == 3
+    assert response.stdout_excerpt.text == "line 1\nline 2\nline 3"
+    assert response.stderr_excerpt == "scheduler stderr tail"

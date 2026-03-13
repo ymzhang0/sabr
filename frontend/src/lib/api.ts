@@ -15,6 +15,7 @@ import type {
   ChatSessionMutationResponse,
   ChatSessionWorkspaceResponse,
   ChatSessionsResponse,
+  ComputeHealthResponse,
   GroupAssignNodesResponse,
   GroupDeleteResponse,
   GroupExportDownload,
@@ -22,6 +23,7 @@ import type {
   GroupsResponse,
   ActiveSpecializationsResponse,
   InfrastructureComputer,
+  InfrastructureCapabilitiesResponse,
   InfrastructureExportResponse,
   LogsResponse,
   NodeHoverMetadataResponse,
@@ -30,6 +32,7 @@ import type {
   NodeFileListResponse,
   ParseInfrastructureResponse,
   ProcessDetailResponse,
+  ProcessDiagnosticsResponse,
   ProcessLogsResponse,
   ProcessesResponse,
   SendChatRequest,
@@ -386,6 +389,24 @@ export async function getProcessLogs(identifier: number | string): Promise<Proce
   return data;
 }
 
+export async function getComputeHealth(params?: {
+  reference_process_pk?: number;
+  computer_label?: string | null;
+}): Promise<ComputeHealthResponse> {
+  const { data } = await frontendApi.get<ComputeHealthResponse>("/compute-health", {
+    params: {
+      reference_process_pk: params?.reference_process_pk,
+      computer_label: params?.computer_label ?? undefined,
+    },
+  });
+  return data;
+}
+
+export async function getProcessDiagnostics(identifier: number | string): Promise<ProcessDiagnosticsResponse> {
+  const { data } = await frontendApi.get<ProcessDiagnosticsResponse>(`/processes/${identifier}/diagnostics`);
+  return data;
+}
+
 export async function getBandsPlotData(pk: number): Promise<BandsPlotResponse> {
   const { data } = await aiidaApi.get<BandsPlotResponse>(`/data/bands/${pk}`);
   return data;
@@ -507,6 +528,11 @@ export async function getBridgeResources(): Promise<BridgeResourcesResponse> {
 
 export async function getInfrastructure(): Promise<InfrastructureComputer[]> {
   const { data } = await aiidaApi.get<InfrastructureComputer[]>("/management/infrastructure");
+  return data;
+}
+
+export async function getInfrastructureCapabilities(): Promise<InfrastructureCapabilitiesResponse> {
+  const { data } = await aiidaApi.get<InfrastructureCapabilitiesResponse>("/management/infrastructure/capabilities");
   return data;
 }
 
