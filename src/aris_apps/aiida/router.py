@@ -763,25 +763,48 @@ def _state_name(job):
     value = getattr(raw_state, "value", raw_state)
     return str(value).strip().lower()
 
+def _computer_is_ready(computer, user):
+    try:
+        return bool(computer.is_user_configured(user))
+    except Exception:
+        return False
+
 try:
-    from aiida.orm import Computer, QueryBuilder, load_computer
+    from aiida.orm import Computer, QueryBuilder, User, load_computer
 
     selected = None
+    default_user = User.collection.get_default()
     qb = QueryBuilder()
-    qb.append(Computer, project=["label", "is_enabled"])
+    qb.append(Computer, project=["label"])
     computer_rows = qb.all()
     if payload["computer_label"]:
         try:
-            selected = load_computer(payload["computer_label"])
+            candidate = load_computer(payload["computer_label"])
+            if _computer_is_ready(candidate, default_user):
+                selected = candidate
+            else:
+                payload["error"] = (
+                    f"Computer '{{candidate.label}}' is not configured for the current AiiDA user"
+                )
         except Exception:
-            selected = None
-    if selected is None:
-        enabled_labels = [row[0] for row in computer_rows if len(row) > 1 and row[1]]
-        fallback_labels = enabled_labels or [row[0] for row in computer_rows if row]
+            payload["error"] = f"Unknown computer: {{payload['computer_label']}}"
+    if selected is None and not payload["computer_label"]:
+        configured_labels = []
+        for row in computer_rows:
+            if not row:
+                continue
+            try:
+                candidate = load_computer(row[0])
+            except Exception:
+                continue
+            if _computer_is_ready(candidate, default_user):
+                configured_labels.append(candidate.label)
+        fallback_labels = configured_labels or [row[0] for row in computer_rows if row]
         if fallback_labels:
             selected = load_computer(fallback_labels[0])
     if selected is None:
-        payload["error"] = "No configured AiiDA computer available"
+        if "error" not in payload:
+            payload["error"] = "No configured AiiDA computer available"
     else:
         payload["computer_label"] = selected.label
         payload["scheduler_type"] = selected.scheduler_type

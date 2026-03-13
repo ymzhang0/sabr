@@ -1051,6 +1051,15 @@ def test_estimate_runtime_from_history_prefers_matching_scale(monkeypatch: pytes
     assert estimate.display == "~48 mins on 4 nodes"
 
 
+def test_build_scheduler_probe_script_uses_configured_user_lookup() -> None:
+    script = aiida_router._build_scheduler_probe_script("aris")
+
+    assert 'project=["label"]' in script
+    assert 'project=["label", "is_enabled"]' not in script
+    assert "User.collection.get_default()" in script
+    assert 'if selected is None and not payload["computer_label"]:' in script
+
+
 @pytest.mark.anyio
 async def test_frontend_compute_health_returns_queue_warning_and_estimate(
     monkeypatch: pytest.MonkeyPatch,
