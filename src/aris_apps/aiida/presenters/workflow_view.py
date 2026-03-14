@@ -1379,6 +1379,11 @@ def enrich_submission_draft_payload(submission_draft: dict[str, Any]) -> dict[st
         payload["meta"] = meta
 
     inputs = _as_dict(payload.get("inputs")) or {}
+    existing_all_inputs = _as_dict(payload.get("all_inputs")) or _as_dict(meta.get("all_inputs"))
+    existing_input_groups = payload.get("input_groups")
+    if not isinstance(existing_input_groups, list):
+        meta_input_groups = meta.get("input_groups")
+        existing_input_groups = meta_input_groups if isinstance(meta_input_groups, list) else None
     
     validation = _as_dict(meta.get("validation"))
     if validation is None:
@@ -1401,11 +1406,18 @@ def enrich_submission_draft_payload(submission_draft: dict[str, Any]) -> dict[st
         recommended_inputs = _as_dict(payload.get("advanced_settings")) or {}
         payload["recommended_inputs"] = recommended_inputs
 
-    payload["all_inputs"] = _build_all_inputs(inputs, recommended_inputs)
-    payload["input_groups"] = _build_input_groups(payload["all_inputs"])
+    derived_all_inputs = _build_all_inputs(inputs, recommended_inputs)
+    if derived_all_inputs:
+        payload["all_inputs"] = derived_all_inputs
+        payload["input_groups"] = _build_input_groups(derived_all_inputs)
+    else:
+        payload["all_inputs"] = dict(existing_all_inputs) if isinstance(existing_all_inputs, dict) else {}
+        payload["input_groups"] = list(existing_input_groups) if isinstance(existing_input_groups, list) else []
 
     if not isinstance(meta.get("recommended_inputs"), dict):
         meta["recommended_inputs"] = recommended_inputs
+    if not isinstance(meta.get("all_inputs"), dict):
+        meta["all_inputs"] = payload["all_inputs"]
     if not isinstance(meta.get("input_groups"), list):
         meta["input_groups"] = payload["input_groups"]
 

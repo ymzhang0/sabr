@@ -1,5 +1,6 @@
 """Tests for chat context metadata normalization and priority injection."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,15 @@ class _Memory:
 
 def _make_chat_state() -> SimpleNamespace:
     return SimpleNamespace(memory=_Memory(), chat_version=0)
+
+
+_AUTO_ENVIRONMENT_PROMPT = (
+    "Context: Current environment is demo-project. Mode: worker default interpreter. "
+    "Available AiiDA plugins: quantumespresso.*: quantumespresso.pw.base, quantumespresso.pw.relax. "
+    "Submission draft generation is supported in both worker-default and project-interpreter modes when the worker can validate the request. "
+    "Standard project layout: save reusable Python scripts under codes/ and exported results under data/. "
+    "When suggesting a save location, explicitly recommend codes/<filename>.py."
+)
 
 
 def test_create_chat_session_defaults_to_new_conversation_title() -> None:
@@ -408,6 +418,27 @@ def test_build_chat_message_payload_extracts_submission_draft_from_output_payloa
     assert payload["submission_draft"]["meta"]["pk_map"][0]["pk"] == 34
 
 
+def test_build_chat_message_payload_does_not_reuse_stale_pending_submission() -> None:
+    deps = SimpleNamespace(
+        get_registry_value=lambda key: {
+            "submission_draft": {
+                "process_label": "quantumespresso.pw.bands",
+                "inputs": {"bands": {"pw": {"code": "pw-7.5@localhost"}}},
+                "meta": {"workchain": "quantumespresso.pw.bands"},
+            }
+        } if key == "aiida_pending_submission" else None
+    )
+
+    payload = chat_service._build_chat_message_payload(
+        SimpleNamespace(data_payload={"status": "OK"}),
+        deps,
+        answer_text="I prepared a reusable EOS Python script instead of a submission draft.",
+    )
+
+    assert payload is not None
+    assert "submission_draft" not in payload
+
+
 def test_build_chat_message_payload_extracts_submission_draft_from_output_draft_shape() -> None:
     output = SimpleNamespace(
         data_payload={
@@ -554,6 +585,19 @@ def test_build_user_message_payload_keeps_session_preferences() -> None:
     assert payload["session_parameters"][0]["key"] == "ecutwfc"
 
 
+def test_build_user_message_payload_prefers_session_prompt_override() -> None:
+    metadata = {
+        "session_environment": "quantumespresso",
+        "prompt_override": f"Keep four decimal places.\n\n{_AUTO_ENVIRONMENT_PROMPT}",
+        "session_prompt_override": "Keep four decimal places.",
+    }
+
+    payload = chat_service._build_user_message_payload(metadata, [])
+
+    assert payload is not None
+    assert payload["prompt_override"] == "Keep four decimal places."
+
+
 def test_inject_session_preference_instruction_adds_session_defaults() -> None:
     intent = "Run a relaxation."
     metadata = {
@@ -571,6 +615,29 @@ def test_inject_session_preference_instruction_adds_session_defaults() -> None:
     assert "session_parameters: ecutwfc=40 Ry" in scoped
     assert "prompt_override: Keep four decimal places." in scoped
     assert intent in scoped
+
+
+def test_normalize_chat_session_snapshot_strips_auto_environment_prompt() -> None:
+    normalized = chat_service._normalize_chat_session_snapshot(
+        {
+            "prompt_override": f"Keep four decimal places.\n\n{_AUTO_ENVIRONMENT_PROMPT}",
+            "selected_model": "gemini-flash-latest",
+        }
+    )
+
+    assert normalized["prompt_override"] == "Keep four decimal places."
+
+
+def test_build_chat_session_snapshot_prefers_session_prompt_override() -> None:
+    snapshot = chat_service._build_chat_session_snapshot(
+        {
+            "prompt_override": f"Keep four decimal places.\n\n{_AUTO_ENVIRONMENT_PROMPT}",
+            "session_prompt_override": "Keep four decimal places.",
+        },
+        selected_model="gemini-flash-latest",
+    )
+
+    assert snapshot["prompt_override"] == "Keep four decimal places."
 
 
 def test_build_submission_draft_text_block_for_ui_tag() -> None:
@@ -731,6 +798,75 @@ def test_normalize_submission_draft_payload_ignores_node_metadata_envelopes_in_a
 
     assert "nbands_factor" not in normalized["advanced_settings"]
     assert normalized["advanced_settings"]["clean_workdir"] is True
+
+
+def test_normalize_submission_draft_payload_preserves_existing_all_inputs_without_inputs() -> None:
+    normalized = chat_service._normalize_submission_draft_payload(
+        {
+            "process_label": "quantumespresso.pw.base",
+            "primary_inputs": {
+                "code": "q-e-qe-7.5-pw@manneback_async",
+                "structure": "Si2 (PK: 6)",
+            },
+            "recommended_inputs": {
+                "protocol": "moderate",
+            },
+            "all_inputs": {
+                "kpoints": {
+                    "value": [4, 4, 4],
+                    "is_recommended": True,
+                },
+                "metadata.options.resources": {
+                    "num_machines": 1,
+                    "num_mpiprocs_per_machine": 1,
+                },
+            },
+        },
+        draft=None,
+        validation=None,
+        validation_summary=None,
+    )
+
+    assert normalized["inputs"] == {}
+    assert normalized["all_inputs"]["kpoints"]["value"] == [4, 4, 4]
+    assert normalized["all_inputs"]["metadata.options.resources"]["num_machines"] == 1
+    assert normalized["meta"]["all_inputs"]["kpoints"]["value"] == [4, 4, 4]
+
+
+def test_merge_submission_draft_block_into_answer_keeps_existing_parseable_block() -> None:
+    answer_text = (
+        "Prepared preview.\n\n"
+        "[SUBMISSION_DRAFT]\n"
+        + json.dumps(
+            {
+                "process_label": "quantumespresso.pw.base",
+                "primary_inputs": {"code": "q-e-qe-7.5-pw@manneback_async"},
+                "recommended_inputs": {"protocol": "moderate"},
+                "all_inputs": {
+                    "kpoints": {"value": [4, 4, 4], "is_recommended": True},
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    payload = {
+        "type": "SUBMISSION_DRAFT",
+        "submission_draft": {
+            "process_label": "quantumespresso.pw.base",
+            "inputs": {},
+            "primary_inputs": {"code": "q-e-qe-7.5-pw@manneback_async"},
+            "recommended_inputs": {"protocol": "moderate"},
+            "advanced_settings": {},
+            "all_inputs": {},
+            "meta": {"pk_map": []},
+        },
+    }
+
+    merged = chat_service._merge_submission_draft_block_into_answer(answer_text, payload)
+
+    assert merged == answer_text
+    assert merged.count("[SUBMISSION_DRAFT]") == 1
 
 
 def test_update_assistant_message_keeps_existing_text_when_status_payload_arrives() -> None:

@@ -122,12 +122,106 @@ function basenamePath(value: string | null | undefined): string {
   return parts[parts.length - 1] || normalized;
 }
 
+function splitPromptBlocks(value: unknown): string[] {
+  if (typeof value !== "string") {
+    return [];
+  }
+  return value
+    .split(/\n\s*\n+/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+}
+
+function isAutoEnvironmentPromptBlock(block: string): boolean {
+  const lowered = block.trim().toLowerCase();
+  if (!lowered.includes("current environment is") || !lowered.includes("available aiida")) {
+    return false;
+  }
+  return (
+    lowered.includes("submission draft generation is supported") ||
+    lowered.includes("standard project layout") ||
+    lowered.includes("codes/<filename>.py")
+  );
+}
+
+function stripAutoEnvironmentPrompt(value: unknown): string | undefined {
+  const cleaned = splitPromptBlocks(value).filter((block) => !isAutoEnvironmentPromptBlock(block)).join("\n\n");
+  return cleaned || undefined;
+}
+
 function mergePromptOverride(...values: Array<unknown>): string | undefined {
-  const merged = values
-    .map((value) => (typeof value === "string" ? value.trim() : ""))
-    .filter(Boolean)
-    .join("\n\n");
-  return merged || undefined;
+  const mergedBlocks: string[] = [];
+  const seen = new Set<string>();
+  values.forEach((value) => {
+    splitPromptBlocks(value).forEach((block) => {
+      if (seen.has(block)) {
+        return;
+      }
+      seen.add(block);
+      mergedBlocks.push(block);
+    });
+  });
+  return mergedBlocks.join("\n\n") || undefined;
+}
+
+function summarizePluginFamily(family: string, plugins: string[]): string {
+  const uniquePlugins = [...new Set(plugins.map((plugin) => plugin.trim()).filter(Boolean))];
+  if (uniquePlugins.length === 0) {
+    return `${family}.*`;
+  }
+
+  const preferredQuantumespresso = [
+    "quantumespresso.pw.base",
+    "quantumespresso.pw.relax",
+    "quantumespresso.pw.bands",
+    "quantumespresso.ph.base",
+    "quantumespresso.dos",
+    "quantumespresso.pdos",
+  ];
+  const examples = family === "quantumespresso"
+    ? preferredQuantumespresso.filter((plugin) => uniquePlugins.includes(plugin))
+    : uniquePlugins.slice(0, 3);
+  const extraCount = Math.max(0, uniquePlugins.length - examples.length);
+  const detail = examples.length > 0 ? `: ${examples.join(", ")}` : "";
+  const suffix = extraCount > 0 ? ` (+${extraCount} more)` : "";
+  return `${family}.*${detail}${suffix}`;
+}
+
+function summarizeEnvironmentPlugins(plugins: string[]): string {
+  const uniquePlugins = [...new Set(plugins.map((plugin) => plugin.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+  if (uniquePlugins.length === 0) {
+    return "aiida-core only";
+  }
+
+  const nonCorePlugins = uniquePlugins.filter((plugin) => !plugin.startsWith("core."));
+  if (nonCorePlugins.length === 0) {
+    return "aiida-core only";
+  }
+
+  const families = new Map<string, string[]>();
+  nonCorePlugins.forEach((plugin) => {
+    const family = plugin.split(".")[0]?.trim() || plugin;
+    const familyPlugins = families.get(family) ?? [];
+    familyPlugins.push(plugin);
+    families.set(family, familyPlugins);
+  });
+
+  const orderedFamilies = [...families.keys()].sort((left, right) => {
+    if (left === right) {
+      return 0;
+    }
+    if (left === "quantumespresso") {
+      return -1;
+    }
+    if (right === "quantumespresso") {
+      return 1;
+    }
+    return left.localeCompare(right);
+  });
+
+  const visibleFamilies = orderedFamilies.slice(0, 4).map((family) => summarizePluginFamily(family, families.get(family) ?? []));
+  const hiddenCount = orderedFamilies.length - visibleFamilies.length;
+  return hiddenCount > 0 ? `${visibleFamilies.join("; ")}; +${hiddenCount} more families` : visibleFamilies.join("; ");
 }
 
 function buildInterpreterInfo(): InterpreterInfo {
@@ -141,10 +235,9 @@ function buildInterpreterInfo(): InterpreterInfo {
 function buildEnvironmentSystemPrompt(): string | null {
   const state = getEnvironmentState();
   const projectName = basenamePath(state.currentProjectPath) || (state.useWorkerDefault ? "worker-global" : "current-project");
-  const plugins = state.availablePlugins;
-  const pluginList = plugins.length > 0 ? plugins.join(", ") : "aiida-core only";
-  const modeLabel = state.useWorkerDefault ? "Worker Environment (Global)" : "Project Environment (Isolated)";
-  return `Context: Current environment is ${projectName}. Mode: ${modeLabel}. Available AiiDA plugins: ${pluginList}. Please generate code compatible with these plugins. ${buildProjectLayoutSystemPrompt()}`;
+  const pluginSummary = summarizeEnvironmentPlugins(state.availablePlugins);
+  const modeLabel = state.useWorkerDefault ? "worker default interpreter" : "project interpreter";
+  return `Context: Current environment is ${projectName}. Mode: ${modeLabel}. Available AiiDA plugins: ${pluginSummary}. Submission draft generation is supported in both worker-default and project-interpreter modes when the worker can validate the request. Please generate code compatible with these plugins. ${buildProjectLayoutSystemPrompt()}`;
 }
 
 function buildEnvironmentMetadata(): Record<string, unknown> {
@@ -458,10 +551,12 @@ export async function sendChat(
     : {};
   const environmentMetadata = buildEnvironmentMetadata();
   const environmentPrompt = buildEnvironmentSystemPrompt();
-  const promptOverride = mergePromptOverride(payloadMetadata.prompt_override, environmentPrompt);
+  const sessionPromptOverride = stripAutoEnvironmentPrompt(payloadMetadata.prompt_override);
+  const promptOverride = mergePromptOverride(sessionPromptOverride, environmentPrompt);
   const metadata = {
     ...environmentMetadata,
     ...payloadMetadata,
+    ...(sessionPromptOverride ? { session_prompt_override: sessionPromptOverride } : {}),
     ...(promptOverride ? { prompt_override: promptOverride } : {}),
   };
   const { data } = await frontendApi.post<{ turn_id: number }>("/chat", {

@@ -1,16 +1,20 @@
-Canonical runtime root for the future ARIS layout.
+Legacy runtime note for ARIS.
 
-Use this directory for mutable local state such as:
-- chat and memory snapshots
-- uploads and caches
-- generated script archives
+Mutable local state now lives under `~/.aris/`, including:
+- chat and memory snapshots in `~/.aris/memories`
+- uploads and caches under `~/.aris`
+- generated script archives in `~/.aris/scripts`
 
 Managed chat project roots now default to `~/.aris/projects`, and each project keeps
 its per-session workspaces under `<project-root>/sessions/`.
 
-Legacy paths under `data/` and `engines/aiida/data/` are still supported during
-the migration window, but new runtime state should move here.
+Legacy paths under `runtime/`, `data/`, and `engines/aiida/data/` are still
+supported during the migration window, but startup now migrates them into
+`~/.aris/`.
 
-Historical `.env` values that still point at the old default data directories are
-normalized back to `runtime/` during settings load so the canonical layout wins
-without breaking local startup scripts.
+This repository no longer keeps placeholder runtime subdirectories under
+`runtime/`; only this note remains so the legacy path is documented.
+
+Historical `.env` values that still point at the old repo-local runtime
+directories are normalized back to `~/.aris/` during settings load so the
+home-directory layout wins without breaking local startup scripts.

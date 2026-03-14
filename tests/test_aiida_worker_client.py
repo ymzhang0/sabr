@@ -147,6 +147,22 @@ async def test_inspect_default_environment_uses_worker_endpoint(monkeypatch: pyt
     assert result["python_interpreter_path"] == "/tmp/worker-python"
 
 
+def test_environment_inspect_path_is_not_cached_as_unsupported() -> None:
+    client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")
+
+    client._remember_unsupported_path("/management/environments/inspect", 404)  # noqa: SLF001
+
+    assert client._is_path_known_unsupported("/management/environments/inspect") is False  # noqa: SLF001
+
+
+def test_known_legacy_unsupported_prefix_is_cached() -> None:
+    client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")
+
+    client._remember_unsupported_path("/management/profiles", 404)  # noqa: SLF001
+
+    assert client._is_path_known_unsupported("/management/profiles") is True  # noqa: SLF001
+    assert client._is_path_known_unsupported("/management/profiles/current-user-info") is True  # noqa: SLF001
+
 @pytest.mark.anyio
 async def test_get_current_user_info(monkeypatch: pytest.MonkeyPatch) -> None:
     client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")

@@ -1,5 +1,9 @@
 export const DEFAULT_PROJECT_CODE_DIRECTORY = "codes";
 export const DEFAULT_PROJECT_DATA_DIRECTORY = "data";
+const PYTHON_CODE_BLOCK_REGEX = /```python\s*([\s\S]*?)```/gi;
+const GENERIC_CODE_BLOCK_REGEX = /```(?:py|python)?\s*([\s\S]*?)```/gi;
+const BACKTICK_PYTHON_PATH_REGEX = /`([^`\n]+\.py)`/g;
+const PLAIN_PYTHON_PATH_REGEX = /(?:^|[\s:(])((?:codes\/)?[A-Za-z0-9._/-]+\.py)(?=$|[\s`),.:;])/g;
 
 const ACTION_RULES: Array<{ pattern: RegExp; value: string }> = [
   { pattern: /\b(submit|launch|run workchain|run calculation|prepare submission)\b/i, value: "submit" },
@@ -171,4 +175,87 @@ export function buildProjectLayoutSystemPrompt(): string {
 export function buildScriptSaveRecommendation(relativePath: string): string {
   const cleaned = String(relativePath || "").trim() || `${DEFAULT_PROJECT_CODE_DIRECTORY}/script.py`;
   return `I have prepared the script and recommend saving it under ${cleaned}.`;
+}
+
+function extractLastRegexGroup(regex: RegExp, text: string): string | null {
+  const source = String(text || "");
+  let match: RegExpExecArray | null = null;
+  let lastValue: string | null = null;
+  regex.lastIndex = 0;
+  while ((match = regex.exec(source)) !== null) {
+    const candidate = String(match[1] || "").trim();
+    if (candidate) {
+      lastValue = candidate;
+    }
+  }
+  regex.lastIndex = 0;
+  return lastValue;
+}
+
+function extractAssistantScriptContent(text: string): string | null {
+  const pythonBlock = extractLastRegexGroup(PYTHON_CODE_BLOCK_REGEX, text);
+  if (pythonBlock) {
+    return pythonBlock;
+  }
+  const genericBlock = extractLastRegexGroup(GENERIC_CODE_BLOCK_REGEX, text);
+  if (!genericBlock) {
+    return null;
+  }
+  const normalized = genericBlock.trim();
+  if (!normalized) {
+    return null;
+  }
+  if (!/(^|\n)\s*(from|import|def|class|if __name__ == [\"'])/m.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+function extractSuggestedScriptPath(text: string): string | null {
+  const backtickPath = extractLastRegexGroup(BACKTICK_PYTHON_PATH_REGEX, text);
+  if (backtickPath) {
+    return backtickPath;
+  }
+  const plainPath = extractLastRegexGroup(PLAIN_PYTHON_PATH_REGEX, text);
+  return plainPath;
+}
+
+export type AssistantScriptArtifact = {
+  filename: string;
+  relativePath: string;
+  content: string;
+};
+
+export function extractAssistantScriptArtifact(args: {
+  text: string;
+  intent?: string | null;
+  projectPath?: string | null;
+}): AssistantScriptArtifact | null {
+  const text = String(args.text || "");
+  const content = extractAssistantScriptContent(text);
+  if (!content) {
+    return null;
+  }
+
+  const suggestedPath = extractSuggestedScriptPath(text);
+  const hasExplicitSaveSignal =
+    Boolean(suggestedPath)
+    || /recommended script|推荐脚本|save(?:d| it)? under|saving it under|建议将其保存至|建议保存至/i.test(text);
+  if (!hasExplicitSaveSignal) {
+    return null;
+  }
+
+  const target = buildProjectScriptSaveTarget({
+    projectPath: args.projectPath,
+    intent: args.intent,
+    filename: suggestedPath,
+  });
+
+  return {
+    filename: target.filename,
+    relativePath: suggestedPath
+      ? normalizeProjectScriptRelativePath(suggestedPath)
+      : target.relativePath,
+    content: content.endsWith("\n") ? content : `${content}\n`,
+  };
 }

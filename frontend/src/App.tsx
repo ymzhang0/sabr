@@ -1748,6 +1748,7 @@ export default function App() {
         <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden xl:pt-10">
           {isReady ? (
             <ChatPanel
+              activeProject={activeSessionProject ?? null}
               messages={chatMessages}
               models={models}
               selectedModel={selectedModel}

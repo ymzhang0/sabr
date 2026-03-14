@@ -859,7 +859,7 @@ class AiiDAWorkerClient:
             normalized = f"/{normalized}"
         return normalized
 
-    def _unsupported_prefix(self, path: str) -> str:
+    def _unsupported_prefix(self, path: str) -> str | None:
         for prefix in (
             "/management/profiles",
             "/management/infrastructure",
@@ -875,15 +875,16 @@ class AiiDAWorkerClient:
         ):
             if path == prefix or path.startswith(f"{prefix}/"):
                 return prefix
-        return path
+        return None
 
     def _is_path_known_unsupported(self, path: str) -> bool:
         prefix = self._unsupported_prefix(path)
-        return prefix in self._unsupported_prefixes
+        return prefix in self._unsupported_prefixes if prefix else False
 
     def _remember_unsupported_path(self, path: str, status_code: int) -> None:
-        if int(status_code) == 404:
-            self._unsupported_prefixes.add(self._unsupported_prefix(path))
+        prefix = self._unsupported_prefix(path)
+        if int(status_code) == 404 and prefix:
+            self._unsupported_prefixes.add(prefix)
 
     def _unsupported_endpoint_error(self, path: str) -> BridgeAPIError:
         return BridgeAPIError(

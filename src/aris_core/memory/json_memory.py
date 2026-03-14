@@ -39,7 +39,7 @@ def _default_storage_path() -> str:
     except Exception:  # noqa: BLE001
         pass
 
-    return str(Path.cwd() / "runtime" / "memories")
+    return str(Path.home() / ".aris" / "memories")
 
 
 class JSONMemory:

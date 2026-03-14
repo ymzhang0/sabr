@@ -81,8 +81,18 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
         "Use submit_new_workflow first, and only use run_aiida_code_script after explicit builder/tool failure."
     ),
     (
+        "Environment rule: project-scoped interpreters support validation and SUBMISSION_DRAFT generation. "
+        "Do not claim that 'isolated mode' or a project interpreter prevents automatic preview unless a tool "
+        "actually returned a validation or bridge error."
+    ),
+    (
         "Do not downgrade multi-structure or parameter-sweep requests into a single submission preview. "
         "If the user asks for multiple structures, you MUST end with submit_new_batch_workflow or explain why batch preparation is blocked."
+    ),
+    (
+        "Workflow selection rule: for equation-of-state, total-energy, magnetic comparison, and cutoff-convergence "
+        "requests, default to quantumespresso.pw.base unless the user explicitly asks for bands, DOS, or another "
+        "post-processing workflow. Reserve quantumespresso.pw.bands for explicit band-structure tasks."
     ),
     (
         "For quantumespresso.pw.bands, when the user specifies one kpoints distance, apply it to both "

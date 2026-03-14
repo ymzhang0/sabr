@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     ENGINE_TYPE: str = _env_value("ARIS_ENGINE_TYPE", default="")
     DEPS_CLASS: str = _env_value("ARIS_DEPS_CLASS", default="")
     GEMINI_API_KEY: str = _env_value("GEMINI_API_KEY", default="your-key-here")
-    DEFAULT_MODEL: str = _env_value("ARIS_DEFAULT_MODEL", default="gemini-3-flash-preview")
+    DEFAULT_MODEL: str = _env_value("ARIS_DEFAULT_MODEL", default="gemini-flash-latest")
     GEMINI_API_VERSION: str = _env_value("ARIS_GEMINI_API_VERSION", default="v1beta")
     GEMINI_MAX_OUTPUT_TOKENS: int = int(
         _env_value("ARIS_GEMINI_MAX_OUTPUT_TOKENS", "GEMINI_MAX_OUTPUT_TOKENS", default="32768")
@@ -102,7 +102,10 @@ class Settings(BaseSettings):
 
     ARIS_RUNTIME_ROOT: str = _resolve_path(
         "ARIS_RUNTIME_ROOT",
-        default_path=_REPO_ROOT / "runtime",
+        default_path=_ARIS_HOME_ROOT,
+        legacy_paths=(
+            _REPO_ROOT / "runtime",
+        ),
     )
     ARIS_MEMORY_DIR: str = _env_value(
         "ARIS_MEMORY_DIR",
@@ -177,6 +180,18 @@ class Settings(BaseSettings):
     )
 
     def model_post_init(self, __context) -> None:
+        raw_runtime_root = Path(self.ARIS_RUNTIME_ROOT)
+        object.__setattr__(
+            self,
+            "ARIS_RUNTIME_ROOT",
+            _normalize_runtime_path(
+                self.ARIS_RUNTIME_ROOT,
+                canonical_path=_ARIS_HOME_ROOT,
+                legacy_paths=(
+                    _REPO_ROOT / "runtime",
+                ),
+            ),
+        )
         runtime_root = Path(self.ARIS_RUNTIME_ROOT)
         object.__setattr__(
             self,
@@ -185,6 +200,8 @@ class Settings(BaseSettings):
                 self.ARIS_MEMORY_DIR,
                 canonical_path=runtime_root / "memories",
                 legacy_paths=(
+                    raw_runtime_root / "memories",
+                    _REPO_ROOT / "runtime" / "memories",
                     _REPO_ROOT / "default",
                     _REPO_ROOT / "data" / "memories",
                     _REPO_ROOT / "engines" / "aiida" / "data" / "memories",
@@ -210,6 +227,8 @@ class Settings(BaseSettings):
                 self.ARIS_SCRIPT_ARCHIVE_DIR,
                 canonical_path=runtime_root / "scripts",
                 legacy_paths=(
+                    raw_runtime_root / "scripts",
+                    _REPO_ROOT / "runtime" / "scripts",
                     _REPO_ROOT / "engines" / "aiida" / "data" / "scripts",
                 ),
             ),

@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, ChevronDown, Code2, Copy, Cpu, Paperclip, Pin, PlugZap, PlusSquare, RefreshCw, RotateCcw, SendHorizontal, Square, X } from "lucide-react";
 import { type DragEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import axios from "axios";
 
 import { ActionToolbar } from "@/components/dashboard/action-toolbar";
 import {
@@ -13,11 +14,13 @@ import { ThinkingIndicator, type ProcessLogEntry } from "@/components/dashboard/
 import { Button } from "@/components/ui/button";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { Panel } from "@/components/ui/panel";
-import { cancelPendingSubmission, getActiveSpecializations, getNodeHoverMetadata, submitPreviewDraft } from "@/lib/api";
+import { cancelPendingSubmission, getActiveSpecializations, getNodeHoverMetadata, saveChatProjectFile, submitPreviewDraft } from "@/lib/api";
+import { extractAssistantScriptArtifact } from "@/lib/FileManager";
 import { useEnvironmentActions, useEnvironmentStore } from "@/store/EnvironmentStore";
 import { cn } from "@/lib/utils";
 import type {
   ActiveSpecializationsResponse,
+  ChatProject,
   ChatMessage,
   FocusNode,
   NodeHoverMetadataResponse,
@@ -52,6 +55,13 @@ type SubmissionDraftTagParseResult = {
 type SubmittedPreviewSummary = {
   processLabel: string;
   processPks: number[];
+};
+
+type AutoSavedScriptState = {
+  status: "saving" | "saved" | "exists" | "error";
+  relativePath: string;
+  signature: string;
+  errorText?: string | null;
 };
 
 type NodeHoverMetadataState = {
@@ -1333,6 +1343,7 @@ function groupMessages(messages: ChatMessage[]): ChatTurn[] {
 }
 
 type ChatPanelProps = {
+  activeProject: ChatProject | null;
   messages: ChatMessage[];
   models: string[];
   selectedModel: string;
@@ -1569,6 +1580,7 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
 }
 
 export function ChatPanel({
+  activeProject,
   messages,
   models,
   selectedModel,
@@ -1636,11 +1648,13 @@ export function ChatPanel({
   const [stableSubmissionDraftByTurn, setStableSubmissionDraftByTurn] = useState<
     Record<number, SubmissionDraftPreview>
   >({});
+  const [autoSavedScriptByTurn, setAutoSavedScriptByTurn] = useState<Record<number, AutoSavedScriptState>>({});
   const [isEnvironmentMenuOpen, setIsEnvironmentMenuOpen] = useState(false);
   const [pythonPathDraft, setPythonPathDraft] = useState(environmentState.pythonPath ?? "");
   const [nodeHoverMetadataByPk, setNodeHoverMetadataByPk] = useState<Record<number, NodeHoverMetadataState>>({});
   const nodeHoverMetadataRef = useRef<Record<number, NodeHoverMetadataState>>({});
   const previewStateByTurnRef = useRef<Record<number, SubmissionModalState>>({});
+  const autoSavedScriptByTurnRef = useRef<Record<number, AutoSavedScriptState>>({});
 
   const turns = useMemo(() => groupMessages(messages), [messages]);
   const latestTurnId = turns.length > 0 ? turns[turns.length - 1].turnId : null;
@@ -1687,6 +1701,10 @@ export function ChatPanel({
   useEffect(() => {
     previewStateByTurnRef.current = previewStateByTurn;
   }, [previewStateByTurn]);
+
+  useEffect(() => {
+    autoSavedScriptByTurnRef.current = autoSavedScriptByTurn;
+  }, [autoSavedScriptByTurn]);
 
   useEffect(() => {
     setPythonPathDraft(environmentState.pythonPath ?? "");
@@ -1795,9 +1813,8 @@ export function ChatPanel({
     : null;
   const environmentInterpreterLabel = basenamePath(activeInterpreterPath) || "No interpreter";
   const environmentHeaderCaption = environmentState.useWorkerDefault
-    ? (environmentInspection?.profile ? `Global runtime · profile ${environmentInspection.profile}` : "Global runtime")
+    ? "Global runtime"
     : "Project runtime";
-  const environmentModeSummary = environmentState.useWorkerDefault ? "Global" : "Project";
   const environmentInventorySummary = `${environmentState.availablePlugins.length} plugins`;
   const slashQuery = useMemo(() => {
     const trimmed = draft.trimStart();
@@ -1937,6 +1954,19 @@ export function ChatPanel({
         const turnId = Number.parseInt(turnKey, 10);
         if (turnIds.has(turnId)) {
           next[turnId] = expanded;
+          return;
+        }
+        changed = true;
+      });
+      return changed ? next : current;
+    });
+    setAutoSavedScriptByTurn((current) => {
+      const next: Record<number, AutoSavedScriptState> = {};
+      let changed = false;
+      Object.entries(current).forEach(([turnKey, savedState]) => {
+        const turnId = Number.parseInt(turnKey, 10);
+        if (turnIds.has(turnId)) {
+          next[turnId] = savedState;
           return;
         }
         changed = true;
@@ -2128,6 +2158,120 @@ export function ChatPanel({
     setCurrentStepTurnId(thinkingTurnId);
     setCurrentStep((previous) => (previous === nextStep ? previous : nextStep));
   }, [activeTurnId, isLoading, latestTurnId, processLogByTurn, turns]);
+
+  useEffect(() => {
+    if (!activeProject?.id || !activeProject.root_path || turns.length === 0) {
+      return;
+    }
+
+    const latestTurn = turns[turns.length - 1];
+    const assistantStreamText = turnTextBufferByTurn[latestTurn.turnId] ?? latestTurn.assistantText ?? "";
+    const taggedSubmissionDraft = parseSubmissionDraftTag(
+      assistantStreamText,
+      submissionDraftBufferByTurn[latestTurn.turnId],
+    );
+    const assistantText =
+      taggedSubmissionDraft.cleanText.trim().length > 0
+        ? taggedSubmissionDraft.cleanText
+        : (stableAssistantTextByTurn[latestTurn.turnId] ?? taggedSubmissionDraft.cleanText);
+    const visibleAssistantText = stripSubmissionDraftBlocks(assistantText);
+    const hasFinalAssistantState =
+      Boolean(latestTurn.assistantStatus) &&
+      latestTurn.assistantStatus !== "thinking" &&
+      Boolean(visibleAssistantText.trim());
+
+    if (!hasFinalAssistantState) {
+      return;
+    }
+
+    const scriptArtifact = extractAssistantScriptArtifact({
+      text: visibleAssistantText,
+      intent: latestTurn.userText ?? currentSessionName,
+      projectPath: activeProject.root_path,
+    });
+    if (!scriptArtifact) {
+      return;
+    }
+
+    const signature = `${scriptArtifact.relativePath}:${scriptArtifact.content}`;
+    const existingState = autoSavedScriptByTurnRef.current[latestTurn.turnId];
+    if (
+      existingState &&
+      existingState.signature === signature &&
+      (existingState.status === "saving" || existingState.status === "saved" || existingState.status === "exists")
+    ) {
+      return;
+    }
+
+    setAutoSavedScriptByTurn((current) => ({
+      ...current,
+      [latestTurn.turnId]: {
+        status: "saving",
+        relativePath: scriptArtifact.relativePath,
+        signature,
+        errorText: null,
+      },
+    }));
+
+    let isCancelled = false;
+    void saveChatProjectFile(activeProject.id, {
+      relative_path: scriptArtifact.relativePath,
+      content: scriptArtifact.content,
+      overwrite: false,
+    })
+      .then(() => {
+        if (isCancelled) {
+          return;
+        }
+        setAutoSavedScriptByTurn((current) => ({
+          ...current,
+          [latestTurn.turnId]: {
+            status: "saved",
+            relativePath: scriptArtifact.relativePath,
+            signature,
+            errorText: null,
+          },
+        }));
+      })
+      .catch((error: unknown) => {
+        if (isCancelled) {
+          return;
+        }
+        if (axios.isAxiosError(error) && error.response?.status === 409) {
+          setAutoSavedScriptByTurn((current) => ({
+            ...current,
+            [latestTurn.turnId]: {
+              status: "exists",
+              relativePath: scriptArtifact.relativePath,
+              signature,
+              errorText: null,
+            },
+          }));
+          return;
+        }
+        const errorText = error instanceof Error ? error.message : "Failed to save generated script.";
+        setAutoSavedScriptByTurn((current) => ({
+          ...current,
+          [latestTurn.turnId]: {
+            status: "error",
+            relativePath: scriptArtifact.relativePath,
+            signature,
+            errorText,
+          },
+        }));
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    activeProject,
+    currentSessionName,
+    stableAssistantTextByTurn,
+    submissionDraftBufferByTurn,
+    turnTextBufferByTurn,
+    turns,
+  ]);
 
   const updateTextareaHeight = (target: HTMLTextAreaElement) => {
     target.style.height = "0px";
@@ -2434,9 +2578,7 @@ export function ChatPanel({
                   {environmentHeaderCaption}
                 </span>
               </span>
-              <span className="hidden shrink-0 text-[11px] font-medium text-zinc-500 dark:text-zinc-400 md:inline">
-                {environmentModeSummary} · {environmentInventorySummary}
-              </span>
+              <span className="hidden shrink-0 text-[11px] font-medium text-zinc-500 dark:text-zinc-400 md:inline">{environmentInventorySummary}</span>
               <ChevronDown className={cn("h-4 w-4 shrink-0 text-zinc-500 transition-transform dark:text-zinc-400", isEnvironmentMenuOpen && "rotate-180")} />
             </button>
             {isEnvironmentMenuOpen ? (
@@ -2635,6 +2777,7 @@ export function ChatPanel({
             const previewState = previewStateByTurn[turn.turnId] ?? { status: "idle" as const };
             const submittedPreview = submittedPreviewByTurn[turn.turnId];
             const isSubmissionExpanded = expandedSubmissionByTurn[turn.turnId] ?? true;
+            const autoSavedScript = autoSavedScriptByTurn[turn.turnId] ?? null;
 
             return (
               <article key={turn.turnId} className="space-y-3">
@@ -2745,6 +2888,27 @@ export function ChatPanel({
                                 ensureNodeHoverMetadata,
                               )}
                             </p>
+                          ) : null}
+                          {autoSavedScript ? (
+                            <div
+                              className={cn(
+                                "mt-3 flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs",
+                                autoSavedScript.status === "error"
+                                  ? "border-rose-200/80 bg-rose-50/70 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300"
+                                  : "border-emerald-200/80 bg-emerald-50/70 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-300",
+                              )}
+                            >
+                              <Code2 className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">
+                                {autoSavedScript.status === "saving"
+                                  ? `Saving script to ${autoSavedScript.relativePath}...`
+                                  : autoSavedScript.status === "saved"
+                                    ? `Saved script to ${autoSavedScript.relativePath}.`
+                                    : autoSavedScript.status === "exists"
+                                      ? `Script already exists at ${autoSavedScript.relativePath}.`
+                                      : autoSavedScript.errorText || `Failed to save script to ${autoSavedScript.relativePath}.`}
+                              </span>
+                            </div>
                           ) : null}
                           {turn.assistantStatus === "error" ? (
                             <p className="mt-2 text-xs text-rose-500">Response ended with error.</p>

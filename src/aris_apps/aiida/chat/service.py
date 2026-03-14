@@ -92,6 +92,13 @@ _BATCH_FINISHED_STATES = {"finished", "completed", "success"}
 _BATCH_FAILED_STATES = {"failed", "excepted", "killed", "error"}
 _UNSET = object()
 _SESSION_SLUG_MAX_LENGTH = 48
+_AUTO_ENVIRONMENT_PROMPT_MARKERS = (
+    "current environment is",
+    "available aiida",
+    "submission draft generation is supported",
+    "standard project layout",
+    "codes/<filename>.py",
+)
 
 
 def _draft_fragment_hash(fragment: str) -> str:
@@ -879,6 +886,28 @@ def _normalize_chat_messages(raw_messages: Any) -> list[dict[str, Any]]:
     return normalized[-_MAX_CHAT_SESSION_MESSAGES:]
 
 
+def _looks_like_auto_environment_prompt_block(block: str) -> bool:
+    lowered = " ".join(str(block or "").strip().lower().split())
+    if not lowered:
+        return False
+    if "current environment is" not in lowered or "available aiida" not in lowered:
+        return False
+    return any(marker in lowered for marker in _AUTO_ENVIRONMENT_PROMPT_MARKERS[2:])
+
+
+def _strip_auto_environment_prompt(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    blocks = [segment.strip() for segment in re.split(r"\n\s*\n+", text) if str(segment).strip()]
+    if not blocks:
+        return ""
+
+    kept_blocks = [block for block in blocks if not _looks_like_auto_environment_prompt_block(block)]
+    return "\n\n".join(kept_blocks).strip()
+
+
 def _normalize_chat_session_snapshot(raw_snapshot: Any) -> dict[str, Any]:
     snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else {}
     context_nodes = _normalize_focus_context_nodes(snapshot.get("context_nodes"))
@@ -890,8 +919,10 @@ def _normalize_chat_session_snapshot(raw_snapshot: Any) -> dict[str, Any]:
     selected_model = str(selected_model_raw).strip() if isinstance(selected_model_raw, str) else ""
     session_environment_raw = snapshot.get("session_environment")
     session_environment = str(session_environment_raw).strip().lower() if isinstance(session_environment_raw, str) else ""
-    prompt_override_raw = snapshot.get("prompt_override")
-    prompt_override = str(prompt_override_raw).strip() if isinstance(prompt_override_raw, str) else ""
+    prompt_override_raw = snapshot.get("session_prompt_override")
+    if not isinstance(prompt_override_raw, str) or not prompt_override_raw.strip():
+        prompt_override_raw = snapshot.get("prompt_override")
+    prompt_override = _strip_auto_environment_prompt(prompt_override_raw)
 
     normalized = {
         "context_nodes": context_nodes,
@@ -1241,6 +1272,9 @@ def _build_chat_session_snapshot(
         or normalized_metadata.get("project_label")
         or normalized_metadata.get("group_label")
     )
+    session_prompt_override_raw = normalized_metadata.get("session_prompt_override")
+    if not isinstance(session_prompt_override_raw, str) or not session_prompt_override_raw.strip():
+        session_prompt_override_raw = normalized_metadata.get("prompt_override")
     snapshot = {
         "context_nodes": _normalize_focus_context_nodes(normalized_metadata.get("context_nodes")),
         "pinned_nodes": _normalize_focus_context_nodes(normalized_metadata.get("pinned_nodes")),
@@ -1248,7 +1282,7 @@ def _build_chat_session_snapshot(
         "selected_model": str(selected_model).strip() if isinstance(selected_model, str) and selected_model.strip() else None,
         "session_environment": str(normalized_metadata.get("session_environment") or "").strip().lower() or None,
         "session_environment_auto": bool(normalized_metadata.get("session_environment_auto", True)),
-        "prompt_override": str(normalized_metadata.get("prompt_override") or "").strip() or None,
+        "prompt_override": _strip_auto_environment_prompt(session_prompt_override_raw) or None,
         "session_parameters": _normalize_session_parameters(normalized_metadata.get("session_parameters")),
     }
     return _normalize_chat_session_snapshot(snapshot)
@@ -2140,7 +2174,14 @@ def _build_user_message_payload(
     session_environment = str((metadata or {}).get("session_environment") or "").strip().lower()
     if session_environment:
         payload["session_environment"] = session_environment
-    prompt_override = str((metadata or {}).get("prompt_override") or "").strip()
+    session_prompt_override = (
+        (metadata or {}).get("session_prompt_override")
+        if isinstance((metadata or {}).get("session_prompt_override"), str)
+        else None
+    )
+    prompt_override = _strip_auto_environment_prompt(
+        session_prompt_override if session_prompt_override is not None else (metadata or {}).get("prompt_override")
+    )
     if prompt_override:
         payload["prompt_override"] = prompt_override
     session_parameters = _normalize_session_parameters((metadata or {}).get("session_parameters"))
@@ -2631,6 +2672,14 @@ def _normalize_submission_draft_payload(
 
     raw_meta = raw_submission_draft.get("meta")
     meta: dict[str, Any] = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+    raw_all_inputs = raw_submission_draft.get("all_inputs")
+    if not isinstance(raw_all_inputs, dict):
+        meta_all_inputs = meta.get("all_inputs")
+        raw_all_inputs = meta_all_inputs if isinstance(meta_all_inputs, dict) else None
+    raw_input_groups = raw_submission_draft.get("input_groups")
+    if not isinstance(raw_input_groups, list):
+        meta_input_groups = meta.get("input_groups")
+        raw_input_groups = meta_input_groups if isinstance(meta_input_groups, list) else None
     raw_recommended_inputs = raw_submission_draft.get("recommended_inputs")
     if not isinstance(raw_recommended_inputs, dict):
         meta_recommended = meta.get("recommended_inputs")
@@ -2695,6 +2744,10 @@ def _normalize_submission_draft_payload(
         "advanced_settings": advanced_settings,
         "meta": meta,
     }
+    if isinstance(raw_all_inputs, dict):
+        payload["all_inputs"] = raw_all_inputs
+    if isinstance(raw_input_groups, list):
+        payload["input_groups"] = raw_input_groups
     return enrich_submission_draft_payload(payload)
 
 
@@ -2953,14 +3006,21 @@ def _build_chat_message_payload(
             combined["tool_calls"] = normalized_calls
 
     parsed_submission_draft_from_text = _extract_submission_draft_from_text(answer_text)
+    answer_text_clean = str(answer_text or "").strip()
 
     resolved_submission_draft: dict[str, Any] | None = None
-    pending = _extract_pending_submission_payload(deps)
-    draft = pending.get("draft") if isinstance(pending, dict) else None
-    validation = pending.get("validation") if isinstance(pending, dict) else None
-    validation_summary = pending.get("validation_summary") if isinstance(pending, dict) else None
-    raw_submission_draft = pending.get("submission_draft") if isinstance(pending, dict) else None
-    if isinstance(raw_submission_draft, dict) or isinstance(draft, dict):
+    if isinstance(output_payload, dict):
+        resolved_submission_draft = _extract_submission_draft_from_output_payload(output_payload)
+
+    if resolved_submission_draft is None:
+        resolved_submission_draft = parsed_submission_draft_from_text
+
+    if resolved_submission_draft is None and not answer_text_clean:
+        pending = _extract_pending_submission_payload(deps)
+        draft = pending.get("draft") if isinstance(pending, dict) else None
+        validation = pending.get("validation") if isinstance(pending, dict) else None
+        validation_summary = pending.get("validation_summary") if isinstance(pending, dict) else None
+        raw_submission_draft = pending.get("submission_draft") if isinstance(pending, dict) else None
         if isinstance(raw_submission_draft, dict):
             resolved_submission_draft = _normalize_submission_draft_payload(
                 raw_submission_draft,
@@ -2974,11 +3034,6 @@ def _build_chat_message_payload(
                 validation=validation if isinstance(validation, dict) else None,
                 validation_summary=validation_summary if isinstance(validation_summary, dict) else None,
             )
-    elif isinstance(output_payload, dict):
-        resolved_submission_draft = _extract_submission_draft_from_output_payload(output_payload)
-
-    if resolved_submission_draft is None:
-        resolved_submission_draft = parsed_submission_draft_from_text
 
     if _deps_expect_batch(deps) and isinstance(resolved_submission_draft, dict) and not _submission_draft_is_batch(
         resolved_submission_draft
@@ -3042,6 +3097,26 @@ def _build_submission_draft_text_block(payload: dict[str, Any] | None) -> str | 
     except Exception:  # noqa: BLE001
         return None
     return f"{_SUBMISSION_DRAFT_PREFIX}\n{serialized}"
+
+
+def _merge_submission_draft_block_into_answer(
+    answer_text: str | None,
+    payload: dict[str, Any] | None,
+) -> str:
+    text = str(answer_text or "")
+    submission_draft_block = _build_submission_draft_text_block(payload)
+    if not submission_draft_block:
+        return text
+
+    has_submission_prefix = _SUBMISSION_DRAFT_PREFIX.lower() in text.lower()
+    has_parseable_submission_draft = _extract_submission_draft_from_text(text) is not None
+    has_canonical_block = submission_draft_block in text
+
+    if not has_submission_prefix:
+        return f"{text.rstrip()}\n\n{submission_draft_block}" if text.strip() else submission_draft_block
+    if has_parseable_submission_draft or has_canonical_block:
+        return text
+    return f"{text.rstrip()}\n\n{submission_draft_block}"
 
 
 def _append_assistant_message(
@@ -3784,19 +3859,7 @@ async def _execute_chat_turn(
                 )
             ):
                 answer_text = _strip_submission_draft_tail(answer_text)
-            submission_draft_block = _build_submission_draft_text_block(message_payload)
-            if submission_draft_block:
-                has_submission_prefix = _SUBMISSION_DRAFT_PREFIX.lower() in answer_text.lower()
-                has_canonical_block = submission_draft_block in answer_text
-                if not has_submission_prefix:
-                    answer_text = (
-                        f"{answer_text.rstrip()}\n\n{submission_draft_block}"
-                        if answer_text.strip()
-                        else submission_draft_block
-                    )
-                elif not has_canonical_block:
-                    # Ensure at least one parse-safe canonical draft block exists for the frontend modal parser.
-                    answer_text = f"{answer_text.rstrip()}\n\n{submission_draft_block}"
+            answer_text = _merge_submission_draft_block_into_answer(answer_text, message_payload)
             _append_assistant_message(
                 state,
                 turn_id,
