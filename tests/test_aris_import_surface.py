@@ -25,6 +25,7 @@ def test_aris_core_surface_is_available() -> None:
     assert Path(settings.FRONTEND_INDEX_FILE).as_posix().endswith("apps/web/dist/index.html")
     assert Path(settings.ARIS_RUNTIME_ROOT).as_posix().endswith(".aris")
     assert Path(settings.ARIS_MEMORY_DIR).as_posix().endswith(".aris/memories")
+    assert Path(settings.ARIS_CONFIG_ROOT).as_posix().endswith(".aris/config")
     assert Path(settings.ARIS_PROJECTS_ROOT).as_posix().endswith(".aris/projects")
     assert Path(settings.ARIS_PRESETS_FILE).as_posix().endswith("config/apps/aiida/presets.yaml")
     assert Path(settings.ARIS_AIIDA_SETTINGS_FILE).as_posix().endswith("config/apps/aiida/settings.yaml")
@@ -111,3 +112,37 @@ def test_migrate_runtime_layout_moves_legacy_history_into_home_root(tmp_path, mo
     assert migrated
     assert not legacy_file.exists()
     assert (home_root / "memories" / "history_aris_v2_global.json").is_file()
+
+
+def test_bootstrap_home_config_copies_repo_defaults(tmp_path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / "config" / "apps" / "aiida" / "specializations").mkdir(parents=True)
+    (repo_root / "config" / "apps" / "aiida" / "presets.yaml").write_text("presets: []\n", encoding="utf-8")
+    (repo_root / "config" / "apps" / "aiida" / "settings.yaml").write_text("settings: {}\n", encoding="utf-8")
+    (repo_root / "config" / "apps" / "aiida" / "specializations" / "qe.yaml").write_text(
+        "name: qe\n",
+        encoding="utf-8",
+    )
+    (repo_root / "ecosystem.config.js").write_text("module.exports = {};\n", encoding="utf-8")
+
+    home_root = tmp_path / ".aris"
+    fake_settings = SimpleNamespace(
+        ARIS_CONFIG_ROOT=str(home_root / "config"),
+    )
+
+    monkeypatch.setattr(runtime_config, "_REPO_ROOT", repo_root)
+
+    bootstrapped = runtime_config.bootstrap_home_config(fake_settings)
+
+    assert bootstrapped
+    assert (home_root / "config" / "apps" / "aiida" / "presets.yaml").is_file()
+    assert (home_root / "config" / "apps" / "aiida" / "settings.yaml").is_file()
+    assert (home_root / "config" / "apps" / "aiida" / "specializations" / "qe.yaml").is_file()
+    assert (home_root / "config" / "pm2" / "ecosystem.config.js").is_file()
+    assert Path(fake_settings.ARIS_PRESETS_FILE).as_posix().endswith(".aris/config/apps/aiida/presets.yaml")
+    assert Path(fake_settings.ARIS_AIIDA_SETTINGS_FILE).as_posix().endswith(
+        ".aris/config/apps/aiida/settings.yaml"
+    )
+    assert Path(fake_settings.ARIS_AIIDA_SPECIALIZATIONS_ROOT).as_posix().endswith(
+        ".aris/config/apps/aiida/specializations"
+    )

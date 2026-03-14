@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(os.getcwd())
 _ARIS_HOME_ROOT = Path.home() / ".aris"
+_ARIS_CONFIG_ROOT = _ARIS_HOME_ROOT / "config"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -33,6 +34,25 @@ def _resolve_path(*env_names: str, default_path: Path, legacy_paths: tuple[Path,
         if legacy_path.exists():
             return str(legacy_path)
     return str(default_path)
+
+
+def _resolve_preferred_path(
+    *env_names: str,
+    preferred_path: Path,
+    fallback_path: Path,
+    legacy_paths: tuple[Path, ...] = (),
+) -> str:
+    explicit = _env_value(*env_names, default="")
+    if explicit:
+        return explicit
+    if preferred_path.exists():
+        return str(preferred_path)
+    if fallback_path.exists():
+        return str(fallback_path)
+    for legacy_path in legacy_paths:
+        if legacy_path.exists():
+            return str(legacy_path)
+    return str(fallback_path)
 
 
 def _path_variants(raw_path: str) -> set[str]:
@@ -111,11 +131,16 @@ class Settings(BaseSettings):
         "ARIS_MEMORY_DIR",
         default=str(Path(ARIS_RUNTIME_ROOT) / "memories"),
     )
+    ARIS_CONFIG_ROOT: str = _env_value(
+        "ARIS_CONFIG_ROOT",
+        default=str(_ARIS_CONFIG_ROOT),
+    )
     ARIS_PRESETS_FILE: str = _env_value(
         "ARIS_AIIDA_PRESETS_FILE",
-        default=_resolve_path(
+        default=_resolve_preferred_path(
             "ARIS_AIIDA_PRESETS_FILE",
-            default_path=_REPO_ROOT / "config" / "apps" / "aiida" / "presets.yaml",
+            preferred_path=_ARIS_CONFIG_ROOT / "apps" / "aiida" / "presets.yaml",
+            fallback_path=_REPO_ROOT / "config" / "apps" / "aiida" / "presets.yaml",
             legacy_paths=(
                 _REPO_ROOT / "config" / "aiida_presets.yaml",
             ),
@@ -123,17 +148,19 @@ class Settings(BaseSettings):
     )
     ARIS_AIIDA_SETTINGS_FILE: str = _env_value(
         "ARIS_AIIDA_SETTINGS_FILE",
-        default=_resolve_path(
+        default=_resolve_preferred_path(
             "ARIS_AIIDA_SETTINGS_FILE",
-            default_path=_REPO_ROOT / "config" / "apps" / "aiida" / "settings.yaml",
+            preferred_path=_ARIS_CONFIG_ROOT / "apps" / "aiida" / "settings.yaml",
+            fallback_path=_REPO_ROOT / "config" / "apps" / "aiida" / "settings.yaml",
             legacy_paths=(
                 _REPO_ROOT / "config" / "aiida_settings.yaml",
             ),
         ),
     )
-    ARIS_AIIDA_SPECIALIZATIONS_ROOT: str = _resolve_path(
+    ARIS_AIIDA_SPECIALIZATIONS_ROOT: str = _resolve_preferred_path(
         "ARIS_AIIDA_SPECIALIZATIONS_ROOT",
-        default_path=_REPO_ROOT / "config" / "apps" / "aiida" / "specializations",
+        preferred_path=_ARIS_CONFIG_ROOT / "apps" / "aiida" / "specializations",
+        fallback_path=_REPO_ROOT / "config" / "apps" / "aiida" / "specializations",
         legacy_paths=(
             _REPO_ROOT / "config" / "specializations",
         ),

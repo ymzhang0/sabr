@@ -77,16 +77,19 @@ These are the canonical root endpoints used by the current ARIS bridge:
 - Canonical worker repo: `/Users/yimingzhang/Developer/aris-workspace/aiida-worker`
 - Canonical runtime root: `~/.aris`
 - Default managed project root: `~/.aris/projects`
+- User-writable config overlay: `~/.aris/config`
 
 Backlog and product ideas should go in `/Users/yimingzhang/Developer/aris-workspace/aris/todo`, not in this README.
 
 ## Local Operations
 
 - PM2 process names use the ARIS convention: `aris-api`, `aris-web`, `aris-tunnel`.
-- The current PM2 ecosystem file lives at `/Users/yimingzhang/Developer/aris-workspace/aris/ecosystem.config.js`.
+- The active PM2 ecosystem file now lives at `~/.aris/config/pm2/ecosystem.config.js`.
+- `/Users/yimingzhang/Developer/aris-workspace/aris/ecosystem.config.js` is treated as the bootstrap template and is copied into `~/.aris/config/pm2/` on first use.
 - Use `/Users/yimingzhang/Developer/aris-workspace/aris/scripts/pm2-dev.sh` for common local PM2 operations:
   `./scripts/pm2-dev.sh start`, `./scripts/pm2-dev.sh restart`, `./scripts/pm2-dev.sh status`, `./scripts/pm2-dev.sh logs web`, `./scripts/pm2-dev.sh startup`.
 - The script defaults to the `dev` target, which manages `aiida-worker`, `aris-api`, and `aris-web` together. Use `core`, `api`, `worker`, or `web` when you want a narrower scope.
 - `./scripts/pm2-dev.sh startup` writes a user-level `launchd` agent under `~/Library/LaunchAgents/` that runs `pm2 resurrect` on login. Run `./scripts/pm2-dev.sh save` after changing the managed process set.
+- AiiDA presets, settings, and specialization manifests can also be overridden under `~/.aris/config/apps/aiida/` without modifying the repo copy.
 - Legacy compatibility symlinks may still exist at `/Users/yimingzhang/Developer/aris` and `/Users/yimingzhang/Developer/aiida-worker` while local scripts are being updated.
 - The Cloudflare tunnel defaults to `aris-aiida-tunnel`. If your deployed Cloudflare resource still has an older name, set `ARIS_TUNNEL_NAME` before starting PM2.

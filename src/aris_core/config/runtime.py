@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from contextlib import suppress
 from pathlib import Path
@@ -95,6 +96,21 @@ def _merge_runtime_path(source: Path, target: Path) -> list[dict[str, str]]:
     return migrated
 
 
+def _bootstrap_config_path(source: Path, target: Path) -> list[dict[str, str]]:
+    if not source.exists() or target.exists():
+        return []
+
+    if source.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(source), str(target))
+        return [{"source": str(source), "target": str(target)}]
+
+    copied: list[dict[str, str]] = []
+    for child in sorted(source.iterdir(), key=lambda item: item.name):
+        copied.extend(_bootstrap_config_path(child, target / child.name))
+    return copied
+
+
 def migrate_runtime_layout(settings: object) -> list[dict[str, str]]:
     runtime_root = Path(str(getattr(settings, "ARIS_RUNTIME_ROOT", "") or "")).expanduser()
     memory_dir = Path(str(getattr(settings, "ARIS_MEMORY_DIR", "") or "")).expanduser()
@@ -122,3 +138,43 @@ def migrate_runtime_layout(settings: object) -> list[dict[str, str]]:
         seen.add(key)
         migrated.extend(_merge_runtime_path(source, target))
     return migrated
+
+
+def bootstrap_home_config(settings: object) -> list[dict[str, str]]:
+    raw_config_root = str(getattr(settings, "ARIS_CONFIG_ROOT", "") or "").strip()
+    if not raw_config_root:
+        return []
+    config_root = Path(raw_config_root).expanduser()
+
+    mappings = [
+        (_REPO_ROOT / "config" / "apps" / "aiida" / "presets.yaml", config_root / "apps" / "aiida" / "presets.yaml"),
+        (_REPO_ROOT / "config" / "apps" / "aiida" / "settings.yaml", config_root / "apps" / "aiida" / "settings.yaml"),
+        (
+            _REPO_ROOT / "config" / "apps" / "aiida" / "specializations",
+            config_root / "apps" / "aiida" / "specializations",
+        ),
+        (_REPO_ROOT / "ecosystem.config.js", config_root / "pm2" / "ecosystem.config.js"),
+    ]
+
+    bootstrapped: list[dict[str, str]] = []
+    for source, target in mappings:
+        bootstrapped.extend(_bootstrap_config_path(source, target))
+
+    if not getattr(settings, "ARIS_PRESETS_FILE", "").strip() or not os.getenv("ARIS_AIIDA_PRESETS_FILE"):
+        presets_target = config_root / "apps" / "aiida" / "presets.yaml"
+        if presets_target.exists():
+            setattr(settings, "ARIS_PRESETS_FILE", str(presets_target))
+
+    if not getattr(settings, "ARIS_AIIDA_SETTINGS_FILE", "").strip() or not os.getenv("ARIS_AIIDA_SETTINGS_FILE"):
+        aiida_settings_target = config_root / "apps" / "aiida" / "settings.yaml"
+        if aiida_settings_target.exists():
+            setattr(settings, "ARIS_AIIDA_SETTINGS_FILE", str(aiida_settings_target))
+
+    if not getattr(settings, "ARIS_AIIDA_SPECIALIZATIONS_ROOT", "").strip() or not os.getenv(
+        "ARIS_AIIDA_SPECIALIZATIONS_ROOT"
+    ):
+        specializations_target = config_root / "apps" / "aiida" / "specializations"
+        if specializations_target.exists():
+            setattr(settings, "ARIS_AIIDA_SPECIALIZATIONS_ROOT", str(specializations_target))
+
+    return bootstrapped

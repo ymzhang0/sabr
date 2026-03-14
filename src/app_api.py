@@ -19,7 +19,11 @@ setup_logging(default_level="INFO")
 logger.info(log_event("logging.ready"))
 
 from src.aris_core.config import settings
-from src.aris_core.config.runtime import collect_reload_excludes, migrate_runtime_layout
+from src.aris_core.config.runtime import (
+    bootstrap_home_config,
+    collect_reload_excludes,
+    migrate_runtime_layout,
+)
 from src.aris_core.memory import JSONMemory
 from src.aris_core.plugins import iter_enabled_app_manifests
 
@@ -101,6 +105,15 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown logic for the ARIS Hub.
     """
     logger.info(log_event("hub.startup.begin"))
+
+    bootstrapped_config_entries = bootstrap_home_config(settings)
+    if bootstrapped_config_entries:
+        logger.info(
+            log_event(
+                "runtime.config.bootstrapped",
+                count=len(bootstrapped_config_entries),
+            )
+        )
 
     migrated_runtime_entries = migrate_runtime_layout(settings)
     if migrated_runtime_entries:
