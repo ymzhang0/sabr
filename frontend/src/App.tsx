@@ -1675,6 +1675,7 @@ export default function App() {
           <div className="flex min-w-0 flex-1 flex-col bg-transparent px-2.5 py-0">
             {sidebarView === "explorer" ? (
               <Sidebar
+                activeProject={activeSessionProject ?? selectedWorkspaceProject ?? null}
                 processes={processes}
                 groups={groups}
                 selectedGroupLabel={selectedGroupLabel}
@@ -1709,6 +1710,7 @@ export default function App() {
                 onExportGroup={handleExportGroup}
                 onConsultFailedProcess={handleConsultFailedProcess}
                 onCloneProcess={handleCloneProcess}
+                onOpenProjectWorkspace={handleOpenProjectWorkspace}
               />
             ) : sidebarView === "history" ? (
               <HistorySidebar

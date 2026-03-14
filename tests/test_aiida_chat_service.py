@@ -79,7 +79,7 @@ def test_title_prompt_prefers_pinned_node_context() -> None:
             ],
             "context_nodes": [],
             "selected_group": "semiconductor",
-            "selected_model": "gemini-3-flash-preview",
+            "selected_model": "gemini-flash-latest",
             "session_environment": "research",
             "session_environment_auto": True,
             "prompt_override": None,
@@ -770,7 +770,7 @@ def test_update_assistant_message_keeps_existing_text_when_status_payload_arrive
 
 def test_is_retryable_model_unavailable_error_detects_high_demand_503() -> None:
     error = RuntimeError(
-        "Request failed: status_code: 503, model_name: gemini-3-flash-preview, "
+        "Request failed: status_code: 503, model_name: gemini-flash-latest, "
         "body: {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. "
         "Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}"
     )
@@ -849,6 +849,8 @@ def test_create_chat_session_creates_default_project_workspace(tmp_path) -> None
     assert workspace_path.exists()
     assert workspace_path.name == "workspace-session"
     assert workspace_path.parent.name == "sessions"
+    assert (workspace_path.parent.parent / "codes").is_dir()
+    assert (workspace_path.parent.parent / "data").is_dir()
 
 
 def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path) -> None:
@@ -874,6 +876,46 @@ def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path)
     assert session["project_id"] == project["id"]
     assert session["project_label"] == "Born Charge Study"
     assert Path(session["workspace_path"]).parent.parent == Path(project["root_path"])
+    assert (Path(project["root_path"]) / "codes").is_dir()
+    assert (Path(project["root_path"]) / "data").is_dir()
+
+
+def test_write_chat_project_file_persists_content_under_project_root(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
+    try:
+        project = chat_service.create_chat_project(state, name="EOS", activate=True)
+        payload = chat_service.write_chat_project_file(
+            state,
+            project["id"],
+            relative_path="codes/submit_si_eos_20260314.py",
+            content="print('si eos')\n",
+            overwrite=True,
+        )
+    finally:
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
+
+    assert payload is not None
+    assert payload["relative_path"] == "codes/submit_si_eos_20260314.py"
+    assert payload["filename"] == "submit_si_eos_20260314.py"
+    assert (Path(project["root_path"]) / "codes" / "submit_si_eos_20260314.py").read_text(encoding="utf-8") == (
+        "print('si eos')\n"
+    )
+
+
+def test_get_chat_session_project_root_path_returns_project_root(tmp_path) -> None:
+    state = _make_chat_state()
+    original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
+    try:
+        project = chat_service.create_chat_project(state, name="Bands", activate=True)
+        session = chat_service.create_chat_session(state, title="Bands", activate=True, project_id=project["id"])
+        project_root = chat_service.get_chat_session_project_root_path(state, session["id"])
+    finally:
+        chat_service.settings.ARIS_PROJECTS_ROOT = original_root
+
+    assert project_root == str(Path(project["root_path"]))
 
 
 def test_delete_chat_items_removes_session_workspace_and_reassigns_active_session(tmp_path) -> None:

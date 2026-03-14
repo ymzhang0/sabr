@@ -34,6 +34,7 @@ from .chat import (
     get_chat_history,
     get_chat_session_detail,
     get_chat_session_batch_progress,
+    get_chat_session_project_root_path,
     get_chat_session_workspace_path,
     get_chat_snapshot,
     list_chat_projects,
@@ -44,6 +45,7 @@ from .chat import (
     serialize_chat_history,
     start_chat_turn,
     update_chat_session,
+    write_chat_project_file,
 )
 from .bridge_client import bridge_endpoint
 from .client import (
@@ -88,6 +90,8 @@ from .schemas import (
     FrontendChatRequest,
     FrontendStopChatRequest,
     FrontendChatDeleteRequest,
+    FrontendChatProjectFileWriteRequest,
+    FrontendChatProjectFileWriteResponse,
     FrontendChatProjectCreateRequest,
     FrontendChatSessionCreateRequest,
     FrontendChatSessionTitleUpdateRequest,
@@ -1203,7 +1207,7 @@ def _build_submission_request_headers(state: Any) -> dict[str, str] | None:
         return None
 
     active_project_id = get_active_chat_project_id(state)
-    workspace_path = get_chat_session_workspace_path(state, session_id)
+    workspace_path = get_chat_session_project_root_path(state, session_id)
     return build_bridge_context_headers(
         session_id=session_id,
         project_id=active_project_id,
@@ -2508,6 +2512,34 @@ async def frontend_chat_project_workspace(
     if payload is None:
         raise HTTPException(status_code=404, detail="Chat project not found")
     return payload
+
+
+@router.post(
+    "/frontend/chat/projects/{project_id}/files",
+    response_model=FrontendChatProjectFileWriteResponse,
+    tags=[FRONTEND_TAG],
+)
+async def frontend_write_chat_project_file(
+    request: Request,
+    project_id: str,
+    payload: FrontendChatProjectFileWriteRequest,
+) -> FrontendChatProjectFileWriteResponse:
+    state = request.app.state
+    try:
+        response = write_chat_project_file(
+            state,
+            project_id,
+            relative_path=payload.relative_path,
+            content=payload.content,
+            overwrite=payload.overwrite,
+        )
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc)}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+    if response is None:
+        raise HTTPException(status_code=404, detail="Chat project not found")
+    return FrontendChatProjectFileWriteResponse.model_validate(response)
 
 
 @router.get("/frontend/chat/stream", tags=[FRONTEND_TAG])

@@ -11,6 +11,8 @@ import type {
   ChatProjectMutationResponse,
   ChatProjectWorkspaceResponse,
   ChatDeleteResponse,
+  ChatProjectFileWriteRequest,
+  ChatProjectFileWriteResponse,
   ChatSessionBatchProgress,
   ChatSessionMutationResponse,
   ChatSessionWorkspaceResponse,
@@ -45,6 +47,7 @@ import type {
   ProfileSetupRequest,
   ImportDataResponse,
 } from "@/types/aiida";
+import { buildProjectLayoutSystemPrompt, buildProjectScriptSaveTarget } from "@/lib/FileManager";
 import { getEnvironmentState } from "@/store/EnvironmentStore";
 
 export const API_BASE_URL = import.meta.env.DEV ? "http://localhost:8000" : "";
@@ -141,7 +144,7 @@ function buildEnvironmentSystemPrompt(): string | null {
   const plugins = state.availablePlugins;
   const pluginList = plugins.length > 0 ? plugins.join(", ") : "aiida-core only";
   const modeLabel = state.useWorkerDefault ? "Worker Environment (Global)" : "Project Environment (Isolated)";
-  return `Context: Current environment is ${projectName}. Mode: ${modeLabel}. Available AiiDA plugins: ${pluginList}. Please generate code compatible with these plugins.`;
+  return `Context: Current environment is ${projectName}. Mode: ${modeLabel}. Available AiiDA plugins: ${pluginList}. Please generate code compatible with these plugins. ${buildProjectLayoutSystemPrompt()}`;
 }
 
 function buildEnvironmentMetadata(): Record<string, unknown> {
@@ -415,6 +418,35 @@ export async function getChatProjectWorkspace(
     params: relativePath ? { relative_path: relativePath } : undefined,
   });
   return data;
+}
+
+export async function saveChatProjectFile(
+  projectId: string,
+  payload: ChatProjectFileWriteRequest,
+): Promise<ChatProjectFileWriteResponse> {
+  const { data } = await frontendApi.post<ChatProjectFileWriteResponse>(`/chat/projects/${projectId}/files`, payload);
+  return data;
+}
+
+export async function saveProjectScript(
+  projectId: string,
+  payload: {
+    intent: string;
+    content: string;
+    filename?: string | null;
+    overwrite?: boolean;
+  },
+): Promise<ChatProjectFileWriteResponse> {
+  const target = buildProjectScriptSaveTarget({
+    projectPath: getEnvironmentState().currentProjectPath,
+    intent: payload.intent,
+    filename: payload.filename,
+  });
+  return saveChatProjectFile(projectId, {
+    relative_path: target.relativePath,
+    content: payload.content,
+    overwrite: payload.overwrite ?? true,
+  });
 }
 
 export async function sendChat(

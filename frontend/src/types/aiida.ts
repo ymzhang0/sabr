@@ -187,6 +187,25 @@ export type ChatProjectWorkspaceResponse = {
   entries: WorkspaceEntry[];
 };
 
+export type ChatProjectFileWriteRequest = {
+  relative_path: string;
+  content: string;
+  overwrite?: boolean;
+};
+
+export type ChatProjectFileWriteResponse = {
+  project_id: string;
+  project_name: string;
+  workspace_path: string;
+  path: string;
+  relative_path: string;
+  directory_path: string;
+  filename: string;
+  size: number;
+  updated_at: string;
+  created: boolean;
+};
+
 export type LogsSnapshot = {
   version: number;
   lines: string[];

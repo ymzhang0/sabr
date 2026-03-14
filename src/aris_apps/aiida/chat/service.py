@@ -34,6 +34,8 @@ _LEGACY_CHAT_SESSIONS_KV_KEY = "frontend_chat_sessions_v1"
 _SUBMISSION_DRAFT_PREFIX = "[SUBMISSION_DRAFT]"
 _DEFAULT_PROJECT_NAME = "Default Project"
 _DEFAULT_SESSION_TITLE = "New Conversation"
+_PROJECT_CODES_DIRNAME = "codes"
+_PROJECT_DATA_DIRNAME = "data"
 _PROJECT_SESSIONS_DIRNAME = "sessions"
 _MAX_CHAT_SESSION_MESSAGES = 200
 _MAX_CHAT_SESSIONS = 120
@@ -524,9 +526,20 @@ def _managed_project_root(project_id: str) -> Path:
     return _managed_projects_root() / str(project_id).strip()
 
 
+def _project_root_path(project: dict[str, Any]) -> Path:
+    return _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or uuid4().hex))
+
+
 def _project_sessions_root_path(project: dict[str, Any]) -> Path:
-    root = _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or uuid4().hex))
-    return root / _PROJECT_SESSIONS_DIRNAME
+    return _project_root_path(project) / _PROJECT_SESSIONS_DIRNAME
+
+
+def _project_codes_root_path(project: dict[str, Any]) -> Path:
+    return _project_root_path(project) / _PROJECT_CODES_DIRNAME
+
+
+def _project_data_root_path(project: dict[str, Any]) -> Path:
+    return _project_root_path(project) / _PROJECT_DATA_DIRNAME
 
 
 def _session_workspace_path(session: dict[str, Any], project: dict[str, Any]) -> Path:
@@ -570,7 +583,7 @@ def _cleanup_project_workspace_dir(project: dict[str, Any]) -> None:
     sessions_root = _project_sessions_root_path(project)
     _safe_rmtree(sessions_root)
 
-    root = _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or ""))
+    root = _project_root_path(project)
     managed_root = _managed_project_root(str(project.get("id") or ""))
     if root == managed_root:
         _safe_rmtree(root)
@@ -1001,11 +1014,18 @@ def _get_store_project(store: dict[str, Any], project_id: str | None = None) -> 
     return fallback
 
 
+def _find_store_project(store: dict[str, Any], project_id: str) -> dict[str, Any] | None:
+    cleaned_project_id = str(project_id or "").strip()
+    if not cleaned_project_id:
+        return None
+    return _project_map(store).get(cleaned_project_id)
+
+
 def _ensure_project_workspace_dir(project: dict[str, Any]) -> Path:
-    root = _ensure_directory(
-        _resolve_filesystem_path(project.get("root_path")) or _managed_project_root(str(project.get("id") or uuid4().hex))
-    )
+    root = _ensure_directory(_project_root_path(project))
     project["root_path"] = str(root)
+    _ensure_directory(root / _PROJECT_CODES_DIRNAME)
+    _ensure_directory(root / _PROJECT_DATA_DIRNAME)
     _ensure_directory(root / _PROJECT_SESSIONS_DIRNAME)
     return root
 
@@ -1382,12 +1402,21 @@ def get_chat_session_workspace_path(state: Any, session_id: str | None = None) -
     return _ensure_session_workspace_dir(store, session)
 
 
+def get_chat_session_project_root_path(state: Any, session_id: str | None = None) -> str | None:
+    session, store = _find_chat_session(state, session_id)
+    if session is None:
+        return None
+    project = _get_store_project(store, str(session.get("project_id") or ""))
+    return str(_ensure_project_workspace_dir(project))
+
+
 def _build_worker_workspace_headers(state: Any, session_id: str | None = None) -> dict[str, str] | None:
     session, store = _find_chat_session(state, session_id)
     if session is None:
         return None
-    workspace_path = _ensure_session_workspace_dir(store, session)
     project = _get_store_project(store, str(session.get("project_id") or ""))
+    _ensure_session_workspace_dir(store, session)
+    workspace_path = str(_ensure_project_workspace_dir(project))
     return build_bridge_context_headers(
         workspace_path=workspace_path,
         session_id=session.get("id"),
@@ -1485,6 +1514,52 @@ def list_chat_project_workspace_files(
         "workspace_path": str(workspace_root),
         "relative_path": str(target.relative_to(workspace_root)) if target != workspace_root else "",
         "entries": entries,
+    }
+
+
+def write_chat_project_file(
+    state: Any,
+    project_id: str,
+    *,
+    relative_path: str,
+    content: str,
+    overwrite: bool = True,
+) -> dict[str, Any] | None:
+    _session, store = _find_chat_session(state, None)
+    project = _find_store_project(store, project_id)
+    if project is None:
+        return None
+
+    workspace_root = _ensure_project_workspace_dir(project)
+    target = _resolve_workspace_target_path(workspace_root, relative_path=relative_path)
+    if target == workspace_root:
+        raise ValueError("Project file path must point to a file")
+    if target.exists() and target.is_dir():
+        raise ValueError("Project file path points to a directory")
+    if target.exists() and not overwrite:
+        raise FileExistsError(f"Project file already exists: {target.name}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    created = not target.exists()
+    target.write_text(str(content), encoding="utf-8")
+
+    updated_at = _now_iso()
+    project["updated_at"] = updated_at
+    _touch_chat_sessions(state)
+    _persist_chat_session_store(state)
+
+    directory_path = "" if target.parent == workspace_root else str(target.parent.relative_to(workspace_root))
+    return {
+        "project_id": str(project.get("id") or ""),
+        "project_name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "workspace_path": str(workspace_root),
+        "path": str(target),
+        "relative_path": str(target.relative_to(workspace_root)),
+        "directory_path": directory_path,
+        "filename": target.name,
+        "size": int(target.stat().st_size),
+        "updated_at": updated_at,
+        "created": created,
     }
 
 
@@ -3631,7 +3706,7 @@ async def _execute_chat_turn(
                             raise RuntimeError(
                                 "Gemini model was rejected by the API. "
                                 f"Model='{selected_model}', api_version='{getattr(settings, 'GEMINI_API_VERSION', 'unknown')}'. "
-                                "Update ARIS_DEFAULT_MODEL (e.g., gemini-3-flash-preview) "
+                                "Update ARIS_DEFAULT_MODEL (e.g., gemini-flash-latest) "
                                 "or ARIS_GEMINI_API_VERSION and retry."
                             ) from run_error
 

@@ -7,6 +7,7 @@ from .service import (
     get_active_chat_project_id,
     get_active_chat_session_id,
     get_chat_history,
+    get_chat_session_project_root_path,
     get_chat_session_batch_progress,
     get_chat_session_workspace_path,
     get_chat_session_detail,
@@ -20,6 +21,7 @@ from .service import (
     start_chat_turn,
     touch_chat,
     update_chat_session,
+    write_chat_project_file,
 )
 
 __all__ = [
@@ -31,6 +33,7 @@ __all__ = [
     "get_active_chat_project_id",
     "get_active_chat_session_id",
     "get_chat_history",
+    "get_chat_session_project_root_path",
     "get_chat_session_batch_progress",
     "get_chat_session_workspace_path",
     "get_chat_session_detail",
@@ -44,4 +47,5 @@ __all__ = [
     "start_chat_turn",
     "touch_chat",
     "update_chat_session",
+    "write_chat_project_file",
 ]

@@ -39,6 +39,25 @@ class FrontendChatProjectCreateRequest(BaseModel):
     root_path: str | None = None
 
 
+class FrontendChatProjectFileWriteRequest(BaseModel):
+    relative_path: str = Field(..., min_length=1, max_length=512)
+    content: str = Field(default="")
+    overwrite: bool = True
+
+
+class FrontendChatProjectFileWriteResponse(BaseModel):
+    project_id: str
+    project_name: str
+    workspace_path: str
+    path: str
+    relative_path: str
+    directory_path: str
+    filename: str
+    size: int
+    updated_at: str
+    created: bool = False
+
+
 class FrontendChatDeleteRequest(BaseModel):
     project_ids: list[str] = Field(default_factory=list)
     session_ids: list[str] = Field(default_factory=list)

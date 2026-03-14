@@ -130,7 +130,12 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
     (
         "Artifact persistence rule: whenever custom Python generates a plot, table, HTML report, JSON payload, or "
         "other file artifact, call 'save_artifact(filename, data)' inside the worker script so the result is written "
-        "into the active session workspace. Do not rely on frontend-only display or plt.show() alone."
+        "into the active project workspace. Do not rely on frontend-only display or plt.show() alone."
+    ),
+    (
+        "Project file layout: reusable Python scripts belong under 'codes/' at the project root, and exported "
+        "results belong under 'data/'. When you suggest saving code for the user, explicitly say that you recommend "
+        "saving it under 'codes/<filename>.py'."
     ),
     (
         "For matplotlib, prefer 'save_artifact(\"figure-name.png\", fig)'. For Plotly, prefer "

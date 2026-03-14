@@ -415,6 +415,42 @@ async def test_frontend_create_chat_project_ensures_project_group(monkeypatch: p
 
 
 @pytest.mark.anyio
+async def test_frontend_write_chat_project_file_proxies_service_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = SimpleNamespace()
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    monkeypatch.setattr(
+        aiida_router,
+        "write_chat_project_file",
+        lambda *_args, **_kwargs: {
+            "project_id": "project-1",
+            "project_name": "Silicon EOS",
+            "workspace_path": "/tmp/projects/project-1",
+            "path": "/tmp/projects/project-1/codes/submit_si_eos_20260314.py",
+            "relative_path": "codes/submit_si_eos_20260314.py",
+            "directory_path": "codes",
+            "filename": "submit_si_eos_20260314.py",
+            "size": 18,
+            "updated_at": "2026-03-14T12:00:00+00:00",
+            "created": True,
+        },
+    )
+
+    response = await aiida_router.frontend_write_chat_project_file(
+        request,
+        "project-1",
+        aiida_router.FrontendChatProjectFileWriteRequest(
+            relative_path="codes/submit_si_eos_20260314.py",
+            content="print('si eos')\n",
+            overwrite=True,
+        ),
+    )
+
+    assert response.project_id == "project-1"
+    assert response.relative_path == "codes/submit_si_eos_20260314.py"
+
+
+@pytest.mark.anyio
 async def test_frontend_create_chat_session_ensures_project_and_session_groups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

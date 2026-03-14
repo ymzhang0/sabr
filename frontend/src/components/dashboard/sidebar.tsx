@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { type DragEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import axios from "axios";
 
 import { Button } from "@/components/ui/button";
 import { Panel } from "@/components/ui/panel";
@@ -35,11 +36,19 @@ import {
   exportComputerConfig,
   getInfrastructure,
   getNodeScript,
+  saveChatProjectFile,
 } from "@/lib/api";
+import {
+  buildProjectScriptSaveTarget,
+  buildScriptSaveRecommendation,
+  normalizeProjectScriptRelativePath,
+} from "@/lib/FileManager";
 import { QuickAddModal } from "@/components/dashboard/quick-add-modal";
 import { CodeSetupModal } from "@/components/dashboard/code-setup-modal";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  ChatProject,
+  ChatProjectFileWriteResponse,
   GroupItem,
   ProcessItem,
   InfrastructureComputer,
@@ -136,6 +145,19 @@ function canCloneNode(process: ProcessItem): boolean {
 function canCopyNodeAsScript(process: ProcessItem): boolean {
   const nodeType = String(process.node_type || "").trim();
   return nodeType === "StructureData" || nodeType === "Dict";
+}
+
+function buildNodeScriptIntent(process: ProcessItem): string {
+  return [
+    process.process_label,
+    process.label,
+    process.formula,
+    process.node_type,
+    `node ${process.pk}`,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
 }
 
 async function copyTextWithFallback(text: string): Promise<boolean> {
@@ -525,6 +547,7 @@ function getNodeMetadata(process: ProcessItem): NodeMetadata {
 
 
 type SidebarProps = {
+  activeProject: ChatProject | null;
   processes: ProcessItem[];
   groups: GroupItem[];
   selectedGroupLabel: string | null;
@@ -553,9 +576,11 @@ type SidebarProps = {
   onExportGroup: (group: GroupItem) => void;
   onConsultFailedProcess: (process: ProcessItem) => void;
   onCloneProcess: (process: ProcessItem) => void;
+  onOpenProjectWorkspace: (projectId: string) => void;
 };
 
 export function Sidebar({
+  activeProject,
   processes,
   groups,
   selectedGroupLabel,
@@ -584,6 +609,7 @@ export function Sidebar({
   onExportGroup,
   onConsultFailedProcess,
   onCloneProcess,
+  onOpenProjectWorkspace,
 }: SidebarProps) {
   const [limitInput, setLimitInput] = useState(String(processLimit));
   const [searchQuery, setSearchQuery] = useState("");
@@ -619,6 +645,7 @@ export function Sidebar({
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [expandedComputers, setExpandedComputers] = useState<Set<number>>(new Set());
   const [copyingScriptPk, setCopyingScriptPk] = useState<number | null>(null);
+  const [savingScriptPk, setSavingScriptPk] = useState<number | null>(null);
   const [manualCopyState, setManualCopyState] = useState<ManualCopyState | null>(null);
   const nodeMenuRef = useRef<HTMLDivElement | null>(null);
   const groupMenuRef = useRef<HTMLDivElement | null>(null);
@@ -726,7 +753,7 @@ export function Sidebar({
   };
 
   const openNodeContextMenuAt = useCallback((pk: number, x: number, y: number) => {
-    const position = clampMenuPosition(x, y);
+    const position = clampMenuPosition(x, y, { width: 196, height: 276 });
     setContextMenuNode({ pk, x: position.x, y: position.y });
   }, []);
 
@@ -770,6 +797,65 @@ export function Sidebar({
       setCopyingScriptPk(null);
     }
   }, [openManualCopyDialog]);
+
+  const handleSaveNodeScript = useCallback(async (process: ProcessItem) => {
+    if (!activeProject?.id) {
+      window.alert("Open or create a project first.");
+      return;
+    }
+
+    setSavingScriptPk(process.pk);
+    try {
+      const payload = await getNodeScript(process.pk);
+      const target = buildProjectScriptSaveTarget({
+        projectPath: activeProject.root_path,
+        intent: buildNodeScriptIntent(process),
+      });
+      const requestedPath = window.prompt(
+        `Save script relative to ${activeProject.root_path}`,
+        target.relativePath,
+      );
+      if (requestedPath === null) {
+        return;
+      }
+
+      const normalizedRelativePath = normalizeProjectScriptRelativePath(requestedPath || target.relativePath);
+      const writeFile = async (overwrite: boolean) =>
+        saveChatProjectFile(activeProject.id, {
+          relative_path: normalizedRelativePath,
+          content: payload.script,
+          overwrite,
+        });
+
+      const response: ChatProjectFileWriteResponse = await (async () => {
+        try {
+          return await writeFile(false);
+        } catch (error) {
+          if (axios.isAxiosError(error) && error.response?.status === 409) {
+            const shouldOverwrite = window.confirm(
+              `${normalizedRelativePath} already exists. Overwrite it?`,
+            );
+            if (!shouldOverwrite) {
+              throw new Error("Script save cancelled.");
+            }
+            return writeFile(true);
+          }
+          throw error;
+        }
+      })();
+
+      window.alert(buildScriptSaveRecommendation(response.relative_path));
+      onOpenProjectWorkspace(activeProject.id);
+    } catch (error) {
+      if (error instanceof Error && error.message === "Script save cancelled.") {
+        return;
+      }
+      const message = error instanceof Error ? error.message : `Failed to save script for node #${process.pk}.`;
+      window.alert(message);
+    } finally {
+      setSavingScriptPk(null);
+    }
+  }, [activeProject, onOpenProjectWorkspace]);
 
   const handleInfrastructureExport = useCallback(async (payload: InfrastructureExportResponse, title: string) => {
     try {
@@ -1417,6 +1503,18 @@ export function Sidebar({
             style={{ top: contextMenuNode.y, left: contextMenuNode.x }}
             onClick={(e) => e.stopPropagation()}
           >
+            {process && canCopyNodeAsScript(process) && (
+              <button
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                disabled={savingScriptPk === process.pk}
+                onClick={() => {
+                  void handleSaveNodeScript(process);
+                  setContextMenuNode(null);
+                }}
+              >
+                <Download className="h-3.5 w-3.5" /> {savingScriptPk === process.pk ? "Saving..." : "Save to codes/"}
+              </button>
+            )}
             {process && canCopyNodeAsScript(process) && (
               <button
                 className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
