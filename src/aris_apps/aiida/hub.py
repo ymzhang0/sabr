@@ -18,8 +18,11 @@ class AiiDAHub:
     def __init__(self) -> None:
         self._profiles: list[dict] = []
         self._current_profile: str | None = None
+        self._profiles_supported = True
 
     def start(self) -> None:
+        if not self._profiles_supported:
+            return
         logger.info(log_event("aiida.hub.start.begin", current_profile=self.current_profile))
         try:
             payload = request_json_sync("GET", "/management/profiles", timeout=6.0)
@@ -27,6 +30,14 @@ class AiiDAHub:
             logger.success(log_event("aiida.hub.start.done", profiles=len(self._profiles)))
         except BridgeOfflineError:
             logger.warning(log_event("aiida.hub.start.offline"))
+        except BridgeAPIError as exc:
+            if int(exc.status_code or 0) == 404:
+                self._profiles_supported = False
+                self._profiles = []
+                self._current_profile = None
+                logger.info(log_event("aiida.hub.start.unsupported", reason="worker-profiles-endpoint-missing"))
+                return
+            logger.warning(log_event("aiida.hub.start.failed", error=str(exc)))
         except Exception as exc:  # noqa: BLE001
             logger.exception(log_event("aiida.hub.start.failed", error=str(exc)))
 

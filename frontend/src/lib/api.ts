@@ -24,6 +24,7 @@ import type {
   ActiveSpecializationsResponse,
   InfrastructureComputer,
   InfrastructureCapabilitiesResponse,
+  InfrastructureSetupPayload,
   InfrastructureExportResponse,
   LogsResponse,
   NodeHoverMetadataResponse,
@@ -533,6 +534,7 @@ const DEFAULT_BRIDGE_STATUS: BridgeStatusResponse = {
   status: "offline",
   url: "http://127.0.0.1:8001",
   environment: "Remote Bridge",
+  worker_mode: null,
   profile: "unknown",
   daemon_status: false,
   resources: {
@@ -606,7 +608,7 @@ export async function getInfrastructureCapabilities(): Promise<InfrastructureCap
   return data;
 }
 
-export async function setupInfrastructure(config: any): Promise<any> {
+export async function setupInfrastructure(config: InfrastructureSetupPayload): Promise<any> {
   const { data } = await aiidaApi.post("/management/infrastructure/setup", config);
   return data;
 }

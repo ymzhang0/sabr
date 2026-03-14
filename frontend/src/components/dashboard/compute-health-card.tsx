@@ -70,6 +70,7 @@ function QueueMetric({ label, value, tone = "default", compact = false }: QueueM
 function buildSummaryText(args: {
   isPending: boolean;
   isError: boolean;
+  pending: number;
   queued: number;
   running: number;
   estimateDisplay: string | null | undefined;
@@ -83,7 +84,7 @@ function buildSummaryText(args: {
   }
   const parts: string[] = [];
   parts.push(`${args.running} running`);
-  parts.push(`${args.queued} queued`);
+  parts.push(`${args.pending + args.queued} waiting`);
   if (args.estimateDisplay) {
     parts.push(args.estimateDisplay);
   } else {
@@ -124,6 +125,7 @@ export function ComputeHealthCard({ computerLabel, selectedProcess, compact = fa
   const summaryText = buildSummaryText({
     isPending: healthQuery.isPending,
     isError: healthQuery.isError,
+    pending: queue?.pending ?? 0,
     queued: queue?.queued ?? 0,
     running: queue?.running ?? 0,
     estimateDisplay: estimate?.display,

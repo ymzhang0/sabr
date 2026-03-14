@@ -75,6 +75,7 @@ class BridgeSnapshot:
     status: BridgeConnectionState = "offline"
     url: str = aiida_engine_settings.default_bridge_url
     environment: str = aiida_engine_settings.bridge_environment
+    mode: str | None = None
     profile: str = "unknown"
     daemon_status: bool = False
     resources: BridgeResourceCounts = field(default_factory=BridgeResourceCounts)
@@ -192,6 +193,7 @@ class AiiDAWorkerClient:
         self._infrastructure_cache: dict[str, Any] | None = None
         self._infrastructure_cached_at: float = 0.0
         self._logged_first_handshake = False
+        self._unsupported_prefixes: set[str] = set()
 
     @property
     def bridge_url(self) -> str:
@@ -205,6 +207,10 @@ class AiiDAWorkerClient:
         normalized = path if path.startswith("/") else f"/{path}"
         return f"{self._bridge_url}{normalized}"
 
+    @property
+    def worker_mode(self) -> str | None:
+        return self._snapshot.mode
+
     async def request_json(
         self,
         method: str,
@@ -217,6 +223,8 @@ class AiiDAWorkerClient:
         retries: int | None = None,
     ) -> Any:
         method_upper = method.upper()
+        normalized_path = self._normalize_request_path(path)
+        await self._ensure_request_supported_async(normalized_path)
         endpoint = self.bridge_endpoint(path)
         _emit_bridge_call_event(method_upper, path)
         retry_budget = self._resolve_retry_budget(method_upper, retries)
@@ -256,6 +264,7 @@ class AiiDAWorkerClient:
                 continue
 
             if response.status_code >= 400:
+                self._remember_unsupported_path(normalized_path, response.status_code)
                 message, payload = _extract_error_payload(response)
                 raise BridgeAPIError(status_code=response.status_code, message=message, payload=payload)
 
@@ -330,6 +339,8 @@ class AiiDAWorkerClient:
         retries: int | None = None,
     ) -> Any:
         method_upper = method.upper()
+        normalized_path = self._normalize_request_path(path)
+        self._ensure_request_supported_sync(normalized_path)
         endpoint = self.bridge_endpoint(path)
         _emit_bridge_call_event(method_upper, path)
         retry_budget = self._resolve_retry_budget(method_upper, retries)
@@ -369,6 +380,7 @@ class AiiDAWorkerClient:
                 continue
 
             if response.status_code >= 400:
+                self._remember_unsupported_path(normalized_path, response.status_code)
                 message, payload = _extract_error_payload(response)
                 raise BridgeAPIError(status_code=response.status_code, message=message, payload=payload)
 
@@ -453,6 +465,7 @@ class AiiDAWorkerClient:
             status=self._snapshot.status,
             url=self._snapshot.url,
             environment=self._snapshot.environment,
+            mode=self._snapshot.mode,
             profile=self._snapshot.profile,
             daemon_status=self._snapshot.daemon_status,
             resources=BridgeResourceCounts(
@@ -543,6 +556,16 @@ class AiiDAWorkerClient:
             self._infrastructure_cache = payload
             self._infrastructure_cached_at = time.monotonic()
             return copy.deepcopy(payload)
+
+    async def inspect_default_environment(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        payload = await self.request_json(
+            "GET",
+            "/management/environments/default",
+            params={"force_refresh": bool(force_refresh)},
+            timeout=max(8.0, self._request_timeout_seconds),
+            retries=0,
+        )
+        return payload if isinstance(payload, dict) else {}
 
     async def inspect_infrastructure_v2(self) -> list[dict[str, Any]]:
         """Fetch nested infrastructure (Computers -> Codes)."""
@@ -643,13 +666,14 @@ class AiiDAWorkerClient:
                     normalized["plugins"] = fallback_plugins
             if normalized["resources"].workchains == 0 and normalized["plugins"]:
                 normalized["resources"].workchains = len(normalized["plugins"])
-        self._snapshot.status = normalized["status"]
-        self._snapshot.environment = normalized["environment"]
-        self._snapshot.profile = normalized["profile"]
-        self._snapshot.daemon_status = normalized["daemon_status"]
-        self._snapshot.resources = normalized["resources"]
-        self._snapshot.plugins = normalized["plugins"]
-        self._snapshot.checked_at = checked_at
+            self._snapshot.status = normalized["status"]
+            self._snapshot.environment = normalized["environment"]
+            self._snapshot.mode = normalized["mode"]
+            self._snapshot.profile = normalized["profile"]
+            self._snapshot.daemon_status = normalized["daemon_status"]
+            self._snapshot.resources = normalized["resources"]
+            self._snapshot.plugins = normalized["plugins"]
+            self._snapshot.checked_at = checked_at
 
         if status_error is not None:
             logger.warning(
@@ -795,6 +819,7 @@ class AiiDAWorkerClient:
             return {
                 "status": "online",
                 "environment": self._environment,
+                "mode": None,
                 "profile": "unknown",
                 "daemon_status": False,
                 "resources": BridgeResourceCounts(),
@@ -810,6 +835,7 @@ class AiiDAWorkerClient:
         } else "online"
 
         environment = self._extract_first_non_empty(payload, ("environment", "worker_environment"))
+        mode = self._extract_first_non_empty(payload, ("mode", "worker_mode"))
         profile = self._extract_profile(payload)
         daemon_status = self._extract_daemon_status(payload)
         resources = self._extract_resource_counts(payload)
@@ -818,11 +844,96 @@ class AiiDAWorkerClient:
         return {
             "status": status,
             "environment": environment or self._environment,
+            "mode": mode,
             "profile": profile or "unknown",
             "daemon_status": daemon_status,
             "resources": resources,
             "plugins": plugins,
         }
+
+    def _normalize_request_path(self, path: str) -> str:
+        cleaned = str(path or "").strip() or "/"
+        parsed = urlparse(cleaned)
+        normalized = parsed.path or "/"
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        return normalized
+
+    def _unsupported_prefix(self, path: str) -> str:
+        for prefix in (
+            "/management/profiles",
+            "/management/infrastructure",
+            "/management/recent-nodes",
+            "/management/recent-processes",
+            "/management/groups",
+            "/management/nodes",
+            "/process/events",
+            "/resources",
+            "/plugins",
+            "/submission/plugins",
+            "/system/plugins",
+        ):
+            if path == prefix or path.startswith(f"{prefix}/"):
+                return prefix
+        return path
+
+    def _is_path_known_unsupported(self, path: str) -> bool:
+        prefix = self._unsupported_prefix(path)
+        return prefix in self._unsupported_prefixes
+
+    def _remember_unsupported_path(self, path: str, status_code: int) -> None:
+        if int(status_code) == 404:
+            self._unsupported_prefixes.add(self._unsupported_prefix(path))
+
+    def _unsupported_endpoint_error(self, path: str) -> BridgeAPIError:
+        return BridgeAPIError(
+            status_code=404,
+            message="Worker endpoint not supported",
+            payload={"error": "Worker endpoint not supported by the current worker mode", "path": path},
+        )
+
+    async def _ensure_request_supported_async(self, path: str) -> None:
+        if path == "/status":
+            return
+        if self._is_path_known_unsupported(path):
+            raise self._unsupported_endpoint_error(path)
+        if self._snapshot.checked_at <= 0 and self._status_endpoint_supported is not False:
+            try:
+                await self._refresh_if_needed(force_refresh=False)
+            except Exception:
+                return
+
+    def _ensure_request_supported_sync(self, path: str) -> None:
+        if path == "/status":
+            return
+        if self._is_path_known_unsupported(path):
+            raise self._unsupported_endpoint_error(path)
+        if self._snapshot.checked_at <= 0 and self._status_endpoint_supported is not False:
+            self._probe_status_sync()
+
+    def _probe_status_sync(self) -> None:
+        endpoint = self.bridge_endpoint("/status")
+        checked_at = time.monotonic()
+        try:
+            with httpx.Client(timeout=self._request_timeout_seconds, trust_env=False) as client:
+                response = client.get(endpoint)
+        except Exception:
+            return
+        if response.status_code >= 400:
+            return
+        try:
+            payload = response.json()
+        except ValueError:
+            return
+        normalized = self._normalize_status_payload(payload)
+        self._snapshot.status = normalized["status"]
+        self._snapshot.environment = normalized["environment"]
+        self._snapshot.mode = normalized["mode"]
+        self._snapshot.profile = normalized["profile"]
+        self._snapshot.daemon_status = normalized["daemon_status"]
+        self._snapshot.resources = normalized["resources"]
+        self._snapshot.plugins = normalized["plugins"]
+        self._snapshot.checked_at = checked_at
 
     def _extract_profile(self, payload: dict[str, Any]) -> str | None:
         profile = self._extract_first_non_empty(payload, ("profile", "current_profile", "active_profile"))

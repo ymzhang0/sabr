@@ -17,7 +17,11 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
-import type { ParseInfrastructureResponse } from "@/types/aiida";
+import type {
+    InfrastructureComputerFormData,
+    InfrastructureSetupPayload,
+    ParseInfrastructureResponse,
+} from "@/types/aiida";
 import { cn } from "@/lib/utils";
 import {
     getInfrastructureCapabilities,
@@ -38,14 +42,109 @@ type InfrastructureParseData = ParseInfrastructureResponse["data"];
 const SYNC_SSH_TRANSPORT = "core.ssh";
 const ASYNC_SSH_TRANSPORT = "core.ssh_async";
 const LOCAL_TRANSPORT = "core.local";
+const KEY_POLICY_OPTIONS = ["RejectPolicy", "WarningPolicy", "AutoAddPolicy"] as const;
+const DEFAULT_TRANSPORT_AUTH_FIELDS: Record<string, string[]> = {
+    [LOCAL_TRANSPORT]: ["use_login_shell", "safe_interval"],
+    [SYNC_SSH_TRANSPORT]: [
+        "username",
+        "port",
+        "look_for_keys",
+        "key_filename",
+        "timeout",
+        "allow_agent",
+        "proxy_jump",
+        "proxy_command",
+        "compress",
+        "gss_auth",
+        "gss_kex",
+        "gss_deleg_creds",
+        "gss_host",
+        "load_system_host_keys",
+        "key_policy",
+        "use_login_shell",
+        "safe_interval",
+    ],
+    [ASYNC_SSH_TRANSPORT]: [
+        "host",
+        "max_io_allowed",
+        "authentication_script",
+        "backend",
+        "use_login_shell",
+        "safe_interval",
+    ],
+};
+
+type NullableBoolean = boolean | null | undefined;
+
+function nullableBooleanValue(value: NullableBoolean): string {
+    if (value === true) {
+        return "true";
+    }
+    if (value === false) {
+        return "false";
+    }
+    return "";
+}
+
+function parseNullableBoolean(value: string): boolean | null {
+    if (value === "true") {
+        return true;
+    }
+    if (value === "false") {
+        return false;
+    }
+    return null;
+}
+
+function parseNullableInt(value: string): number | null {
+    if (!value.trim()) {
+        return null;
+    }
+    const parsed = Number.parseInt(value, 10);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseNullableFloat(value: string): number | null {
+    if (!value.trim()) {
+        return null;
+    }
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function BooleanSelectField({
+    label,
+    value,
+    onChange,
+}: {
+    label: string;
+    value: NullableBoolean;
+    onChange: (value: boolean | null) => void;
+}) {
+    return (
+        <div className="space-y-1">
+            <label className="text-[10px] uppercase font-bold text-zinc-400">{label}</label>
+            <select
+                value={nullableBooleanValue(value)}
+                onChange={(event) => onChange(parseNullableBoolean(event.target.value))}
+                className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400"
+            >
+                <option value="">Use Default</option>
+                <option value="true">Yes</option>
+                <option value="false">No</option>
+            </select>
+        </div>
+    );
+}
 
 function buildDefaultComputerConfig(
     recommendedTransport = SYNC_SSH_TRANSPORT,
-): NonNullable<InfrastructureParseData["computer"]> {
+): InfrastructureComputerFormData {
     const isAsyncTransport = recommendedTransport === ASYNC_SSH_TRANSPORT;
     return {
         label: "",
         hostname: "",
+        user: "",
         username: "",
         description: "",
         transport_type: recommendedTransport,
@@ -58,12 +157,22 @@ function buildDefaultComputerConfig(
         use_double_quotes: false,
         prepend_text: "",
         append_text: "",
+        port: null,
+        look_for_keys: null,
         key_filename: "",
+        timeout: null,
+        allow_agent: null,
         proxy_command: "",
         proxy_jump: "",
-        safe_interval: 0,
+        compress: null,
+        gss_auth: null,
+        gss_kex: null,
+        gss_deleg_creds: null,
+        gss_host: "",
+        load_system_host_keys: null,
+        key_policy: "",
+        safe_interval: null,
         use_login_shell: true,
-        connection_timeout: isAsyncTransport ? null : 60,
         host: "",
         max_io_allowed: null,
         authentication_script: "",
@@ -165,7 +274,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
         });
     }, [capabilities, isOpen, recommendedTransport]);
 
-    const updateComputer = useCallback((patch: Partial<NonNullable<InfrastructureParseData["computer"]>>) => {
+    const updateComputer = useCallback((patch: Partial<InfrastructureComputerFormData>) => {
         setParseResult((current) => ({
             ...current,
             computer: {
@@ -201,10 +310,20 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                     computer: {
                         ...base,
                         username: "",
+                        port: null,
+                        look_for_keys: null,
                         key_filename: "",
+                        timeout: null,
+                        allow_agent: null,
                         proxy_command: "",
                         proxy_jump: "",
-                        connection_timeout: null,
+                        compress: null,
+                        gss_auth: null,
+                        gss_kex: null,
+                        gss_deleg_creds: null,
+                        gss_host: "",
+                        load_system_host_keys: null,
+                        key_policy: "",
                         host: base.host || base.hostname || selectedSshHost || "",
                         backend: base.backend || "asyncssh",
                     },
@@ -217,14 +336,24 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                     computer: {
                         ...base,
                         username: "",
+                        port: null,
+                        look_for_keys: null,
                         key_filename: "",
+                        timeout: null,
+                        allow_agent: null,
                         proxy_command: "",
                         proxy_jump: "",
+                        compress: null,
+                        gss_auth: null,
+                        gss_kex: null,
+                        gss_deleg_creds: null,
+                        gss_host: "",
+                        load_system_host_keys: null,
+                        key_policy: "",
                         host: "",
                         max_io_allowed: null,
                         authentication_script: "",
                         backend: "",
-                        connection_timeout: null,
                     },
                 };
             }
@@ -237,7 +366,6 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                     max_io_allowed: null,
                     authentication_script: "",
                     backend: "",
-                    connection_timeout: base.connection_timeout ?? 60,
                 },
             };
         });
@@ -278,14 +406,30 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
             return;
         }
         if (transportType === ASYNC_SSH_TRANSPORT) {
-            const legacyFields = ["username", "key_filename", "proxy_command", "proxy_jump", "connection_timeout"]
+            const legacyFields = [
+                "username",
+                "port",
+                "look_for_keys",
+                "key_filename",
+                "timeout",
+                "allow_agent",
+                "proxy_command",
+                "proxy_jump",
+                "compress",
+                "gss_auth",
+                "gss_kex",
+                "gss_deleg_creds",
+                "gss_host",
+                "load_system_host_keys",
+                "key_policy",
+            ]
                 .filter((field) => {
                     const value = (parseResult.computer as Record<string, unknown>)[field];
                     return value !== null && value !== undefined && value !== "";
                 });
             if (legacyFields.length > 0) {
                 setError(
-                    `core.ssh_async does not accept legacy SSH fields: ${legacyFields.join(", ")}. Use SSH host alias, backend, authentication script, and max I/O instead.`,
+                    `core.ssh_async does not accept core.ssh-only fields: ${legacyFields.join(", ")}. Use host, backend, authentication script, and max I/O instead.`,
                 );
                 return;
             }
@@ -294,9 +438,10 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
         setError(null);
 
         try {
-            const payload: Record<string, any> = {
+            const payload: InfrastructureSetupPayload = {
                 computer_label: parseResult.computer.label || "unknown_computer",
                 hostname: parseResult.computer.hostname || "unknown_host",
+                user: parseResult.computer.user || "",
                 username: parseResult.computer.username || "",
                 computer_description: parseResult.computer.description || "",
                 transport_type: transportType,
@@ -309,12 +454,22 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                 use_double_quotes: parseResult.computer.use_double_quotes === true,
                 prepend_text: parseResult.computer.prepend_text || "",
                 append_text: parseResult.computer.append_text || "",
-                use_login_shell: parseResult.computer.use_login_shell !== false,
-                safe_interval: parseResult.computer.safe_interval || 0.0,
-                connection_timeout: parseResult.computer.connection_timeout ?? null,
+                port: parseResult.computer.port ?? null,
+                look_for_keys: parseResult.computer.look_for_keys ?? null,
                 key_filename: parseResult.computer.key_filename || "",
+                timeout: parseResult.computer.timeout ?? null,
+                allow_agent: parseResult.computer.allow_agent ?? null,
                 proxy_command: parseResult.computer.proxy_command || "",
                 proxy_jump: parseResult.computer.proxy_jump || "",
+                compress: parseResult.computer.compress ?? null,
+                gss_auth: parseResult.computer.gss_auth ?? null,
+                gss_kex: parseResult.computer.gss_kex ?? null,
+                gss_deleg_creds: parseResult.computer.gss_deleg_creds ?? null,
+                gss_host: parseResult.computer.gss_host || "",
+                load_system_host_keys: parseResult.computer.load_system_host_keys ?? null,
+                key_policy: parseResult.computer.key_policy || "",
+                use_login_shell: parseResult.computer.use_login_shell !== false,
+                safe_interval: parseResult.computer.safe_interval ?? null,
                 host: parseResult.computer.host || "",
                 max_io_allowed: parseResult.computer.max_io_allowed ?? null,
                 authentication_script: parseResult.computer.authentication_script || "",
@@ -349,6 +504,12 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
     const selectedTransport = parseResult.computer?.transport_type || recommendedTransport;
     const isAsyncTransport = selectedTransport === ASYNC_SSH_TRANSPORT;
     const isLocalTransport = selectedTransport === LOCAL_TRANSPORT;
+    const selectedTransportAuthFields = new Set(
+        capabilities?.transport_auth_fields?.[selectedTransport]
+        ?? DEFAULT_TRANSPORT_AUTH_FIELDS[selectedTransport]
+        ?? [],
+    );
+    const supportsSelectedAuthField = (field: string) => selectedTransportAuthFields.has(field);
 
     if (!isOpen) return null;
 
@@ -516,9 +677,18 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                         className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
                                                     />
                                                 </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">User Email</label>
+                                                    <input
+                                                        value={parseResult.computer.user || ""}
+                                                        onChange={(e) => updateComputer({ user: e.target.value })}
+                                                        placeholder="Optional AiiDA user email"
+                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                    />
+                                                </div>
                                                 {isAsyncTransport ? (
                                                     <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">SSH Host Alias</label>
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Host</label>
                                                         <input
                                                             value={parseResult.computer.host || ""}
                                                             onChange={(e) => updateComputer({ host: e.target.value })}
@@ -578,7 +748,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
 
                                             {isAsyncTransport && (
                                                 <div className="rounded-lg border border-amber-200/70 bg-amber-50/80 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
-                                                    <span className="font-semibold">core.ssh_async</span> follows the async SSH configure model from AiiDA 2.7+: it uses an SSH config alias and does not use legacy fields like <code className="font-mono">username</code>, <code className="font-mono">key_filename</code>, or <code className="font-mono">proxy_jump</code>.
+                                                    <span className="font-semibold">core.ssh_async</span> follows the AiiDA async SSH configure model: <code className="font-mono">Host</code> must match an entry in <code className="font-mono">~/.ssh/config</code>, and sync-only fields like <code className="font-mono">username</code>, <code className="font-mono">port</code>, or <code className="font-mono">proxy_jump</code> do not apply.
                                                 </div>
                                             )}
 
@@ -598,44 +768,102 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     </div>
                                                     <div className="space-y-1">
                                                         <label className="text-[10px] uppercase font-bold text-zinc-400">Safe Interval</label>
-                                                        <input type="number" step="0.1" value={parseResult.computer.safe_interval ?? ""} onChange={(e) => updateComputer({ safe_interval: parseFloat(e.target.value) || 0 })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                        <input type="number" step="0.1" value={parseResult.computer.safe_interval ?? ""} onChange={(e) => updateComputer({ safe_interval: parseNullableFloat(e.target.value) })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
                                                     </div>
                                                     {isAsyncTransport ? (
                                                         <>
-                                                            <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Max I/O Allowed</label>
-                                                                <input type="number" value={parseResult.computer.max_io_allowed ?? ""} onChange={(e) => updateComputer({ max_io_allowed: e.target.value ? parseInt(e.target.value, 10) || null : null })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                            </div>
-                                                            <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Authentication Script</label>
-                                                                <input value={parseResult.computer.authentication_script || ""} onChange={(e) => updateComputer({ authentication_script: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                            </div>
-                                                            <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Async Backend</label>
-                                                                <select value={parseResult.computer.backend || "asyncssh"} onChange={(e) => updateComputer({ backend: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400">
-                                                                    <option value="asyncssh">asyncssh</option>
-                                                                    <option value="openssh">openssh</option>
-                                                                </select>
-                                                            </div>
+                                                            {supportsSelectedAuthField("max_io_allowed") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Max I/O Allowed</label>
+                                                                    <input type="number" value={parseResult.computer.max_io_allowed ?? ""} onChange={(e) => updateComputer({ max_io_allowed: parseNullableInt(e.target.value) })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("authentication_script") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Authentication Script</label>
+                                                                    <input value={parseResult.computer.authentication_script || ""} onChange={(e) => updateComputer({ authentication_script: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("backend") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Backend</label>
+                                                                    <select value={parseResult.computer.backend || "asyncssh"} onChange={(e) => updateComputer({ backend: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400">
+                                                                        <option value="asyncssh">asyncssh</option>
+                                                                        <option value="openssh">openssh</option>
+                                                                    </select>
+                                                                </div>
+                                                            )}
                                                         </>
                                                     ) : !isLocalTransport ? (
                                                         <>
-                                                            <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Key File</label>
-                                                                <input value={parseResult.computer.key_filename || ""} onChange={(e) => updateComputer({ key_filename: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                            </div>
-                                                            <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Command</label>
-                                                                <input value={parseResult.computer.proxy_command || ""} onChange={(e) => updateComputer({ proxy_command: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                            </div>
-                                                            <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Jump</label>
-                                                                <input value={parseResult.computer.proxy_jump || ""} onChange={(e) => updateComputer({ proxy_jump: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                            </div>
-                                                            <div className="space-y-1">
-                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Connection Timeout</label>
-                                                                <input type="number" value={parseResult.computer.connection_timeout ?? ""} onChange={(e) => updateComputer({ connection_timeout: e.target.value ? parseInt(e.target.value, 10) || 60 : null })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
-                                                            </div>
+                                                            {supportsSelectedAuthField("port") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Port</label>
+                                                                    <input type="number" value={parseResult.computer.port ?? ""} onChange={(e) => updateComputer({ port: parseNullableInt(e.target.value) })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("look_for_keys") && (
+                                                                <BooleanSelectField label="Look For Keys" value={parseResult.computer.look_for_keys} onChange={(value) => updateComputer({ look_for_keys: value })} />
+                                                            )}
+                                                            {supportsSelectedAuthField("key_filename") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Key Filename</label>
+                                                                    <input value={parseResult.computer.key_filename || ""} onChange={(e) => updateComputer({ key_filename: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("timeout") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Timeout</label>
+                                                                    <input type="number" value={parseResult.computer.timeout ?? ""} onChange={(e) => updateComputer({ timeout: parseNullableInt(e.target.value) })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("allow_agent") && (
+                                                                <BooleanSelectField label="Allow Agent" value={parseResult.computer.allow_agent} onChange={(value) => updateComputer({ allow_agent: value })} />
+                                                            )}
+                                                            {supportsSelectedAuthField("proxy_jump") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Jump</label>
+                                                                    <input value={parseResult.computer.proxy_jump || ""} onChange={(e) => updateComputer({ proxy_jump: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("proxy_command") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Proxy Command</label>
+                                                                    <input value={parseResult.computer.proxy_command || ""} onChange={(e) => updateComputer({ proxy_command: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("compress") && (
+                                                                <BooleanSelectField label="Compress" value={parseResult.computer.compress} onChange={(value) => updateComputer({ compress: value })} />
+                                                            )}
+                                                            {supportsSelectedAuthField("gss_auth") && (
+                                                                <BooleanSelectField label="GSS Auth" value={parseResult.computer.gss_auth} onChange={(value) => updateComputer({ gss_auth: value })} />
+                                                            )}
+                                                            {supportsSelectedAuthField("gss_kex") && (
+                                                                <BooleanSelectField label="GSS KEX" value={parseResult.computer.gss_kex} onChange={(value) => updateComputer({ gss_kex: value })} />
+                                                            )}
+                                                            {supportsSelectedAuthField("gss_deleg_creds") && (
+                                                                <BooleanSelectField label="GSS Deleg Creds" value={parseResult.computer.gss_deleg_creds} onChange={(value) => updateComputer({ gss_deleg_creds: value })} />
+                                                            )}
+                                                            {supportsSelectedAuthField("gss_host") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">GSS Host</label>
+                                                                    <input value={parseResult.computer.gss_host || ""} onChange={(e) => updateComputer({ gss_host: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
+                                                                </div>
+                                                            )}
+                                                            {supportsSelectedAuthField("load_system_host_keys") && (
+                                                                <BooleanSelectField label="Load System Host Keys" value={parseResult.computer.load_system_host_keys} onChange={(value) => updateComputer({ load_system_host_keys: value })} />
+                                                            )}
+                                                            {supportsSelectedAuthField("key_policy") && (
+                                                                <div className="space-y-1">
+                                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Key Policy</label>
+                                                                    <select value={parseResult.computer.key_policy || ""} onChange={(e) => updateComputer({ key_policy: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400">
+                                                                        <option value="">Use Default</option>
+                                                                        {KEY_POLICY_OPTIONS.map((option) => (
+                                                                            <option key={option} value={option}>{option}</option>
+                                                                        ))}
+                                                                    </select>
+                                                                </div>
+                                                            )}
                                                         </>
                                                     ) : (
                                                         <div className="col-span-1 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">

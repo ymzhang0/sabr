@@ -9,7 +9,7 @@ The Brain-side repo lives in `aris/`. The worker remains a separate repo in `../
 - Brain/Body split: ARIS orchestrates reasoning and UI workflows; AiiDA-Worker owns `aiida-core`, profiles, submissions, and database access.
 - Typed integration boundary: worker responses are normalized into stable JSON payloads before they reach the frontend.
 - Engine isolation: `aris_core` stays platform-level, while AiiDA-specific behavior lives under `aris_apps.aiida`.
-- Runtime isolation: mutable memories, projects, uploads, and caches live under `runtime/` instead of the source tree.
+- Runtime isolation: mutable memories, uploads, and caches live under `runtime/`, while managed chat projects default to `~/.aris/projects`.
 ## ARIS <-> AiiDA-Worker Protocol
 
 The ARIS brain talks to AiiDA-Worker over HTTP/JSON. ARIS should not import worker Python modules directly.
@@ -75,8 +75,8 @@ These are the canonical root endpoints used by the current ARIS bridge:
 
 - Canonical brain repo: `/Users/yimingzhang/Developer/aris-workspace/aris`
 - Canonical worker repo: `/Users/yimingzhang/Developer/aris-workspace/aiida-worker`
-- Shared workspace-level operational files: `/Users/yimingzhang/Developer/ops`
 - Canonical runtime root: `/Users/yimingzhang/Developer/aris-workspace/aris/runtime`
+- Default managed project root: `~/.aris/projects`
 
 Backlog and product ideas should go in `/Users/yimingzhang/Developer/aris-workspace/aris/todo`, not in this README.
 

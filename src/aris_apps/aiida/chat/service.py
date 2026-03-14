@@ -515,7 +515,7 @@ def _resolve_filesystem_path(path_value: Any) -> Path | None:
 def _managed_projects_root() -> Path:
     root = _resolve_filesystem_path(settings.ARIS_PROJECTS_ROOT)
     if root is None:
-        root = Path.cwd() / "data" / "projects"
+        root = Path.home() / ".aris" / "projects"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

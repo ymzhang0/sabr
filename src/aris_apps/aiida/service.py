@@ -54,7 +54,23 @@ _TRANSPORT_ALIASES = {
     "core.ssh_async": _ASYNC_SSH_TRANSPORT,
     "asyncssh": _ASYNC_SSH_TRANSPORT,
 }
-_LEGACY_SSH_FIELDS = ("username", "key_filename", "proxy_command", "proxy_jump", "connection_timeout")
+_SYNC_SSH_ONLY_FIELDS = (
+    "username",
+    "port",
+    "look_for_keys",
+    "key_filename",
+    "timeout",
+    "allow_agent",
+    "proxy_command",
+    "proxy_jump",
+    "compress",
+    "gss_auth",
+    "gss_kex",
+    "gss_deleg_creds",
+    "gss_host",
+    "load_system_host_keys",
+    "key_policy",
+)
 
 
 def _default_infrastructure_capabilities() -> dict[str, Any]:
@@ -64,13 +80,31 @@ def _default_infrastructure_capabilities() -> dict[str, Any]:
         "recommended_transport": _SYNC_SSH_TRANSPORT,
         "supports_async_ssh": False,
         "transport_auth_fields": {
-            "core.local": [],
+            "core.local": ["use_login_shell", "safe_interval"],
             _SYNC_SSH_TRANSPORT: [
                 "username",
+                "port",
+                "look_for_keys",
                 "key_filename",
-                "proxy_command",
-                "proxy_jump",
                 "timeout",
+                "allow_agent",
+                "proxy_jump",
+                "proxy_command",
+                "compress",
+                "gss_auth",
+                "gss_kex",
+                "gss_deleg_creds",
+                "gss_host",
+                "load_system_host_keys",
+                "key_policy",
+                "use_login_shell",
+                "safe_interval",
+            ],
+            _ASYNC_SSH_TRANSPORT: [
+                "host",
+                "max_io_allowed",
+                "authentication_script",
+                "backend",
                 "use_login_shell",
                 "safe_interval",
             ],
@@ -153,6 +187,10 @@ def _coerce_bool(value: Any, default: bool | None = None) -> bool | None:
     return default
 
 
+def _has_configured_value(value: Any) -> bool:
+    return value is not None and value != ""
+
+
 def _coerce_mpirun_command(value: Any) -> str:
     if isinstance(value, list):
         return " ".join(str(item).strip() for item in value if str(item).strip())
@@ -217,11 +255,43 @@ def _normalize_computer_payload(
 
     host_alias = _coerce_string(auth_payload.get("host") or raw_payload.get("host") or ssh_host_details.get("alias"))
     hostname = _coerce_string(raw_payload.get("hostname") or ssh_host_details.get("hostname") or host_alias)
+    user = _coerce_string(auth_payload.get("user") or raw_payload.get("user"))
     raw_username = _coerce_string(auth_payload.get("username") or raw_payload.get("username"))
+    raw_port = _coerce_int(auth_payload.get("port") or raw_payload.get("port"))
     raw_key_filename = _coerce_string(auth_payload.get("key_filename") or raw_payload.get("key_filename"))
+    raw_timeout = _coerce_int(
+        auth_payload.get("timeout")
+        or auth_payload.get("connection_timeout")
+        or raw_payload.get("timeout")
+        or raw_payload.get("connection_timeout")
+    )
+    raw_look_for_keys = _coerce_bool(
+        auth_payload.get("look_for_keys") if auth_payload else raw_payload.get("look_for_keys"),
+    )
+    raw_allow_agent = _coerce_bool(
+        auth_payload.get("allow_agent") if auth_payload else raw_payload.get("allow_agent"),
+    )
     raw_proxy_command = _coerce_string(auth_payload.get("proxy_command") or raw_payload.get("proxy_command"))
     raw_proxy_jump = _coerce_string(auth_payload.get("proxy_jump") or raw_payload.get("proxy_jump"))
+    raw_compress = _coerce_bool(
+        auth_payload.get("compress") if auth_payload else raw_payload.get("compress"),
+    )
+    raw_gss_auth = _coerce_bool(
+        auth_payload.get("gss_auth") if auth_payload else raw_payload.get("gss_auth"),
+    )
+    raw_gss_kex = _coerce_bool(
+        auth_payload.get("gss_kex") if auth_payload else raw_payload.get("gss_kex"),
+    )
+    raw_gss_deleg_creds = _coerce_bool(
+        auth_payload.get("gss_deleg_creds") if auth_payload else raw_payload.get("gss_deleg_creds"),
+    )
+    raw_gss_host = _coerce_string(auth_payload.get("gss_host") or raw_payload.get("gss_host"))
+    raw_load_system_host_keys = _coerce_bool(
+        auth_payload.get("load_system_host_keys") if auth_payload else raw_payload.get("load_system_host_keys"),
+    )
+    raw_key_policy = _coerce_string(auth_payload.get("key_policy") or raw_payload.get("key_policy"))
     username = raw_username or _coerce_string(ssh_host_details.get("username"))
+    port = raw_port if raw_port is not None else _coerce_int(ssh_host_details.get("port"))
     key_filename = raw_key_filename or _coerce_string(ssh_host_details.get("identity_file"))
     proxy_command = raw_proxy_command or _coerce_string(ssh_host_details.get("proxy_command"))
     proxy_jump = raw_proxy_jump or _coerce_string(ssh_host_details.get("proxy_jump"))
@@ -232,6 +302,7 @@ def _normalize_computer_payload(
     computer = {
         "label": label,
         "hostname": hostname or host_alias,
+        "user": user,
         "username": raw_username if transport_type == _ASYNC_SSH_TRANSPORT else username,
         "description": _coerce_string(raw_payload.get("description") or raw_payload.get("computer_description")),
         "transport_type": transport_type,
@@ -244,19 +315,24 @@ def _normalize_computer_payload(
         "use_double_quotes": bool(_coerce_bool(raw_payload.get("use_double_quotes"), False)),
         "prepend_text": _coerce_string(raw_payload.get("prepend_text")),
         "append_text": _coerce_string(raw_payload.get("append_text")),
+        "port": raw_port if transport_type == _ASYNC_SSH_TRANSPORT else port,
+        "look_for_keys": raw_look_for_keys,
         "key_filename": raw_key_filename if transport_type == _ASYNC_SSH_TRANSPORT else key_filename,
+        "timeout": raw_timeout,
+        "allow_agent": raw_allow_agent,
         "proxy_command": raw_proxy_command if transport_type == _ASYNC_SSH_TRANSPORT else proxy_command,
         "proxy_jump": raw_proxy_jump if transport_type == _ASYNC_SSH_TRANSPORT else proxy_jump,
+        "compress": raw_compress,
+        "gss_auth": raw_gss_auth,
+        "gss_kex": raw_gss_kex,
+        "gss_deleg_creds": raw_gss_deleg_creds,
+        "gss_host": raw_gss_host,
+        "load_system_host_keys": raw_load_system_host_keys,
+        "key_policy": raw_key_policy,
         "safe_interval": _coerce_float(auth_payload.get("safe_interval") if auth_payload else raw_payload.get("safe_interval")),
         "use_login_shell": _coerce_bool(
             auth_payload.get("use_login_shell") if auth_payload else raw_payload.get("use_login_shell"),
             True,
-        ),
-        "connection_timeout": _coerce_int(
-            auth_payload.get("connection_timeout")
-            or auth_payload.get("timeout")
-            or raw_payload.get("connection_timeout")
-            or raw_payload.get("timeout")
         ),
         "host": host_alias if transport_type == _ASYNC_SSH_TRANSPORT else "",
         "max_io_allowed": _coerce_int(auth_payload.get("max_io_allowed") or raw_payload.get("max_io_allowed")),
@@ -289,7 +365,7 @@ def _validate_computer_payload(computer: dict[str, Any], capabilities: dict[str,
         )
 
     if transport_type == _ASYNC_SSH_TRANSPORT:
-        unsupported = [field for field in _LEGACY_SSH_FIELDS if computer.get(field) not in (None, "", 0)]
+        unsupported = [field for field in _SYNC_SSH_ONLY_FIELDS if _has_configured_value(computer.get(field))]
         if unsupported:
             raise HTTPException(
                 status_code=422,
@@ -409,8 +485,9 @@ def _build_ai_infrastructure_prompt(text: str, capabilities: dict[str, Any]) -> 
     async_rule = (
         "If the installed aiida-core supports `core.ssh_async`, you may use it only for SSH-config based, "
         "password-less hosts and then you must use `host`, `max_io_allowed`, `authentication_script`, "
-        "`backend`, `use_login_shell`, and `safe_interval`. Do not emit `username`, `key_filename`, "
-        "`proxy_command`, `proxy_jump`, or `connection_timeout` for `core.ssh_async`."
+        "`backend`, `use_login_shell`, and `safe_interval`. Do not emit `username`, `port`, `look_for_keys`, "
+        "`key_filename`, `timeout`, `allow_agent`, `proxy_command`, `proxy_jump`, `compress`, `gss_auth`, "
+        "`gss_kex`, `gss_deleg_creds`, `gss_host`, `load_system_host_keys`, or `key_policy` for `core.ssh_async`."
         if capabilities.get("supports_async_ssh")
         else "Do not emit `core.ssh_async`; it is not supported by this aiida-core installation."
     )
@@ -431,6 +508,7 @@ def _build_ai_infrastructure_prompt(text: str, capabilities: dict[str, Any]) -> 
       "computer": {{
         "label": "string",
         "hostname": "string",
+        "user": "user@example.com",
         "username": "string",
         "description": "string",
         "transport_type": "allowed transport",
@@ -443,10 +521,20 @@ def _build_ai_infrastructure_prompt(text: str, capabilities: dict[str, Any]) -> 
         "use_double_quotes": boolean,
         "prepend_text": "string",
         "append_text": "string",
+        "port": number,
+        "look_for_keys": boolean,
         "key_filename": "string",
+        "timeout": number,
+        "allow_agent": boolean,
         "proxy_command": "string",
         "proxy_jump": "string",
-        "connection_timeout": number,
+        "compress": boolean,
+        "gss_auth": boolean,
+        "gss_kex": boolean,
+        "gss_deleg_creds": boolean,
+        "gss_host": "string",
+        "load_system_host_keys": boolean,
+        "key_policy": "RejectPolicy" | "WarningPolicy" | "AutoAddPolicy",
         "host": "string",
         "max_io_allowed": number,
         "authentication_script": "string",

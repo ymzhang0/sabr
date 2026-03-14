@@ -872,9 +872,27 @@ async def test_get_management_infrastructure_capabilities_proxies_worker_payload
         "recommended_transport": "core.ssh_async",
         "supports_async_ssh": True,
         "transport_auth_fields": {
-            "core.local": [],
-            "core.ssh": ["username", "timeout"],
-            "core.ssh_async": ["host", "backend"],
+            "core.local": ["use_login_shell", "safe_interval"],
+            "core.ssh": [
+                "username",
+                "port",
+                "look_for_keys",
+                "key_filename",
+                "timeout",
+                "allow_agent",
+                "proxy_jump",
+                "proxy_command",
+                "compress",
+                "gss_auth",
+                "gss_kex",
+                "gss_deleg_creds",
+                "gss_host",
+                "load_system_host_keys",
+                "key_policy",
+                "use_login_shell",
+                "safe_interval",
+            ],
+            "core.ssh_async": ["host", "max_io_allowed", "authentication_script", "backend", "use_login_shell", "safe_interval"],
         },
     }
 
@@ -886,6 +904,29 @@ async def test_get_management_infrastructure_capabilities_proxies_worker_payload
     response = await aiida_router.get_management_infrastructure_capabilities()
 
     assert response.model_dump() == expected
+
+
+@pytest.mark.anyio
+async def test_test_management_infrastructure_connection_proxies_worker_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = {
+        "status": "success",
+        "connection_status": "success",
+        "connection_error": None,
+    }
+
+    async def _fake_request_json(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        assert method == "POST"
+        assert path == "/management/infrastructure/test-connection"
+        assert kwargs.get("json") == {"computer_label": "manneback_async"}
+        return expected
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    response = await aiida_router.test_management_infrastructure_connection({"computer_label": "manneback_async"})
+
+    assert response == expected
 
 
 @pytest.mark.anyio
@@ -1056,8 +1097,39 @@ def test_build_scheduler_probe_script_uses_configured_user_lookup() -> None:
 
     assert 'project=["label"]' in script
     assert 'project=["label", "is_enabled"]' not in script
+    assert "load_profile()" in script
     assert "User.collection.get_default()" in script
     assert 'if selected is None and not payload["computer_label"]:' in script
+    assert '("hold", "suspend")' in script
+    assert '("pend", "wait", "queue")' in script
+
+
+@pytest.mark.anyio
+async def test_run_worker_json_script_uses_default_environment_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_inspect_default_environment(*, force_refresh: bool = False) -> dict[str, object]:
+        assert force_refresh is False
+        return {
+            "success": True,
+            "python_interpreter_path": "/tmp/worker-python",
+        }
+
+    async def _fake_request_json(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        assert method == "POST"
+        assert path == "/management/run-python"
+        assert kwargs.get("json") == {
+            "script": "print('hello')",
+            "python_interpreter_path": "/tmp/worker-python",
+        }
+        return {"output": f"noise\n{aiida_router.WORKER_JSON_MARKER}{{\"available\": true}}\n"}
+
+    monkeypatch.setattr(aiida_router.bridge_service, "inspect_default_environment", _fake_inspect_default_environment)
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+
+    payload = await aiida_router._run_worker_json_script("print('hello')")
+
+    assert payload == {"available": True}
 
 
 @pytest.mark.anyio

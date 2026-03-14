@@ -71,6 +71,7 @@ class BridgeStatusResponse(BaseModel):
     status: Literal["online", "offline"]
     url: str
     environment: str
+    worker_mode: str | None = None
     profile: str = "unknown"
     daemon_status: bool = False
     resources: SystemCountsResponse = Field(default_factory=SystemCountsResponse)

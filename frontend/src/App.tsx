@@ -669,7 +669,9 @@ export default function App() {
     chatProjects.find((project) => project.id === (activeWorkspaceProjectId ?? activeProjectId ?? "")) ?? null;
   const resolvedActiveChatSessionId = activeChatSessionId ?? chatSessionsQuery.data?.active_session_id ?? null;
   const activeChatSession = chatSessions.find((session) => session.id === resolvedActiveChatSessionId) ?? null;
-  const currentProjectPath = selectedWorkspaceProject?.root_path ?? activeChatSession?.workspace_path ?? null;
+  const activeSessionProject =
+    chatProjects.find((project) => project.id === (activeChatSession?.project_id ?? "")) ?? null;
+  const currentProjectPath = selectedWorkspaceProject?.root_path ?? activeSessionProject?.root_path ?? null;
   const currentContextGroupLabel = resolveCurrentContextGroupLabel(activeChatSession);
   const selectedGroupLabel = resolveSelectedGroupLabel(selectedGroup, currentContextGroupLabel);
   useProjectEnvironmentSync(currentProjectPath);

@@ -4,6 +4,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(os.getcwd())
+_ARIS_HOME_ROOT = Path.home() / ".aris"
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
@@ -136,7 +137,7 @@ class Settings(BaseSettings):
     )
     ARIS_PROJECTS_ROOT: str = _env_value(
         "ARIS_PROJECTS_ROOT",
-        default=str(Path(ARIS_RUNTIME_ROOT) / "projects"),
+        default=str(_ARIS_HOME_ROOT / "projects"),
     )
     ARIS_SCRIPT_ARCHIVE_DIR: str = _env_value(
         "ARIS_SCRIPT_ARCHIVE_DIR",
@@ -195,8 +196,9 @@ class Settings(BaseSettings):
             "ARIS_PROJECTS_ROOT",
             _normalize_runtime_path(
                 self.ARIS_PROJECTS_ROOT,
-                canonical_path=runtime_root / "projects",
+                canonical_path=_ARIS_HOME_ROOT / "projects",
                 legacy_paths=(
+                    runtime_root / "projects",
                     _REPO_ROOT / "data" / "projects",
                 ),
             ),

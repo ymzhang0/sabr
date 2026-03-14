@@ -134,7 +134,7 @@ DIAGNOSTIC_STDOUT_TAIL_LIMIT = 100
 WORKER_JSON_MARKER = "__ARIS_JSON__:"
 COMPUTE_HEALTH_REFERENCE_TIMEOUT_SECONDS = 3.0
 COMPUTE_HEALTH_INFRA_TIMEOUT_SECONDS = 2.5
-COMPUTE_HEALTH_SCHEDULER_TIMEOUT_SECONDS = 6.0
+COMPUTE_HEALTH_SCHEDULER_TIMEOUT_SECONDS = 12.0
 STDOUT_CANDIDATE_FILENAMES = (
     "aiida.out",
     "stdout",
@@ -701,11 +701,26 @@ def _parse_worker_json_output(payload: Any) -> dict[str, Any] | None:
 
 
 async def _run_worker_json_script(script: str, *, timeout: float = 90.0) -> dict[str, Any] | None:
+    environment_payload = await asyncio.wait_for(
+        bridge_service.inspect_default_environment(force_refresh=False),
+        timeout=min(5.0, max(timeout / 6.0, 1.0)),
+    )
+    python_interpreter_path = _coerce_text_value(
+        environment_payload.get("python_interpreter_path") if isinstance(environment_payload, dict) else None
+    ) or _coerce_text_value(
+        environment_payload.get("python_path") if isinstance(environment_payload, dict) else None
+    )
+    if not python_interpreter_path:
+        raise RuntimeError("Worker default environment did not expose a python interpreter path")
+
     payload = await asyncio.wait_for(
         request_json(
             "POST",
             "/management/run-python",
-            json={"script": script},
+            json={
+                "script": script,
+                "python_interpreter_path": python_interpreter_path,
+            },
             timeout=timeout,
         ),
         timeout=max(timeout + 0.5, 1.0),
@@ -771,9 +786,11 @@ def _computer_is_ready(computer, user):
         return False
 
 try:
+    from aiida import load_profile
     from aiida.orm import Computer, QueryBuilder, User, load_computer
 
     selected = None
+    load_profile()
     default_user = User.collection.get_default()
     qb = QueryBuilder()
     qb.append(Computer, project=["label"])
@@ -821,10 +838,10 @@ try:
             state_name = _state_name(job)
             if any(token in state_name for token in ("run", "active", "exec")):
                 running += 1
-            elif any(token in state_name for token in ("pend", "wait")):
-                pending += 1
-            elif any(token in state_name for token in ("queue", "hold", "suspend")):
+            elif any(token in state_name for token in ("hold", "suspend")):
                 queued += 1
+            elif any(token in state_name for token in ("pend", "wait", "queue")):
+                pending += 1
             else:
                 queued += 1
         payload["available"] = True
@@ -1320,6 +1337,7 @@ async def get_bridge_status() -> BridgeStatusResponse:
             status=snapshot.status,
             url=snapshot.url,
             environment=snapshot.environment,
+            worker_mode=snapshot.mode,
             profile=snapshot.profile,
             daemon_status=snapshot.daemon_status,
             resources=SystemCountsResponse(
@@ -1336,6 +1354,7 @@ async def get_bridge_status() -> BridgeStatusResponse:
             status="offline",
             url=bridge_service.bridge_url,
             environment="Remote Bridge",
+            worker_mode=None,
             profile="unknown",
             daemon_status=False,
             resources=SystemCountsResponse(),
@@ -1411,7 +1430,9 @@ async def get_management_infrastructure():
     try:
         return await bridge_service.inspect_infrastructure_v2()
     except Exception as exc:
-        _raise_worker_http_error(exc)
+        error_message = f"{type(exc).__name__}: {exc}"
+        logger.warning(log_event("aiida.bridge.infrastructure.unsupported", error=error_message))
+        return []
 
 
 @router.get(
@@ -1424,7 +1445,9 @@ async def get_management_infrastructure_capabilities():
         payload = await bridge_service.get_infrastructure_capabilities()
         return InfrastructureCapabilitiesResponse(**payload)
     except Exception as exc:
-        _raise_worker_http_error(exc)
+        error_message = f"{type(exc).__name__}: {exc}"
+        logger.warning(log_event("aiida.bridge.infrastructure_capabilities.unsupported", error=error_message))
+        return InfrastructureCapabilitiesResponse(aiida_core_version="unknown")
 
 
 @router.post("/management/infrastructure/setup", tags=[WORKER_PROXY_TAG])
@@ -1440,7 +1463,7 @@ async def setup_management_infrastructure(payload: dict[str, Any]):
 async def test_management_infrastructure_connection(payload: dict[str, Any]):
     """Proxy to validate a computer/auth configuration without storing final infrastructure."""
     try:
-        return await request_json("POST", "/management/infrastructure/test-connection", payload=payload)
+        return await request_json("POST", "/management/infrastructure/test-connection", json=payload)
     except Exception as exc:
         _raise_worker_http_error(exc)
 
@@ -1582,31 +1605,18 @@ async def frontend_environment_inspect(payload: EnvironmentInspectRequest):
 
     if payload.use_worker_default or not python_path:
         try:
-            snapshot = await bridge_service.get_status(force_refresh=True)
-            infrastructure = await bridge_service.inspect_infrastructure(force_refresh=True)
+            raw = await bridge_service.inspect_default_environment(force_refresh=False)
         except Exception as exc:
             _raise_worker_http_error(exc)
 
-        computers = infrastructure.get("computers") if isinstance(infrastructure, dict) and isinstance(infrastructure.get("computers"), list) else []
-        codes = infrastructure.get("codes") if isinstance(infrastructure, dict) and isinstance(infrastructure.get("codes"), list) else []
-        plugins = [plugin for plugin in snapshot.plugins if isinstance(plugin, str) and plugin.strip()]
-        return {
-            "success": True,
-            "mode": "worker-default",
-            "source": "worker-bridge",
-            "python_path": None,
-            "workspace_path": workspace_path,
-            "profile": snapshot.profile,
-            "plugins": plugins,
-            "plugin_groups": {
-                "calculations": [],
-                "workflows": plugins,
-                "data": [],
-            },
-            "codes": codes,
-            "computers": computers,
-            "errors": [],
-        }
+        if not isinstance(raw, dict):
+            raise HTTPException(status_code=502, detail={"error": "Worker returned invalid default environment payload"})
+
+        raw["mode"] = "worker-default"
+        raw["source"] = "worker-default-environment"
+        raw["python_path"] = raw.get("python_interpreter_path")
+        raw["workspace_path"] = workspace_path
+        return raw
 
     try:
         raw = await request_json(

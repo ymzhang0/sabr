@@ -1554,6 +1554,20 @@ function formatEnvironmentModeLabel(useWorkerDefault: boolean): string {
   return useWorkerDefault ? "Worker Environment (Global)" : "Project Environment (Isolated)";
 }
 
+function basenamePath(value: string | null | undefined): string | null {
+  const cleaned = String(value || "").trim();
+  if (!cleaned) {
+    return null;
+  }
+  const segments = cleaned.split(/[\\/]+/).filter(Boolean);
+  return segments.length > 0 ? segments[segments.length - 1] : cleaned;
+}
+
+function normalizeOptionalText(value: string | null | undefined): string | null {
+  const cleaned = String(value || "").trim();
+  return cleaned || null;
+}
+
 export function ChatPanel({
   messages,
   models,
@@ -1598,6 +1612,7 @@ export function ChatPanel({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const environmentMenuRef = useRef<HTMLDivElement | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollRafRef = useRef<number | null>(null);
@@ -1621,6 +1636,7 @@ export function ChatPanel({
   const [stableSubmissionDraftByTurn, setStableSubmissionDraftByTurn] = useState<
     Record<number, SubmissionDraftPreview>
   >({});
+  const [isEnvironmentMenuOpen, setIsEnvironmentMenuOpen] = useState(false);
   const [pythonPathDraft, setPythonPathDraft] = useState(environmentState.pythonPath ?? "");
   const [nodeHoverMetadataByPk, setNodeHoverMetadataByPk] = useState<Record<number, NodeHoverMetadataState>>({});
   const nodeHoverMetadataRef = useRef<Record<number, NodeHoverMetadataState>>({});
@@ -1675,6 +1691,26 @@ export function ChatPanel({
   useEffect(() => {
     setPythonPathDraft(environmentState.pythonPath ?? "");
   }, [environmentState.pythonPath]);
+
+  useEffect(() => {
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!environmentMenuRef.current?.contains(event.target as Node)) {
+        setIsEnvironmentMenuOpen(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsEnvironmentMenuOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
 
   const activeResourcePlugins = useMemo(() => {
     const values = new Set<string>();
@@ -1741,6 +1777,28 @@ export function ChatPanel({
     : environmentState.inspectionStatus === "error"
       ? "border-rose-200/80 bg-rose-50/60 dark:border-rose-900/60 dark:bg-rose-950/20"
       : "border-zinc-200/80 bg-zinc-50/70 dark:border-zinc-800 dark:bg-zinc-900/60";
+  const environmentStatusDotTone = environmentState.inspectionStatus === "ready"
+    ? "bg-emerald-500"
+    : environmentState.inspectionStatus === "error"
+      ? "bg-rose-500"
+      : "bg-amber-500";
+  const activeInterpreterPath = normalizeOptionalText(
+    environmentState.useWorkerDefault
+      ? (environmentInspection?.python_interpreter_path || environmentInspection?.python_path)
+      : (environmentInspection?.python_interpreter_path || environmentState.pythonPath),
+  );
+  const projectInterpreterPath = normalizeOptionalText(environmentState.pythonPath);
+  const inactiveProjectInterpreterPath = environmentState.useWorkerDefault
+    && projectInterpreterPath
+    && projectInterpreterPath !== activeInterpreterPath
+    ? projectInterpreterPath
+    : null;
+  const environmentInterpreterLabel = basenamePath(activeInterpreterPath) || "No interpreter";
+  const environmentHeaderCaption = environmentState.useWorkerDefault
+    ? (environmentInspection?.profile ? `Global runtime · profile ${environmentInspection.profile}` : "Global runtime")
+    : "Project runtime";
+  const environmentModeSummary = environmentState.useWorkerDefault ? "Global" : "Project";
+  const environmentInventorySummary = `${environmentState.availablePlugins.length} plugins`;
   const slashQuery = useMemo(() => {
     const trimmed = draft.trimStart();
     if (!trimmed.startsWith("/")) {
@@ -2341,20 +2399,150 @@ export function ChatPanel({
   return (
     <Panel className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden p-0">
       <div className="border-b border-zinc-200/80 bg-white/85 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/55 md:px-6">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
-            Project
-          </span>
-          <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-            {resolvedProjectName}
-          </span>
-          <span className="text-zinc-300 dark:text-zinc-700">/</span>
-          <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300">
-            Session
-          </span>
-          <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
-            {resolvedSessionName}
-          </span>
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
+              Project
+            </span>
+            <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              {resolvedProjectName}
+            </span>
+            <span className="text-zinc-300 dark:text-zinc-700">/</span>
+            <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300">
+              Session
+            </span>
+            <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+              {resolvedSessionName}
+            </span>
+          </div>
+          <div ref={environmentMenuRef} className="relative shrink-0 self-start lg:self-auto">
+            <button
+              type="button"
+              className="inline-flex min-w-[232px] max-w-full items-center gap-3 rounded-full border border-zinc-200/80 bg-white px-3 py-2 text-left shadow-sm transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:hover:bg-zinc-900"
+              onClick={() => setIsEnvironmentMenuOpen((current) => !current)}
+              aria-haspopup="dialog"
+              aria-expanded={isEnvironmentMenuOpen}
+              title={environmentModeLabel}
+            >
+              <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", environmentStatusDotTone)} />
+              <Cpu className="h-4 w-4 shrink-0 text-zinc-500 dark:text-zinc-400" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  {environmentInterpreterLabel}
+                </span>
+                <span className="block truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                  {environmentHeaderCaption}
+                </span>
+              </span>
+              <span className="hidden shrink-0 text-[11px] font-medium text-zinc-500 dark:text-zinc-400 md:inline">
+                {environmentModeSummary} · {environmentInventorySummary}
+              </span>
+              <ChevronDown className={cn("h-4 w-4 shrink-0 text-zinc-500 transition-transform dark:text-zinc-400", isEnvironmentMenuOpen && "rotate-180")} />
+            </button>
+            {isEnvironmentMenuOpen ? (
+              <div className="absolute right-0 top-full z-30 mt-2 w-[340px] max-w-[calc(100vw-2.5rem)] rounded-2xl border border-zinc-200/85 bg-white p-3 shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+                <div className={cn("rounded-xl border px-3 py-3", environmentStatusTone)}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">{environmentModeLabel}</p>
+                      <p className="mt-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                        {environmentState.currentProjectPath || "No project path selected"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200/80 bg-white text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                      onClick={() => {
+                        void refreshInspection();
+                      }}
+                      disabled={environmentState.inspectionStatus === "loading"}
+                      aria-label="Refresh environment inspection"
+                      title="Refresh environment inspection"
+                    >
+                      <RefreshCw className={cn("h-3.5 w-3.5", environmentState.inspectionStatus === "loading" && "animate-spin")} />
+                    </button>
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    <div className="rounded-lg border border-zinc-200/80 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+                        Current Interpreter
+                      </p>
+                      <p className="mt-1 break-all font-mono text-[11px] text-zinc-700 dark:text-zinc-200">
+                        {activeInterpreterPath || "Interpreter not resolved yet"}
+                      </p>
+                    </div>
+                    {inactiveProjectInterpreterPath ? (
+                      <div className="rounded-lg border border-zinc-200/80 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+                          Project Interpreter (Inactive)
+                        </p>
+                        <p className="mt-1 break-all font-mono text-[11px] text-zinc-700 dark:text-zinc-200">
+                          {inactiveProjectInterpreterPath}
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="mt-3 space-y-2">
+                    <label className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+                        checked={environmentState.useWorkerDefault}
+                        onChange={(event) => setUseWorkerDefault(event.target.checked)}
+                      />
+                      Use worker default environment
+                    </label>
+                    <div className="space-y-2">
+                      <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
+                        Project Interpreter Override
+                      </label>
+                      <input
+                        value={pythonPathDraft}
+                        onChange={(event) => setPythonPathDraft(event.target.value)}
+                        disabled={environmentState.useWorkerDefault}
+                        placeholder="Auto-detected from .venv"
+                        className="w-full rounded-lg border border-zinc-200/80 bg-white px-3 py-2 text-xs text-zinc-800 outline-none focus:border-zinc-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-600"
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={handleApplyPythonPath}
+                          disabled={environmentState.useWorkerDefault}
+                        >
+                          Apply
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={resetPythonPath}
+                          disabled={environmentState.useWorkerDefault}
+                        >
+                          Reset Auto
+                        </Button>
+                      </div>
+                      {environmentState.useWorkerDefault ? (
+                        <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                          Worker default is active. The project interpreter above is only a standby override.
+                        </p>
+                      ) : null}
+                    </div>
+                    {environmentInspection?.aiida_core_version ? (
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+                        aiida-core {environmentInspection.aiida_core_version}
+                        {environmentInspection.profile ? ` · profile ${environmentInspection.profile}` : ""}
+                      </p>
+                    ) : null}
+                    {environmentState.lastError ? (
+                      <p className="text-[11px] text-rose-600 dark:text-rose-300">{environmentState.lastError}</p>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
         </div>
       </div>
       <div className="min-h-0 flex flex-1 flex-col xl:flex-row">
@@ -3003,114 +3191,9 @@ export function ChatPanel({
           <div className="space-y-4">
             <div className="rounded-2xl border border-zinc-200/80 bg-white/90 p-3 dark:border-zinc-800 dark:bg-zinc-950/70">
               <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">
-                Environment
+                Agent Routing
               </p>
               <div className="mt-3 space-y-3 text-sm">
-                <div className={cn("rounded-xl border px-3 py-3", environmentStatusTone)}>
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">{environmentModeLabel}</p>
-                      <p className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
-                        {environmentState.currentProjectPath || "No project path selected"}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-200/80 bg-white/80 text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-300 dark:hover:bg-zinc-900"
-                      onClick={() => {
-                        void refreshInspection();
-                      }}
-                      disabled={environmentState.inspectionStatus === "loading"}
-                      aria-label="Refresh environment inspection"
-                      title="Refresh environment inspection"
-                    >
-                      <RefreshCw className={cn("h-3.5 w-3.5", environmentState.inspectionStatus === "loading" && "animate-spin")} />
-                    </button>
-                  </div>
-                  <div className="mt-3 space-y-2">
-                    <label className="flex items-center gap-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
-                        checked={environmentState.useWorkerDefault}
-                        onChange={(event) => setUseWorkerDefault(event.target.checked)}
-                      />
-                      Use worker default environment
-                    </label>
-                    <div className="space-y-2">
-                      <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
-                        Interpreter Path
-                      </label>
-                      <input
-                        value={pythonPathDraft}
-                        onChange={(event) => setPythonPathDraft(event.target.value)}
-                        disabled={environmentState.useWorkerDefault}
-                        placeholder="Auto-detected from .venv"
-                        className="w-full rounded-lg border border-zinc-200/80 bg-white/80 px-3 py-2 text-xs text-zinc-800 outline-none focus:border-zinc-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950/70 dark:text-zinc-100 dark:focus:border-zinc-600"
-                      />
-                      <div className="flex items-center gap-2">
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={handleApplyPythonPath}
-                          disabled={environmentState.useWorkerDefault}
-                        >
-                          Apply
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={resetPythonPath}
-                          disabled={environmentState.useWorkerDefault}
-                        >
-                          Reset Auto
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 text-[11px] text-zinc-600 dark:text-zinc-300">
-                      <div className="rounded-lg border border-zinc-200/80 bg-white/70 px-2 py-2 dark:border-zinc-800 dark:bg-zinc-950/60">
-                        <div className="text-zinc-400 dark:text-zinc-500">Plugins</div>
-                        <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{environmentState.availablePlugins.length}</div>
-                      </div>
-                      <div className="rounded-lg border border-zinc-200/80 bg-white/70 px-2 py-2 dark:border-zinc-800 dark:bg-zinc-950/60">
-                        <div className="text-zinc-400 dark:text-zinc-500">Codes</div>
-                        <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{environmentState.availableCodes.length}</div>
-                      </div>
-                      <div className="rounded-lg border border-zinc-200/80 bg-white/70 px-2 py-2 dark:border-zinc-800 dark:bg-zinc-950/60">
-                        <div className="text-zinc-400 dark:text-zinc-500">Computers</div>
-                        <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{environmentState.availableComputers.length}</div>
-                      </div>
-                    </div>
-                    {environmentInspection?.aiida_core_version ? (
-                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
-                        aiida-core {environmentInspection.aiida_core_version}
-                        {environmentInspection.profile ? ` · profile ${environmentInspection.profile}` : ""}
-                      </p>
-                    ) : null}
-                    {environmentState.availablePlugins.length > 0 ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {environmentState.availablePlugins.slice(0, 8).map((plugin) => (
-                          <span
-                            key={`environment-plugin-${plugin}`}
-                            className="inline-flex items-center rounded-full border border-sky-300/80 bg-sky-50/95 px-2 py-1 text-[10px] font-medium text-sky-700 dark:border-sky-800/70 dark:bg-sky-950/40 dark:text-sky-200"
-                          >
-                            {plugin}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                    {environmentState.lastError ? (
-                      <p className="text-[11px] text-rose-600 dark:text-rose-300">{environmentState.lastError}</p>
-                    ) : null}
-                  </div>
-                </div>
-                <div className="border-t border-dashed border-zinc-200 pt-3 dark:border-zinc-800">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
-                    Agent Routing
-                  </p>
-                </div>
                 <CommandPaletteSelect
                   value={selectedEnvironmentName}
                   options={environmentOptions.map((option) => ({

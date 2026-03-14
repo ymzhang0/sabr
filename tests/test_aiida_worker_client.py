@@ -98,6 +98,56 @@ async def test_inspect_infrastructure_uses_cache(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.anyio
+async def test_get_status_uses_plugin_probe_when_status_payload_has_no_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")
+    calls: list[str] = []
+
+    async def _fake_fetch_json(path: str, *, timeout_seconds: float | None = None, retries: int | None = None):
+        _ = timeout_seconds, retries
+        calls.append(path)
+        if path == "/status":
+            return {
+                "status": "online",
+                "mode": "core-injected-executor",
+                "environment": "Remote Bridge",
+            }
+        if path == "/plugins":
+            return ["core.arithmetic.add"]
+        raise AssertionError(f"Unexpected path: {path}")
+
+    monkeypatch.setattr(client, "_fetch_json", _fake_fetch_json)  # type: ignore[method-assign]
+
+    snapshot = await client.get_status(force_refresh=True)
+
+    assert snapshot.mode == "core-injected-executor"
+    assert snapshot.plugins == ["core.arithmetic.add"]
+    assert calls == ["/status", "/plugins"]
+
+
+@pytest.mark.anyio
+async def test_inspect_default_environment_uses_worker_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")
+
+    async def _fake_request_json(method: str, path: str, **kwargs):
+        assert method == "GET"
+        assert path == "/management/environments/default"
+        assert kwargs["params"] == {"force_refresh": True}
+        return {
+            "success": True,
+            "python_interpreter_path": "/tmp/worker-python",
+            "plugins": {"calculations": [], "workflows": ["aiida.workflows:core.arithmetic.add"], "data": []},
+            "codes": [],
+            "computers": [],
+        }
+
+    monkeypatch.setattr(client, "request_json", _fake_request_json)
+    result = await client.inspect_default_environment(force_refresh=True)
+
+    assert result["success"] is True
+    assert result["python_interpreter_path"] == "/tmp/worker-python"
+
+
+@pytest.mark.anyio
 async def test_get_current_user_info(monkeypatch: pytest.MonkeyPatch) -> None:
     client = AiiDAWorkerClient(bridge_url="http://127.0.0.1:8001")
     user_info = {

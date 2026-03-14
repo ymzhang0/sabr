@@ -77,6 +77,10 @@ function resolveErrorMessage(error: unknown): string {
   return "Environment inspection failed.";
 }
 
+function isMissingInterpreterError(error: unknown): boolean {
+  return resolveErrorMessage(error).includes("Python interpreter not found");
+}
+
 function uniqueSorted(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
 }
@@ -200,12 +204,13 @@ function createEnvironmentStore(): EnvironmentStoreApi {
   });
 
   const refreshInspection = async (): Promise<void> => {
-    const request = getInspectionRequestPayload(state);
+    const snapshot = state;
+    const request = getInspectionRequestPayload(snapshot);
     const token = ++inspectionToken;
 
     if (!request.use_worker_default && !request.python_path) {
       setState({
-        ...state,
+        ...snapshot,
         inspectionStatus: "error",
         inspection: null,
         availablePlugins: [],
@@ -220,7 +225,7 @@ function createEnvironmentStore(): EnvironmentStoreApi {
     }
 
     setState({
-      ...state,
+      ...snapshot,
       inspectionStatus: "loading",
       lastError: null,
     });
@@ -232,7 +237,7 @@ function createEnvironmentStore(): EnvironmentStoreApi {
       }
       const inspection = normalizeInspectionResponse(payload, request);
       setState({
-        ...state,
+        ...snapshot,
         inspectionStatus: "ready",
         inspection,
         availablePlugins: inspection.plugins,
@@ -245,8 +250,63 @@ function createEnvironmentStore(): EnvironmentStoreApi {
       if (token !== inspectionToken) {
         return;
       }
+      if (
+        !request.use_worker_default
+        && snapshot.pythonPathSource === "auto"
+        && Boolean(request.python_path)
+        && isMissingInterpreterError(error)
+      ) {
+        const fallbackRequest: EnvironmentInspectRequestPayload = {
+          python_path: null,
+          workspace_path: request.workspace_path,
+          use_worker_default: true,
+        };
+
+        setState({
+          ...snapshot,
+          useWorkerDefault: true,
+          inspectionStatus: "loading",
+          lastError: null,
+        });
+
+        try {
+          const fallbackPayload = await postInspectionRequest(`${FRONTEND_API_PREFIX}/environment/inspect`, fallbackRequest);
+          if (token !== inspectionToken) {
+            return;
+          }
+          const inspection = normalizeInspectionResponse(fallbackPayload, fallbackRequest);
+          setState({
+            ...snapshot,
+            useWorkerDefault: true,
+            inspectionStatus: "ready",
+            inspection,
+            availablePlugins: inspection.plugins,
+            availableCodes: inspection.codes,
+            availableComputers: inspection.computers,
+            lastError: null,
+            lastInspectedAt: new Date().toISOString(),
+          });
+          return;
+        } catch (fallbackError) {
+          if (token !== inspectionToken) {
+            return;
+          }
+          setState({
+            ...snapshot,
+            useWorkerDefault: true,
+            inspectionStatus: "error",
+            inspection: null,
+            availablePlugins: [],
+            availableCodes: [],
+            availableComputers: [],
+            lastError: resolveErrorMessage(fallbackError),
+            lastInspectedAt: new Date().toISOString(),
+          });
+          return;
+        }
+      }
       setState({
-        ...state,
+        ...snapshot,
         inspectionStatus: "error",
         inspection: null,
         availablePlugins: [],

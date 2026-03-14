@@ -16,6 +16,7 @@ from loguru import logger
 
 from src.aris_apps.aiida.client import (
     OFFLINE_WORKER_MESSAGE,
+    BridgeAPIError,
     BridgeOfflineError,
     aiida_worker_client,
     format_bridge_error,
@@ -830,6 +831,11 @@ def list_registered_skills_sync() -> dict[str, Any]:
     try:
         payload = request_json_sync("GET", "/registry/list", timeout=6.0, retries=1)
         return _normalize_skill_registry_payload(payload)
+    except BridgeAPIError as exc:
+        if int(exc.status_code or 0) == 404:
+            return {"count": 0, "items": []}
+        logger.warning(log_event("aiida.worker.registry.list.failed", error=str(exc)[:220]))
+        return {"count": 0, "items": []}
     except Exception as exc:  # noqa: BLE001
         logger.warning(log_event("aiida.worker.registry.list.failed", error=str(exc)[:220]))
         return {"count": 0, "items": []}

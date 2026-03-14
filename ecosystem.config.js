@@ -4,7 +4,7 @@ module.exports = {
             name: 'aiida-worker',
             cwd: '/Users/yimingzhang/Developer/aris-workspace/aiida-worker',
             script: 'uv',
-            args: 'run --extra quantumespresso uvicorn main:app --host 127.0.0.1 --port 8001',
+            args: 'run uvicorn main:app --host 127.0.0.1 --port 8001',
             interpreter: 'none',
             env: {
                 PYTHONPATH: '.'

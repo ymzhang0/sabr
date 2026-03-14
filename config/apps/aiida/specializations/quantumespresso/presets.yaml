@@ -11,7 +11,7 @@ presets:
       module load intel/2023a
     use_login_shell: true
     safe_interval: 10.0
-    connection_timeout: 60
+    timeout: 60
     codes:
       - label: "pw"
         default_calc_job_plugin: "quantumespresso.pw"
@@ -31,7 +31,7 @@ presets:
       module load intel/23.0.0-fasrc01
     use_login_shell: true
     safe_interval: 5.0
-    connection_timeout: 60
+    timeout: 60
     codes:
       - label: "pw"
         default_calc_job_plugin: "quantumespresso.pw"

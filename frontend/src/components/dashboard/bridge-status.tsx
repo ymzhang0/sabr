@@ -9,6 +9,7 @@ import {
   switchBridgeProfile,
 } from "@/lib/api";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
+import { useEnvironmentStore } from "@/store/EnvironmentStore";
 import { cn } from "@/lib/utils";
 import type { BridgeCodeResource, BridgeComputerResource, ResourceAttachment } from "@/types/aiida";
 import { NewProfileDrawer } from "./new-profile-drawer";
@@ -96,6 +97,38 @@ function toPluginAttachment(pluginName: string): ResourceAttachment {
   };
 }
 
+function normalizeProfileName(value: string | null | undefined): string {
+  const cleaned = String(value || "").trim();
+  if (!cleaned || cleaned.toLowerCase() === "unknown") {
+    return "";
+  }
+  return cleaned;
+}
+
+function normalizeEnvironmentComputers(
+  items: Array<{ label?: string | null; hostname?: string | null; description?: string | null }>,
+): BridgeComputerResource[] {
+  return items
+    .map((item) => ({
+      label: String(item.label || "").trim(),
+      hostname: String(item.hostname || "").trim(),
+      description: typeof item.description === "string" && item.description.trim() ? item.description.trim() : null,
+    }))
+    .filter((item) => item.label || item.hostname);
+}
+
+function normalizeEnvironmentCodes(
+  items: Array<{ label?: string | null; default_plugin?: string | null; computer_label?: string | null }>,
+): BridgeCodeResource[] {
+  return items
+    .map((item) => ({
+      label: String(item.label || "").trim(),
+      default_plugin: typeof item.default_plugin === "string" && item.default_plugin.trim() ? item.default_plugin.trim() : null,
+      computer_label: typeof item.computer_label === "string" && item.computer_label.trim() ? item.computer_label.trim() : null,
+    }))
+    .filter((item) => item.label);
+}
+
 interface BridgeStatusProps {
   onInfrastructureClick?: () => void;
   onSwitchProfileStart?: () => void;
@@ -104,6 +137,7 @@ interface BridgeStatusProps {
 
 export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSwitchProfileEnd }: BridgeStatusProps) {
   const queryClient = useQueryClient();
+  const environmentState = useEnvironmentStore((state) => state);
   const [hoveredDetail, setHoveredDetail] = useState<HoveredDetail>(null);
   const [isNewProfileDrawerOpen, setIsNewProfileDrawerOpen] = useState(false);
 
@@ -154,12 +188,32 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
 
   const status = statusQuery.data?.status ?? "offline";
   const bridgeUrl = statusQuery.data?.url ?? DEFAULT_BRIDGE_URL;
-  const profileName = statusQuery.data?.profile ?? profilesQuery.data?.current_profile ?? "unknown";
-  const pluginNames = statusQuery.data?.plugins ?? [];
-  const resourceCounts = statusQuery.data?.resources ?? { computers: 0, codes: 0, workchains: 0 };
-  const computers = resourcesQuery.data?.computers ?? [];
-  const codes = resourcesQuery.data?.codes ?? [];
-  const profileOptions = profilesQuery.data?.profiles ?? [];
+  const environmentInspection = environmentState.inspection;
+  const environmentReady = environmentState.inspectionStatus === "ready" && environmentInspection !== null;
+  const environmentProfileName = normalizeProfileName(environmentInspection?.profile);
+  const bridgeProfileName = normalizeProfileName(statusQuery.data?.profile) || normalizeProfileName(profilesQuery.data?.current_profile);
+  const profileName = environmentProfileName || bridgeProfileName || "unknown";
+  const pluginNames = environmentReady
+    ? environmentState.availablePlugins
+    : (statusQuery.data?.plugins ?? []);
+  const resourceCounts = environmentReady
+    ? {
+        computers: environmentState.availableComputers.length,
+        codes: environmentState.availableCodes.length,
+        workchains: pluginNames.length,
+      }
+    : (statusQuery.data?.resources ?? { computers: 0, codes: 0, workchains: 0 });
+  const computers = environmentReady
+    ? normalizeEnvironmentComputers(environmentState.availableComputers)
+    : (resourcesQuery.data?.computers ?? []);
+  const codes = environmentReady
+    ? normalizeEnvironmentCodes(environmentState.availableCodes)
+    : (resourcesQuery.data?.codes ?? []);
+  const profileOptions = environmentState.useWorkerDefault
+    ? (profilesQuery.data?.profiles ?? [])
+    : (environmentProfileName
+        ? [{ name: environmentProfileName, is_default: true, is_active: true }]
+        : []);
   const pluginCount = pluginNames.length || resourceCounts.workchains;
   const computerCount = computers.length || resourceCounts.computers;
   const codeCount = codes.length || resourceCounts.codes;
@@ -178,7 +232,8 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
     () => profilePills.map((profile) => ({ value: profile.name, label: profile.name })),
     [profilePills],
   );
-  const isProfileSwitchDisabled = !isOnline || switchProfileMutation.isPending || profilePills.length === 0;
+  const isProjectScopedProfile = !environmentState.useWorkerDefault;
+  const isProfileSwitchDisabled = !isOnline || switchProfileMutation.isPending || profilePills.length === 0 || isProjectScopedProfile;
 
   const hoveredItems = useMemo(() => {
     if (hoveredDetail === "computers") {
@@ -291,7 +346,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
             triggerClassName="w-full justify-between rounded-lg px-1.5 py-1 text-[12px]"
             onChange={(next) => {
               const cleanedNext = next.trim();
-              if (!cleanedNext || cleanedNext === activeProfileName || switchProfileMutation.isPending) {
+              if (!cleanedNext || cleanedNext === activeProfileName || switchProfileMutation.isPending || isProjectScopedProfile) {
                 return;
               }
               onSwitchProfileStart?.();
@@ -300,8 +355,9 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
           />
           <button
             onClick={() => setIsNewProfileDrawerOpen(true)}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700 transition-colors dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-            title="Create New Profile"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 transition-colors enabled:hover:bg-zinc-100 enabled:hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:enabled:hover:bg-zinc-800 dark:enabled:hover:text-zinc-200"
+            title={isProjectScopedProfile ? "Profile management is available only in Worker Environment (Global)" : "Create New Profile"}
+            disabled={isProjectScopedProfile}
           >
             <Plus className="h-3.5 w-3.5" />
           </button>
@@ -316,6 +372,11 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
             <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500 dark:text-zinc-300" />
           ) : null}
         </div>
+        {isProjectScopedProfile ? (
+          <p className="px-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+            Project environments expose the active profile as read-only. Switch to Worker Environment (Global) to manage profiles.
+          </p>
+        ) : null}
 
       </div>
       {!isOnline ? (

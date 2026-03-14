@@ -55,12 +55,41 @@ class InfrastructureManager:
         pattern, preset_config = match
         
         merged = parsed_data.copy()
+
+        def _is_missing(value: Any) -> bool:
+            return value is None or value == ""
         
         # Merge basic parameters
-        for key in ["description", "transport_type", "scheduler_type", "mpiprocs_per_machine", 
-                    "mpirun_command", "prepend_text", "append_text", "use_login_shell", 
-                    "safe_interval", "connection_timeout"]:
-            if key in preset_config and not merged.get(key):
+        for key in [
+            "description",
+            "transport_type",
+            "scheduler_type",
+            "mpiprocs_per_machine",
+            "mpirun_command",
+            "prepend_text",
+            "append_text",
+            "use_login_shell",
+            "safe_interval",
+            "port",
+            "look_for_keys",
+            "key_filename",
+            "timeout",
+            "allow_agent",
+            "proxy_jump",
+            "proxy_command",
+            "compress",
+            "gss_auth",
+            "gss_kex",
+            "gss_deleg_creds",
+            "gss_host",
+            "load_system_host_keys",
+            "key_policy",
+            "host",
+            "max_io_allowed",
+            "authentication_script",
+            "backend",
+        ]:
+            if key in preset_config and _is_missing(merged.get(key)):
                 merged[key] = preset_config[key]
                 
         # Resolve work_dir correctly

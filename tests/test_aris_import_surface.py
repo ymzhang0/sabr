@@ -22,7 +22,7 @@ def test_aris_core_surface_is_available() -> None:
     assert settings.FRONTEND_INDEX_FILE
     assert Path(settings.FRONTEND_INDEX_FILE).as_posix().endswith("apps/web/dist/index.html")
     assert Path(settings.ARIS_MEMORY_DIR).as_posix().endswith("runtime/memories")
-    assert Path(settings.ARIS_PROJECTS_ROOT).as_posix().endswith("runtime/projects")
+    assert Path(settings.ARIS_PROJECTS_ROOT).as_posix().endswith(".aris/projects")
     assert Path(settings.ARIS_PRESETS_FILE).as_posix().endswith("config/apps/aiida/presets.yaml")
     assert Path(settings.ARIS_AIIDA_SETTINGS_FILE).as_posix().endswith("config/apps/aiida/settings.yaml")
     assert Path(settings.ARIS_SCRIPT_ARCHIVE_DIR).as_posix().endswith("runtime/scripts")
@@ -80,5 +80,5 @@ def test_runtime_env_values_are_normalized_to_runtime_root(monkeypatch) -> None:
     config = Settings(_env_file=None)
 
     assert Path(config.ARIS_MEMORY_DIR).as_posix().endswith("runtime/memories")
-    assert Path(config.ARIS_PROJECTS_ROOT).as_posix().endswith("runtime/projects")
+    assert Path(config.ARIS_PROJECTS_ROOT).as_posix().endswith(".aris/projects")
     assert Path(config.ARIS_SCRIPT_ARCHIVE_DIR).as_posix().endswith("runtime/scripts")
