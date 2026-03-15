@@ -7,11 +7,9 @@ import {
   Download,
   FolderOpen,
   Loader2,
-  Moon,
   Pencil,
   Plus,
   Search,
-  Sun,
   Trash2,
   MoreVertical,
   Wand2,
@@ -558,8 +556,6 @@ type SidebarProps = {
   contextNodeIds: number[];
   selectedProcess: ProcessItem | null;
   isUpdatingProcessLimit: boolean;
-  isDarkMode: boolean;
-  onToggleTheme: () => void;
   onSelectAllGroups: () => void;
   onSelectCurrentContext: () => void;
   onGroupChange: (groupLabel: string) => void;
@@ -570,7 +566,7 @@ type SidebarProps = {
   onOpenProcessDetail: (process: ProcessItem) => void;
   onCreateGroup: (label: string) => void;
   onRenameGroup: (pk: number, label: string) => void;
-  onDeleteGroup: (pk: number) => void;
+  onDeleteGroups: (pks: number[]) => Promise<void> | void;
   onAssignNodesToGroup: (groupPk: number, nodePks: number[]) => void;
   onSoftDeleteNode: (pk: number) => void;
   onExportGroup: (group: GroupItem) => void;
@@ -591,8 +587,6 @@ export function Sidebar({
   contextNodeIds,
   selectedProcess,
   isUpdatingProcessLimit,
-  isDarkMode,
-  onToggleTheme,
   onSelectAllGroups,
   onSelectCurrentContext,
   onGroupChange,
@@ -603,7 +597,7 @@ export function Sidebar({
   onOpenProcessDetail,
   onCreateGroup,
   onRenameGroup,
-  onDeleteGroup,
+  onDeleteGroups,
   onAssignNodesToGroup,
   onSoftDeleteNode,
   onExportGroup,
@@ -614,6 +608,8 @@ export function Sidebar({
   const [limitInput, setLimitInput] = useState(String(processLimit));
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedNodePks, setSelectedNodePks] = useState<Set<number>>(new Set());
+  const [selectedGroupPks, setSelectedGroupPks] = useState<Set<number>>(new Set());
+  const [isDeletingGroups, setIsDeletingGroups] = useState(false);
   const [contextMenuNode, setContextMenuNode] = useState<{ pk: number; x: number; y: number } | null>(null);
   const [contextMenuGroup, setContextMenuGroup] = useState<{ pk: number; x: number; y: number } | null>(null);
   const [contextMenuComputer, setContextMenuComputer] = useState<({ pk: number; label: string } & InfrastructureContextMenuTarget) | null>(null);
@@ -762,6 +758,56 @@ export function Sidebar({
     event.stopPropagation();
     openNodeContextMenuAt(pk, event.clientX, event.clientY);
   }, [openNodeContextMenuAt]);
+
+  const toggleGroupSelection = useCallback((pk: number, event?: React.MouseEvent) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    setSelectedGroupPks((prev) => {
+      const next = new Set(prev);
+      if (next.has(pk)) {
+        next.delete(pk);
+      } else {
+        next.add(pk);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleGroupSelectionSet = useCallback((pks: number[], event?: React.MouseEvent) => {
+    event?.preventDefault();
+    event?.stopPropagation();
+    const normalizedPks = [...new Set(pks.filter((pk) => Number.isFinite(pk) && pk > 0))];
+    if (normalizedPks.length === 0) {
+      return;
+    }
+    setSelectedGroupPks((prev) => {
+      const next = new Set(prev);
+      const shouldDeselect = normalizedPks.every((pk) => next.has(pk));
+      normalizedPks.forEach((pk) => {
+        if (shouldDeselect) {
+          next.delete(pk);
+        } else {
+          next.add(pk);
+        }
+      });
+      return next;
+    });
+  }, []);
+
+  const openGroupContextMenuAt = useCallback((pk: number, x: number, y: number) => {
+    const position = clampMenuPosition(x, y, { width: 208, height: 176 });
+    setContextMenuGroup({ pk, x: position.x, y: position.y });
+  }, []);
+
+  const openGroupContextMenu = useCallback((event: React.MouseEvent, pk: number | null) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (pk === null || !Number.isFinite(pk) || pk <= 0) {
+      setContextMenuGroup(null);
+      return;
+    }
+    openGroupContextMenuAt(pk, event.clientX, event.clientY);
+  }, [openGroupContextMenuAt]);
 
   const openManualCopyDialog = useCallback((title: string, description: string, text: string) => {
     setManualCopyState({ title, description, text });
@@ -937,6 +983,19 @@ export function Sidebar({
     return () => window.removeEventListener("keydown", handleEscape);
   }, []);
 
+  useEffect(() => {
+    const validGroupPks = new Set(groups.map((group) => group.pk));
+    setSelectedGroupPks((current) => {
+      const next = new Set<number>();
+      current.forEach((pk) => {
+        if (validGroupPks.has(pk)) {
+          next.add(pk);
+        }
+      });
+      return next.size === current.size ? current : next;
+    });
+  }, [groups]);
+
   const normalizedCurrentContextGroupLabel = useMemo(
     () => String(currentContextGroupLabel || "").trim() || null,
     [currentContextGroupLabel],
@@ -952,9 +1011,48 @@ export function Sidebar({
       ),
     [normalizedCurrentContextGroupLabel, groups],
   );
+  const selectedGroupItems = useMemo(
+    () => groups.filter((group) => selectedGroupPks.has(group.pk)),
+    [groups, selectedGroupPks],
+  );
+
+  const submitDeleteGroups = useCallback(async (targetPks: number[]) => {
+    const normalizedPks = [...new Set(targetPks.filter((pk) => Number.isFinite(pk) && pk > 0))];
+    if (normalizedPks.length === 0 || isDeletingGroups) {
+      return;
+    }
+
+    const targetLabels = groups
+      .filter((group) => normalizedPks.includes(group.pk))
+      .map((group) => group.label);
+    const confirmationText = normalizedPks.length === 1
+      ? `Delete group "${targetLabels[0] ?? `#${normalizedPks[0]}`}"?`
+      : `Delete ${normalizedPks.length} groups?`;
+    if (!window.confirm(confirmationText)) {
+      return;
+    }
+
+    setIsDeletingGroups(true);
+    try {
+      await onDeleteGroups(normalizedPks);
+      setSelectedGroupPks((current) => {
+        const next = new Set(current);
+        normalizedPks.forEach((pk) => next.delete(pk));
+        return next;
+      });
+      setContextMenuGroup((current) => (
+        current && normalizedPks.includes(current.pk) ? null : current
+      ));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to delete selected groups.";
+      window.alert(message);
+    } finally {
+      setIsDeletingGroups(false);
+    }
+  }, [groups, isDeletingGroups, onDeleteGroups]);
 
   const groupTree = useMemo(() => {
-    const root: Record<string, any> = { children: {}, group: null, path: "" };
+    const root: Record<string, any> = { children: {}, group: null, path: "", groupPks: [] };
     for (const group of archiveGroups) {
       const parts = group.label.split("/");
       let current = root;
@@ -963,9 +1061,12 @@ export function Sidebar({
         const part = parts[i];
         pathSoFar = pathSoFar ? `${pathSoFar}/${part}` : part;
         if (!current.children[part]) {
-          current.children[part] = { children: {}, group: null, path: pathSoFar };
+          current.children[part] = { children: {}, group: null, path: pathSoFar, groupPks: [] };
         }
         current = current.children[part];
+        if (!current.groupPks.includes(group.pk)) {
+          current.groupPks.push(group.pk);
+        }
         if (i === parts.length - 1) {
           current.group = group;
         }
@@ -993,6 +1094,7 @@ export function Sidebar({
             const isExpanded = expandedFolders.has(child.path);
             const hasChildren = Object.keys(child.children).length > 0;
             const group = child.group;
+            const descendantGroupPks: number[] = Array.isArray(child.groupPks) ? child.groupPks : [];
             const childPath = String(child.path || "").trim();
             const groupLabel = String(group?.label || "").trim();
             if (
@@ -1002,6 +1104,11 @@ export function Sidebar({
               return null;
             }
             const isSelected = group && selectedGroupLabel === group.label;
+            const selectionTargetPks = group ? [group.pk] : descendantGroupPks;
+            const selectedTargetCount = selectionTargetPks.filter((pk) => selectedGroupPks.has(pk)).length;
+            const isBranchSelected = selectionTargetPks.length > 0 && selectedTargetCount === selectionTargetPks.length;
+            const isBranchPartiallySelected = !group && selectedTargetCount > 0 && !isBranchSelected;
+            const shouldShowBranchSelection = isBranchSelected || isBranchPartiallySelected;
 
             return (
               <div key={child.path} className="flex flex-col">
@@ -1021,12 +1128,7 @@ export function Sidebar({
                   onDrop={(e) => {
                     if (group) handleGroupDrop(e, group.pk);
                   }}
-                  onContextMenu={(e) => {
-                    if (group) {
-                      e.preventDefault();
-                      setContextMenuGroup({ pk: group.pk, ...clampMenuPosition(e.clientX, e.clientY, { width: 176, height: 120 }) });
-                    }
-                  }}
+                  onContextMenuCapture={(event) => openGroupContextMenu(event, group?.pk ?? null)}
                   style={{ paddingLeft: `${level * 12 + 8}px` }}
                   className={cn(
                     "group flex items-center justify-between rounded-md py-1.5 pr-2 text-sm transition-colors",
@@ -1050,7 +1152,34 @@ export function Sidebar({
                     <span className="truncate">{name}</span>
                   </div>
 
-                  <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div
+                    className={cn(
+                      "flex items-center gap-1.5 transition-opacity",
+                      shouldShowBranchSelection ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+                    )}
+                  >
+                    {descendantGroupPks.length > 0 ? (
+                      <button
+                        onClick={(event) => toggleGroupSelectionSet(selectionTargetPks, event)}
+                        className={cn(
+                          "rounded p-0.5 hover:bg-zinc-200 dark:hover:bg-zinc-700",
+                          shouldShowBranchSelection && "bg-zinc-100/80 dark:bg-zinc-800/80",
+                        )}
+                        title={
+                          isBranchSelected
+                            ? (group ? "Deselect group" : "Deselect group subtree")
+                            : (group ? "Select group" : "Select group subtree")
+                        }
+                      >
+                        {isBranchSelected ? (
+                          <SquareCheck className="h-3 w-3 text-blue-500" />
+                        ) : isBranchPartiallySelected ? (
+                          <CheckSquare2 className="h-3 w-3 text-blue-500" />
+                        ) : (
+                          <Square className="h-3 w-3 text-zinc-500" />
+                        )}
+                      </button>
+                    ) : null}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1171,21 +1300,6 @@ export function Sidebar({
 
   return (
     <aside className="relative flex h-full min-h-0 w-full shrink-0 flex-col gap-2 font-sans tracking-tight">
-      <header className="flex items-center justify-between px-1.5 pt-1">
-        <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">
-          AiiDA Explorer
-        </h1>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8"
-          onClick={onToggleTheme}
-          aria-label="Toggle color mode"
-        >
-          {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </Button>
-      </header>
-
       <BridgeStatus
         onInfrastructureClick={() => setIsInfraExpanded(true)}
         onSwitchProfileStart={handleProfileSwitchStart}
@@ -1242,40 +1356,43 @@ export function Sidebar({
               <div className="flex flex-col gap-1">
                 <div className="flex items-center justify-between group/groupbtn">
                   <button
-                    onClick={() => setIsGroupsExpanded(!isGroupsExpanded)}
-                    className="flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400"
+                    onClick={onSelectAllGroups}
+                    className={cn(
+                      "flex items-center gap-1 text-xs font-semibold uppercase tracking-wider transition-colors",
+                      isAllGroupsSelected
+                        ? "text-zinc-900 dark:text-zinc-100"
+                        : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200",
+                    )}
                   >
-                    <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isGroupsExpanded && "rotate-90")} />
-                    Archive
+                    <FolderOpen className="h-3.5 w-3.5" />
+                    All Groups
                   </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      const label = window.prompt("Enter new group name:");
-                      if (label) onCreateGroup(label);
-                    }}
-                    className="p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors opacity-0 group-hover/groupbtn:opacity-100"
-                  >
-                    <Plus className="h-3.5 w-3.5 text-zinc-400" />
-                  </button>
+                  <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover/groupbtn:opacity-100">
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setIsGroupsExpanded(!isGroupsExpanded);
+                      }}
+                      className="rounded-md p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      aria-label={isGroupsExpanded ? "Collapse groups" : "Expand groups"}
+                    >
+                      <ChevronRight className={cn("h-3.5 w-3.5 text-zinc-400 transition-transform", isGroupsExpanded && "rotate-90")} />
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const label = window.prompt("Enter new group name:");
+                        if (label) onCreateGroup(label);
+                      }}
+                      className="rounded-md p-1 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+                    >
+                      <Plus className="h-3.5 w-3.5 text-zinc-400" />
+                    </button>
+                  </div>
                 </div>
 
                 {isGroupsExpanded && (
                   <div className="mt-1 flex flex-col gap-1">
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      onClick={onSelectAllGroups}
-                      className={cn(
-                        "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors",
-                        isAllGroupsSelected
-                          ? "bg-zinc-100 font-medium dark:bg-zinc-800/60"
-                          : "text-zinc-600 hover:bg-zinc-100/50 dark:text-zinc-400 dark:hover:bg-zinc-800/30",
-                      )}
-                    >
-                      <FolderOpen className="h-4 w-4" />
-                      <span>All Groups</span>
-                    </div>
                     {currentContextGroup ? (
                       <div
                         role="button"
@@ -1287,13 +1404,7 @@ export function Sidebar({
                             onSelectCurrentContext();
                           }
                         }}
-                        onContextMenu={(event) => {
-                          event.preventDefault();
-                          setContextMenuGroup({
-                            pk: currentContextGroup.pk,
-                            ...clampMenuPosition(event.clientX, event.clientY, { width: 176, height: 120 }),
-                          });
-                        }}
+                        onContextMenuCapture={(event) => openGroupContextMenu(event, currentContextGroup.pk)}
                         className={cn(
                           "flex items-center justify-between rounded-md px-2 py-1.5 text-sm transition-colors",
                           "bg-blue-50/50 text-blue-700 dark:bg-blue-950/20 dark:text-blue-200",
@@ -1310,9 +1421,42 @@ export function Sidebar({
                           />
                           <span className="truncate">{currentContextGroup.label}</span>
                         </div>
-                        <span className="shrink-0 text-[10px] text-blue-600 dark:text-blue-300">
-                          {currentContextGroup.count}
-                        </span>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <button
+                            onClick={(event) => toggleGroupSelection(currentContextGroup.pk, event)}
+                            className="rounded p-0.5 text-blue-500/80 hover:bg-blue-100/70 hover:text-blue-700 dark:text-blue-300/80 dark:hover:bg-blue-900/40 dark:hover:text-blue-100"
+                            title={selectedGroupPks.has(currentContextGroup.pk) ? "Deselect group" : "Select group"}
+                          >
+                            {selectedGroupPks.has(currentContextGroup.pk)
+                              ? <SquareCheck className="h-3.5 w-3.5" />
+                              : <Square className="h-3.5 w-3.5" />}
+                          </button>
+                          <span className="text-[10px] text-blue-600 dark:text-blue-300">
+                            {currentContextGroup.count}
+                          </span>
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedGroupPks.size > 0 ? (
+                      <div className="mt-1 flex items-center justify-between rounded-md border border-zinc-200/80 bg-zinc-50/90 px-2 py-1.5 text-[11px] text-zinc-600 dark:border-zinc-800/80 dark:bg-zinc-900/70 dark:text-zinc-300">
+                        <span>{selectedGroupPks.size} group{selectedGroupPks.size === 1 ? "" : "s"} selected</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            onClick={() => setSelectedGroupPks(new Set())}
+                            className="rounded px-2 py-0.5 hover:bg-zinc-200/80 dark:hover:bg-zinc-800"
+                          >
+                            Clear
+                          </button>
+                          <button
+                            onClick={() => {
+                              void submitDeleteGroups([...selectedGroupPks]);
+                            }}
+                            disabled={isDeletingGroups}
+                            className="rounded bg-rose-600 px-2 py-0.5 text-white hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            {isDeletingGroups ? "Deleting..." : "Delete Selected"}
+                          </button>
+                        </div>
                       </div>
                     ) : null}
                     {renderGroupTree(groupTree)}
@@ -1337,7 +1481,7 @@ export function Sidebar({
                       </span>
                     </>
                   ) : isAllGroupsSelected ? (
-                    "Across Archive"
+                    "Across All Groups"
                   ) : "Recent"}
                 </span>
                 <div className="flex items-center gap-1 text-[11px] text-zinc-500">
@@ -1586,10 +1730,22 @@ export function Sidebar({
       {contextMenuGroup && typeof document !== "undefined" && createPortal(
         <div
           ref={groupMenuRef}
-          className="fixed z-[110] min-w-40 rounded-md border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
+          className="fixed z-[110] min-w-44 rounded-md border border-zinc-200 bg-white p-1 shadow-xl dark:border-zinc-800 dark:bg-zinc-900 animate-in fade-in"
           style={{ top: contextMenuGroup.y, left: contextMenuGroup.x }}
           onClick={(e) => e.stopPropagation()}
         >
+          <button
+            className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            onClick={() => {
+              toggleGroupSelection(contextMenuGroup.pk);
+              setContextMenuGroup(null);
+            }}
+          >
+            {selectedGroupPks.has(contextMenuGroup.pk)
+              ? <SquareCheck className="h-3.5 w-3.5 text-blue-500" />
+              : <Square className="h-3.5 w-3.5" />}
+            {selectedGroupPks.has(contextMenuGroup.pk) ? "Deselect Group" : "Select Group"}
+          </button>
           <button
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-300 dark:hover:bg-zinc-800"
             onClick={() => {
@@ -1611,10 +1767,21 @@ export function Sidebar({
             <Download className="h-3.5 w-3.5" /> Export Group
           </button>
           <hr className="my-1 border-zinc-200 dark:border-zinc-800" />
+          {selectedGroupItems.length > 1 ? (
+            <button
+              className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
+              onClick={() => {
+                void submitDeleteGroups(selectedGroupItems.map((group) => group.pk));
+                setContextMenuGroup(null);
+              }}
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Delete Selected ({selectedGroupItems.length})
+            </button>
+          ) : null}
           <button
             className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/30"
             onClick={() => {
-              if (window.confirm("Are you sure?")) onDeleteGroup(contextMenuGroup.pk);
+              void submitDeleteGroups([contextMenuGroup.pk]);
               setContextMenuGroup(null);
             }}
           >

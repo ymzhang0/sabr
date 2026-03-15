@@ -852,7 +852,7 @@ function friendlyStepForTool(toolName: string): string {
   if (FRIENDLY_TOOL_STEP_MAP[key]) {
     return FRIENDLY_TOOL_STEP_MAP[key];
   }
-  return `Running ${toolName}...`;
+  return `${toolName}...`;
 }
 
 function parseToolLine(line: string): { toolName: string; args?: string | null; result?: string | null; raw: string } | null {
@@ -2542,27 +2542,27 @@ export function ChatPanel({
 
   return (
     <Panel className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden p-0">
-      <div className="border-b border-zinc-200/80 bg-white/85 px-5 py-3 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/55 md:px-6">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
+      <div className="border-b border-zinc-200/80 bg-white/85 px-4 py-2 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/55 md:px-5">
+        <div className="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
               Project
             </span>
-            <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+            <span className="min-w-0 max-w-full truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
               {resolvedProjectName}
             </span>
             <span className="text-zinc-300 dark:text-zinc-700">/</span>
-            <span className="rounded-full bg-zinc-100 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300">
+            <span className="rounded-full bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-600 dark:bg-zinc-900 dark:text-zinc-300">
               Session
             </span>
-            <span className="min-w-0 max-w-full truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+            <span className="min-w-0 max-w-full truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
               {resolvedSessionName}
             </span>
           </div>
           <div ref={environmentMenuRef} className="relative shrink-0 self-start lg:self-auto">
             <button
               type="button"
-              className="inline-flex min-w-[232px] max-w-full items-center gap-3 rounded-full border border-zinc-200/80 bg-white px-3 py-2 text-left shadow-sm transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:hover:bg-zinc-900"
+              className="inline-flex min-w-[220px] max-w-full items-center gap-2.5 rounded-full border border-zinc-200/80 bg-white px-3 py-1.5 text-left shadow-sm transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:hover:bg-zinc-900"
               onClick={() => setIsEnvironmentMenuOpen((current) => !current)}
               aria-haspopup="dialog"
               aria-expanded={isEnvironmentMenuOpen}
@@ -2571,14 +2571,14 @@ export function ChatPanel({
               <span className={cn("h-2.5 w-2.5 shrink-0 rounded-full", environmentStatusDotTone)} />
               <Cpu className="h-4 w-4 shrink-0 text-zinc-500 dark:text-zinc-400" />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                <span className="block truncate text-[13px] font-semibold text-zinc-900 dark:text-zinc-100">
                   {environmentInterpreterLabel}
                 </span>
-                <span className="block truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                <span className="block truncate text-[10px] text-zinc-500 dark:text-zinc-400">
                   {environmentHeaderCaption}
                 </span>
               </span>
-              <span className="hidden shrink-0 text-[11px] font-medium text-zinc-500 dark:text-zinc-400 md:inline">{environmentInventorySummary}</span>
+              <span className="hidden shrink-0 text-[10px] font-medium text-zinc-500 dark:text-zinc-400 md:inline">{environmentInventorySummary}</span>
               <ChevronDown className={cn("h-4 w-4 shrink-0 text-zinc-500 transition-transform dark:text-zinc-400", isEnvironmentMenuOpen && "rotate-180")} />
             </button>
             {isEnvironmentMenuOpen ? (
@@ -2752,9 +2752,7 @@ export function ChatPanel({
               (isLoading && turn.turnId === thinkingTurnId);
             const hasThinkingSignal =
               Boolean(thinkingText.trim()) || processLog.length > 0 || Boolean(turnCurrentStep);
-            const showThinking =
-              hasThinkingSignal &&
-              (isTurnActivelyThinking || !hasFinalAssistantState);
+            const showThinking = hasThinkingSignal;
             const showAssistant =
               hasAssistantText || turn.assistantStatus === "error" || Boolean(submissionDraft) || hasRecoverySignal;
             const hasAssistantRowSignal =
@@ -2859,25 +2857,6 @@ export function ChatPanel({
                               : "border-zinc-200/80 dark:border-zinc-800",
                           )}
                         >
-                          {processLog.length > 0 ? (
-                            <ul className="mb-2 space-y-1 rounded-lg border border-zinc-200/80 bg-zinc-100/75 px-2.5 py-2 text-[11px] text-zinc-600 dark:border-zinc-700 dark:bg-zinc-900/75 dark:text-zinc-300">
-                              {processLog.map((entry, index) => {
-                                const isLatest = index === processLog.length - 1;
-                                return (
-                                  <li
-                                    key={`${turn.turnId}-tool-${entry.id}`}
-                                    className={cn(
-                                      "flex items-center justify-between gap-2 truncate rounded px-1.5 py-0.5",
-                                      isLatest && "bg-white/70 font-medium text-slate-700 dark:bg-zinc-800/70 dark:text-slate-100",
-                                    )}
-                                  >
-                                    <span className="truncate">{entry.friendlyStep}</span>
-                                    <span className="shrink-0 font-mono text-[10px] opacity-80">{entry.toolName}</span>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-                          ) : null}
                           {hasRecoverySignal ? <RecoveryPlanCard recovery={recovery} /> : null}
                           {visibleAssistantText.trim() ? (
                             <p className="whitespace-pre-wrap">

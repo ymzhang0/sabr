@@ -309,13 +309,7 @@ export function WorkspaceExplorerSidebar({ project }: WorkspaceExplorerSidebarPr
 
   return (
     <aside className="flex h-full min-h-0 w-full flex-col gap-2 font-sans tracking-tight">
-      <header className="flex items-center justify-between px-2.5 pt-2">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Workspace Explorer</h1>
-          <p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
-            {project ? project.name : "Select a project to browse its workspace"}
-          </p>
-        </div>
+      <header className="flex items-center justify-end px-2.5 pt-2">
         {project ? (
           <Button
             variant="ghost"

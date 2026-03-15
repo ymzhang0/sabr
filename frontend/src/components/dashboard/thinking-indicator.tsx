@@ -75,17 +75,6 @@ export function ThinkingIndicator({
           isExpanded && hasHistory ? "mt-1 max-h-64 opacity-100" : "max-h-0 opacity-0",
         )}
       >
-        <div className="mb-1 flex justify-end pl-1">
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 rounded-md border border-zinc-200/80 bg-white/80 px-2 py-0.5 text-[11px] text-zinc-600 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900/80 dark:text-zinc-300 dark:hover:bg-zinc-800"
-            onClick={() => setIsExpanded(false)}
-            aria-label="Collapse thought history"
-          >
-            <span>Collapse</span>
-            <ChevronDown className="h-3 w-3 rotate-180" aria-hidden />
-          </button>
-        </div>
         <ul className="space-y-1 pl-1">
           {historyLog.map((entry) => (
             <li key={entry.id} className="text-xs text-slate-400 dark:text-slate-500">

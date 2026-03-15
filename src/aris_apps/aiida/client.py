@@ -33,6 +33,7 @@ _bridge_call_listener: contextvars.ContextVar[BridgeCallListener | None] = conte
 WORKSPACE_PATH_HEADER = "X-ARIS-Active-Workspace-Path"
 SESSION_ID_HEADER = "X-ARIS-Session-Id"
 PROJECT_ID_HEADER = "X-ARIS-Project-Id"
+PYTHON_PATH_HEADER = "X-ARIS-Active-Python-Path"
 _bridge_request_headers: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "aiida_bridge_request_headers",
     default=None,
@@ -146,6 +147,7 @@ def build_bridge_context_headers(
     session_id: Any = None,
     project_id: Any = None,
     workspace_path: Any = None,
+    python_path: Any = None,
 ) -> dict[str, str] | None:
     headers: dict[str, Any] = {}
     if session_id is not None:
@@ -154,6 +156,8 @@ def build_bridge_context_headers(
         headers[PROJECT_ID_HEADER] = project_id
     if workspace_path is not None:
         headers[WORKSPACE_PATH_HEADER] = workspace_path
+    if python_path is not None:
+        headers[PYTHON_PATH_HEADER] = python_path
     return _normalize_header_entries(headers) or None
 
 

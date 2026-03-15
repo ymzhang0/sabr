@@ -61,7 +61,7 @@ import type {
   SendChatRequest,
   SessionParameter,
 } from "@/types/aiida";
-import { Database, FolderOpen, History } from "lucide-react";
+import { Database, FolderOpen, History, Moon, Sun } from "lucide-react";
 
 const THEME_STORAGE_KEY = "aris.dashboard.theme";
 const CURRENT_SESSION_STORAGE_KEY = "current_session_id";
@@ -998,9 +998,27 @@ export default function App() {
     },
   });
 
-  const deleteGroupMutation = useMutation({
-    mutationFn: (pk: number) => deleteGroup(pk),
-    onSuccess: () => {
+  const deleteGroupsMutation = useMutation({
+    mutationFn: async (pks: number[]) => {
+      const normalizedPks = [...new Set(pks.filter((pk) => Number.isFinite(pk) && pk > 0))];
+      const results = await Promise.allSettled(normalizedPks.map((pk) => deleteGroup(pk)));
+      const deletedPks: number[] = [];
+      const failed: Array<{ pk: number; message: string }> = [];
+      results.forEach((result, index) => {
+        const pk = normalizedPks[index];
+        if (result.status === "fulfilled") {
+          deletedPks.push(pk);
+          return;
+        }
+        const reason = result.reason;
+        failed.push({
+          pk,
+          message: reason instanceof Error ? reason.message : `Failed to delete group #${pk}.`,
+        });
+      });
+      return { deletedPks, failed };
+    },
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["groups"] });
       queryClient.invalidateQueries({ queryKey: ["processes"] });
     },
@@ -1517,13 +1535,23 @@ export default function App() {
     await renameGroupMutation.mutateAsync({ pk, label });
   }, [renameGroupMutation]);
 
-  const handleDeleteGroup = useCallback(async (pk: number) => {
-    const deletedGroup = groups.find((group) => group.pk === pk) ?? null;
-    await deleteGroupMutation.mutateAsync(pk);
-    if (deletedGroup && selectedGroup === deletedGroup.label) {
+  const handleDeleteGroups = useCallback(async (pks: number[]) => {
+    const normalizedPks = [...new Set(pks.filter((pk) => Number.isFinite(pk) && pk > 0))];
+    if (normalizedPks.length === 0) {
+      return;
+    }
+    const deletedGroups = groups.filter((group) => normalizedPks.includes(group.pk));
+    const result = await deleteGroupsMutation.mutateAsync(normalizedPks);
+    const deletedLabels = deletedGroups
+      .filter((group) => result.deletedPks.includes(group.pk))
+      .map((group) => group.label);
+    if (deletedLabels.includes(selectedGroup)) {
       setSelectedGroup(currentContextGroupLabel ? GROUP_SELECTION_CURRENT_CONTEXT : GROUP_SELECTION_ALL);
     }
-  }, [currentContextGroupLabel, deleteGroupMutation, groups, selectedGroup]);
+    if (result.failed.length > 0) {
+      throw new Error(result.failed.map((entry) => entry.message).join("\n"));
+    }
+  }, [currentContextGroupLabel, deleteGroupsMutation, groups, selectedGroup]);
 
   const handleAssignNodesToGroup = useCallback(async (groupPk: number, nodePks: number[]) => {
     await addNodesToGroupMutation.mutateAsync({ groupPk, nodePks });
@@ -1669,7 +1697,17 @@ export default function App() {
                 <FolderOpen className="h-4 w-4" />
               </Button>
             </div>
-            <div className="h-9 w-9" />
+            <div className="flex flex-col items-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-9 w-9 rounded-xl text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                onClick={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
+                aria-label="Toggle color mode"
+              >
+                {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </Button>
+            </div>
           </div>
 
           <div className="flex min-w-0 flex-1 flex-col bg-transparent px-2.5 py-0">
@@ -1686,8 +1724,6 @@ export default function App() {
                 contextNodeIds={contextNodeIds}
                 selectedProcess={activeProcess}
                 isUpdatingProcessLimit={pendingProcessLimit !== null}
-                isDarkMode={theme === "dark"}
-                onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
                 onSelectAllGroups={handleSelectAllGroups}
                 onSelectCurrentContext={handleSelectCurrentContext}
                 onGroupChange={handleSelectArchiveGroup}
@@ -1704,7 +1740,7 @@ export default function App() {
                 onOpenProcessDetail={setActiveProcess}
                 onCreateGroup={handleCreateGroup}
                 onRenameGroup={handleRenameGroup}
-                onDeleteGroup={handleDeleteGroup}
+                onDeleteGroups={handleDeleteGroups}
                 onAssignNodesToGroup={handleAssignNodesToGroup}
                 onSoftDeleteNode={handleSoftDeleteNode}
                 onExportGroup={handleExportGroup}
@@ -1719,8 +1755,6 @@ export default function App() {
                 activeProjectId={activeProjectId}
                 activeSessionId={activeChatSessionId}
                 isBusy={isChatBusy}
-                isDarkMode={theme === "dark"}
-                onToggleTheme={() => setTheme((value) => (value === "dark" ? "light" : "dark"))}
                 onActivateSession={(sessionId) => {
                   void handleActivateChatSession(sessionId);
                 }}
@@ -1745,7 +1779,7 @@ export default function App() {
           </div>
         </section>
 
-        <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden xl:pt-10">
+        <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden">
           {isReady ? (
             <ChatPanel
               activeProject={activeSessionProject ?? null}

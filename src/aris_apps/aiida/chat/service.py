@@ -37,6 +37,7 @@ _DEFAULT_SESSION_TITLE = "New Conversation"
 _PROJECT_CODES_DIRNAME = "codes"
 _PROJECT_DATA_DIRNAME = "data"
 _PROJECT_SESSIONS_DIRNAME = "sessions"
+_MEMORY_SESSIONS_DIRNAME = "sessions"
 _MAX_CHAT_SESSION_MESSAGES = 200
 _MAX_CHAT_SESSIONS = 120
 _MAX_CHAT_SESSION_TAGS = 12
@@ -529,6 +530,117 @@ def _managed_projects_root() -> Path:
     return root
 
 
+def _managed_memory_root() -> Path:
+    root = _resolve_filesystem_path(getattr(settings, "ARIS_MEMORY_DIR", ""))
+    if root is None:
+        root = Path.home() / ".aris" / "memories"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _chat_sessions_storage_root() -> Path:
+    return _ensure_directory(_managed_memory_root() / _MEMORY_SESSIONS_DIRNAME)
+
+
+def _safe_session_storage_name(session_id: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(session_id or "").strip()).strip(".-")
+    return cleaned or uuid4().hex
+
+
+def _chat_session_file_path(session_id: str) -> Path:
+    return _chat_sessions_storage_root() / f"{_safe_session_storage_name(session_id)}.json"
+
+
+def _load_chat_session_file(session_id: str) -> dict[str, Any] | None:
+    target = _chat_session_file_path(session_id)
+    if not target.exists() or not target.is_file():
+        return None
+
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            log_event(
+                "aiida.chat_session.file_load_failed",
+                session_id=session_id,
+                path=str(target),
+            )
+        )
+        return None
+
+
+def _build_chat_session_storage_payload(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(session.get("id") or "").strip(),
+        "project_id": str(session.get("project_id") or "").strip(),
+        "title": str(session.get("title") or _DEFAULT_SESSION_TITLE),
+        "session_slug": _get_session_slug(session),
+        "auto_title": bool(session.get("auto_title", False)),
+        "title_state": _normalize_title_state(session.get("title_state")),
+        "title_first_intent": str(session.get("title_first_intent") or "").strip() or None,
+        "title_last_generated_turn": max(0, int(session.get("title_last_generated_turn") or 0)),
+        "title_generation_count": max(0, int(session.get("title_generation_count") or 0)),
+        "title_last_context_key": str(session.get("title_last_context_key") or "").strip() or None,
+        "is_archived": bool(session.get("is_archived", False)),
+        "created_at": str(session.get("created_at") or _now_iso()),
+        "updated_at": str(session.get("updated_at") or _now_iso()),
+        "tags": _normalize_chat_session_tags(session.get("tags")),
+        "workspace_path": str(session.get("workspace_path") or "").strip() or None,
+        "snapshot": _normalize_chat_session_snapshot(session.get("snapshot")),
+        "messages": _normalize_chat_messages(session.get("messages")),
+    }
+
+
+def _build_chat_session_index_record(session: dict[str, Any]) -> dict[str, Any]:
+    payload = _build_chat_session_storage_payload(session)
+    payload.pop("messages", None)
+    return payload
+
+
+def _build_chat_session_store_index(store: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": max(0, int(store.get("version", 0) or 0)),
+        "turn_seq": max(0, int(store.get("turn_seq", 0) or 0)),
+        "active_project_id": store.get("active_project_id"),
+        "active_session_id": store.get("active_session_id"),
+        "projects": list(store.get("projects", [])),
+        "sessions": [
+            _build_chat_session_index_record(session)
+            for session in store.get("sessions", [])
+            if isinstance(session, dict)
+        ],
+    }
+
+
+def _sync_chat_session_storage(store: dict[str, Any]) -> None:
+    sessions_root = _chat_sessions_storage_root()
+    active_ids: set[str] = set()
+    for session in store.get("sessions", []):
+        if not isinstance(session, dict):
+            continue
+        session_id = str(session.get("id") or "").strip()
+        if not session_id:
+            continue
+        active_ids.add(_safe_session_storage_name(session_id))
+        target = _chat_session_file_path(session_id)
+        payload = _build_chat_session_storage_payload(session)
+        serialized = json.dumps(payload, ensure_ascii=False, indent=2)
+        if target.exists():
+            try:
+                if target.read_text(encoding="utf-8") == serialized:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+        target.write_text(serialized, encoding="utf-8")
+
+    for child in sessions_root.glob("*.json"):
+        session_id = child.stem.strip()
+        if session_id and session_id in active_ids:
+            continue
+        with suppress(OSError):
+            child.unlink()
+
+
 def _managed_project_root(project_id: str) -> Path:
     return _managed_projects_root() / str(project_id).strip()
 
@@ -551,6 +663,13 @@ def _project_data_root_path(project: dict[str, Any]) -> Path:
 
 def _session_workspace_path(session: dict[str, Any], project: dict[str, Any]) -> Path:
     return _project_sessions_root_path(project) / _get_session_slug(session)
+
+
+def _cleanup_empty_legacy_sessions_root(project: dict[str, Any]) -> None:
+    sessions_root = _project_sessions_root_path(project)
+    with suppress(OSError):
+        if sessions_root.exists() and sessions_root.is_dir() and not any(sessions_root.iterdir()):
+            sessions_root.rmdir()
 
 
 def _is_path_within(path: Path, root: Path) -> bool:
@@ -931,6 +1050,7 @@ def _normalize_chat_session_snapshot(raw_snapshot: Any) -> dict[str, Any]:
         "selected_model": selected_model or None,
         "session_environment": session_environment or None,
         "session_environment_auto": bool(snapshot.get("session_environment_auto", True)),
+        "environment_python_path": str(snapshot.get("environment_python_path") or "").strip() or None,
         "prompt_override": prompt_override or None,
         "session_parameters": _normalize_session_parameters(snapshot.get("session_parameters")),
     }
@@ -997,7 +1117,9 @@ def _normalize_chat_session_record(
     workspace_path = str(raw_session.get("workspace_path") or "").strip() or None
     session_slug = str(raw_session.get("session_slug") or "").strip()
     if not session_slug and workspace_path:
-        session_slug = Path(workspace_path).name.strip()
+        workspace_candidate = Path(workspace_path)
+        if workspace_candidate.parent.name == _PROJECT_SESSIONS_DIRNAME:
+            session_slug = workspace_candidate.name.strip()
     if not session_slug:
         title_slug = _slugify_session_name(title, fallback="")
         session_slug = title_slug or session_id
@@ -1057,29 +1179,27 @@ def _ensure_project_workspace_dir(project: dict[str, Any]) -> Path:
     project["root_path"] = str(root)
     _ensure_directory(root / _PROJECT_CODES_DIRNAME)
     _ensure_directory(root / _PROJECT_DATA_DIRNAME)
-    _ensure_directory(root / _PROJECT_SESSIONS_DIRNAME)
+    _cleanup_empty_legacy_sessions_root(project)
     return root
 
 
 def _ensure_session_workspace_dir(store: dict[str, Any], session: dict[str, Any]) -> str:
     project = _get_store_project(store, str(session.get("project_id") or ""))
-    _ensure_project_workspace_dir(project)
-    desired_workspace = _session_workspace_path(session, project)
+    project_root = _ensure_project_workspace_dir(project)
     current_workspace = _resolve_filesystem_path(session.get("workspace_path"))
     sessions_root = _project_sessions_root_path(project)
     if (
         current_workspace is not None
-        and current_workspace != desired_workspace
+        and current_workspace != project_root
         and _is_path_within(current_workspace, sessions_root)
-        and current_workspace.exists()
-        and not desired_workspace.exists()
     ):
-        desired_workspace.parent.mkdir(parents=True, exist_ok=True)
-        current_workspace.rename(desired_workspace)
-    workspace = _ensure_directory(desired_workspace)
+        with suppress(OSError):
+            if current_workspace.exists() and current_workspace.is_dir() and not any(current_workspace.iterdir()):
+                current_workspace.rmdir()
+        _cleanup_empty_legacy_sessions_root(project)
     session["project_id"] = str(project["id"])
-    session["workspace_path"] = str(workspace)
-    return str(workspace)
+    session["workspace_path"] = str(project_root)
+    return str(project_root)
 
 
 def _ensure_store_workspace_dirs(store: dict[str, Any]) -> None:
@@ -1143,8 +1263,18 @@ def _normalize_chat_session_store(raw_store: Any) -> dict[str, Any]:
     seen_ids: set[str] = set()
     sessions: list[dict[str, Any]] = []
     for raw_session in raw_store.get("sessions", []):
+        session_seed = raw_session if isinstance(raw_session, dict) else {}
+        session_id = str(session_seed.get("id") or "").strip()
+        merged_session = dict(session_seed)
+        if session_id:
+            persisted_session = _load_chat_session_file(session_id)
+            if isinstance(persisted_session, dict):
+                merged_session = {
+                    **merged_session,
+                    **persisted_session,
+                }
         session = _normalize_chat_session_record(
-            raw_session,
+            merged_session,
             default_project_id=default_project_id,
             known_project_ids=project_ids,
         )
@@ -1219,9 +1349,10 @@ def _get_chat_session_store(state: Any) -> dict[str, Any]:
     state.chat_turn_seq = max(int(getattr(state, "chat_turn_seq", 0)), int(store["turn_seq"]))
     state.active_chat_session_id = store["active_session_id"]
     state.active_chat_project_id = store["active_project_id"]
+    _sync_chat_session_storage(store)
     memory_setter = getattr(memory, "set_kv", None)
     if callable(memory_setter):
-        memory_setter(_CHAT_SESSIONS_KV_KEY, store)
+        memory_setter(_CHAT_SESSIONS_KV_KEY, _build_chat_session_store_index(store))
     if not hasattr(state, "chat_version"):
         state.chat_version = 0
     return store
@@ -1234,11 +1365,12 @@ def _persist_chat_session_store(state: Any) -> None:
     state.chat_turn_seq = max(int(getattr(state, "chat_turn_seq", 0)), int(store["turn_seq"]))
     state.active_chat_session_id = store["active_session_id"]
     state.active_chat_project_id = store["active_project_id"]
+    _sync_chat_session_storage(store)
 
     memory = getattr(state, "memory", None)
     memory_setter = getattr(memory, "set_kv", None)
     if callable(memory_setter):
-        memory_setter(_CHAT_SESSIONS_KV_KEY, store)
+        memory_setter(_CHAT_SESSIONS_KV_KEY, _build_chat_session_store_index(store))
 
 
 def _touch_chat_sessions(state: Any) -> None:
@@ -1282,6 +1414,7 @@ def _build_chat_session_snapshot(
         "selected_model": str(selected_model).strip() if isinstance(selected_model, str) and selected_model.strip() else None,
         "session_environment": str(normalized_metadata.get("session_environment") or "").strip().lower() or None,
         "session_environment_auto": bool(normalized_metadata.get("session_environment_auto", True)),
+        "environment_python_path": str(normalized_metadata.get("environment_python_path") or "").strip() or None,
         "prompt_override": _strip_auto_environment_prompt(session_prompt_override_raw) or None,
         "session_parameters": _normalize_session_parameters(normalized_metadata.get("session_parameters")),
     }
@@ -1451,10 +1584,12 @@ def _build_worker_workspace_headers(state: Any, session_id: str | None = None) -
     project = _get_store_project(store, str(session.get("project_id") or ""))
     _ensure_session_workspace_dir(store, session)
     workspace_path = str(_ensure_project_workspace_dir(project))
+    snapshot = _normalize_chat_session_snapshot(session.get("snapshot"))
     return build_bridge_context_headers(
         workspace_path=workspace_path,
         session_id=session.get("id"),
         project_id=project.get("id"),
+        python_path=snapshot.get("environment_python_path"),
     )
 
 

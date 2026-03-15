@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, Moon, MoreVertical, Plus, Search, Sparkles, Square, SquareCheck, Sun, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, MoreVertical, Plus, Search, Sparkles, Square, SquareCheck, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -13,8 +13,6 @@ type HistorySidebarProps = {
   activeProjectId: string | null;
   activeSessionId: string | null;
   isBusy: boolean;
-  isDarkMode: boolean;
-  onToggleTheme: () => void;
   onActivateSession: (sessionId: string) => void;
   onRenameSession: (sessionId: string, title: string) => void;
   onCreateProject: (payload: { name: string; rootPath: string }) => void;
@@ -57,8 +55,6 @@ export function HistorySidebar({
   activeProjectId,
   activeSessionId,
   isBusy,
-  isDarkMode,
-  onToggleTheme,
   onActivateSession,
   onRenameSession,
   onCreateProject,
@@ -331,17 +327,6 @@ export function HistorySidebar({
 
   return (
     <aside className="flex h-full min-h-0 w-full flex-col gap-2 font-sans tracking-tight">
-      <header className="flex items-center justify-between px-1.5 pt-1">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Projects</h1>
-        </div>
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onToggleTheme} aria-label="Toggle color mode">
-            {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </Button>
-        </div>
-      </header>
-
       <Panel className="flex min-h-0 flex-1 flex-col gap-3 border-zinc-100/90 p-3 dark:border-zinc-800/80">
         <div className="space-y-2">
           <div className="relative">

@@ -1,6 +1,7 @@
 """Tests for chat context metadata normalization and priority injection."""
 
 import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +20,13 @@ class _Memory:
 
 
 def _make_chat_state() -> SimpleNamespace:
+    chat_service.settings.ARIS_MEMORY_DIR = tempfile.mkdtemp(prefix="aris-chat-memory-")
+    chat_service.settings.ARIS_PROJECTS_ROOT = tempfile.mkdtemp(prefix="aris-chat-projects-")
     return SimpleNamespace(memory=_Memory(), chat_version=0)
+
+
+def _session_file_path(session_id: str) -> Path:
+    return Path(chat_service.settings.ARIS_MEMORY_DIR) / "sessions" / f"{session_id}.json"
 
 
 _AUTO_ENVIRONMENT_PROMPT = (
@@ -52,6 +59,128 @@ def test_update_chat_session_manual_title_marks_title_ready() -> None:
     assert updated["session_slug"] == "si"
     assert updated["auto_title"] is False
     assert updated["title_state"] == "ready"
+
+
+def test_chat_sessions_persist_each_session_to_dedicated_file(tmp_path) -> None:
+    state = _make_chat_state()
+    original_memory_dir = chat_service.settings.ARIS_MEMORY_DIR
+    chat_service.settings.ARIS_MEMORY_DIR = str(tmp_path)
+    try:
+        session = chat_service.create_chat_session(state, title="Si EOS", activate=True)
+        history = chat_service.get_chat_history(state, session["id"])
+        history.append({"role": "user", "text": "run eos", "turn_id": 1})
+        history.append({"role": "assistant", "text": "draft ready", "turn_id": 1, "status": "done"})
+        chat_service._touch_chat_sessions(state)
+        chat_service._persist_chat_session_store(state)
+        session_file = _session_file_path(session["id"])
+        persisted_index = state.memory.get_kv(chat_service._CHAT_SESSIONS_KV_KEY)
+    finally:
+        chat_service.settings.ARIS_MEMORY_DIR = original_memory_dir
+
+    assert session_file.is_file()
+    payload = json.loads(session_file.read_text(encoding="utf-8"))
+    assert [message["text"] for message in payload["messages"]] == ["run eos", "draft ready"]
+    assert isinstance(persisted_index, dict)
+    assert "messages" not in persisted_index["sessions"][0]
+
+
+def test_chat_sessions_reload_messages_from_session_files(tmp_path) -> None:
+    original_memory_dir = chat_service.settings.ARIS_MEMORY_DIR
+    chat_service.settings.ARIS_MEMORY_DIR = str(tmp_path)
+    try:
+        state = _make_chat_state()
+        created = chat_service.create_chat_session(state, title="Bands", activate=True)
+        history = chat_service.get_chat_history(state, created["id"])
+        history.append({"role": "user", "text": "plot bands", "turn_id": 1})
+        history.append({"role": "assistant", "text": "done", "turn_id": 1, "status": "done"})
+        chat_service._touch_chat_sessions(state)
+        chat_service._persist_chat_session_store(state)
+
+        reloaded_state = SimpleNamespace(memory=state.memory, chat_version=0)
+        detail = chat_service.get_chat_session_detail(reloaded_state, created["id"])
+    finally:
+        chat_service.settings.ARIS_MEMORY_DIR = original_memory_dir
+
+    assert detail is not None
+    assert [message["text"] for message in detail["messages"]] == ["plot bands", "done"]
+
+
+def test_chat_session_snapshot_preserves_environment_python_path() -> None:
+    snapshot = chat_service._build_chat_session_snapshot(
+        {
+            "environment_python_path": "/tmp/project/.venv/bin/python",
+            "session_environment": "qe",
+        }
+    )
+
+    assert snapshot["environment_python_path"] == "/tmp/project/.venv/bin/python"
+
+
+def test_build_worker_workspace_headers_include_environment_python_path() -> None:
+    state = _make_chat_state()
+    session = chat_service.create_chat_session(state, title="Injected preview", activate=True)
+    stored_session, _store = chat_service._find_chat_session(state, session["id"])
+    assert stored_session is not None
+    stored_session["snapshot"] = chat_service._build_chat_session_snapshot(
+        {"environment_python_path": "/tmp/project/.venv/bin/python"}
+    )
+
+    headers = chat_service._build_worker_workspace_headers(state, session["id"])
+
+    assert headers is not None
+    assert headers["X-ARIS-Active-Python-Path"] == "/tmp/project/.venv/bin/python"
+
+
+def test_legacy_chat_session_store_migrates_messages_to_session_files(tmp_path) -> None:
+    original_memory_dir = chat_service.settings.ARIS_MEMORY_DIR
+    chat_service.settings.ARIS_MEMORY_DIR = str(tmp_path)
+    try:
+        memory = _Memory()
+        session_id = "legacy-session"
+        memory.set_kv(
+            chat_service._CHAT_SESSIONS_KV_KEY,
+            {
+                "version": 4,
+                "turn_seq": 1,
+                "active_project_id": "project-1",
+                "active_session_id": session_id,
+                "projects": [
+                    {
+                        "id": "project-1",
+                        "name": "Legacy Project",
+                        "root_path": str(tmp_path / "project"),
+                        "created_at": "2026-03-14T00:00:00+00:00",
+                        "updated_at": "2026-03-14T00:00:00+00:00",
+                    }
+                ],
+                "sessions": [
+                    {
+                        "id": session_id,
+                        "project_id": "project-1",
+                        "title": "Legacy",
+                        "created_at": "2026-03-14T00:00:00+00:00",
+                        "updated_at": "2026-03-14T00:00:00+00:00",
+                        "messages": [
+                            {"role": "user", "text": "legacy user", "turn_id": 1},
+                            {"role": "assistant", "text": "legacy reply", "turn_id": 1, "status": "done"},
+                        ],
+                    }
+                ],
+            },
+        )
+        state = SimpleNamespace(memory=memory, chat_version=0)
+
+        detail = chat_service.get_chat_session_detail(state, session_id)
+        session_file = _session_file_path(session_id)
+        migrated_index = memory.get_kv(chat_service._CHAT_SESSIONS_KV_KEY)
+    finally:
+        chat_service.settings.ARIS_MEMORY_DIR = original_memory_dir
+
+    assert detail is not None
+    assert session_file.is_file()
+    assert [message["text"] for message in detail["messages"]] == ["legacy user", "legacy reply"]
+    assert isinstance(migrated_index, dict)
+    assert "messages" not in migrated_index["sessions"][0]
 
 
 def test_normalize_chat_session_record_converts_legacy_uuid_title_to_default() -> None:
@@ -983,10 +1112,10 @@ def test_create_chat_session_creates_default_project_workspace(tmp_path) -> None
     assert session["project_label"] == "Default Project"
     workspace_path = Path(session["workspace_path"])
     assert workspace_path.exists()
-    assert workspace_path.name == "workspace-session"
-    assert workspace_path.parent.name == "sessions"
-    assert (workspace_path.parent.parent / "codes").is_dir()
-    assert (workspace_path.parent.parent / "data").is_dir()
+    assert workspace_path == Path(chat_service.get_chat_session_project_root_path(state, session["id"]))
+    assert (workspace_path / "codes").is_dir()
+    assert (workspace_path / "data").is_dir()
+    assert (workspace_path / "sessions").exists() is False
 
 
 def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path) -> None:
@@ -1011,7 +1140,7 @@ def test_create_chat_project_assigns_new_sessions_to_requested_project(tmp_path)
 
     assert session["project_id"] == project["id"]
     assert session["project_label"] == "Born Charge Study"
-    assert Path(session["workspace_path"]).parent.parent == Path(project["root_path"])
+    assert Path(session["workspace_path"]) == Path(project["root_path"])
     assert (Path(project["root_path"]) / "codes").is_dir()
     assert (Path(project["root_path"]) / "data").is_dir()
 
@@ -1057,21 +1186,26 @@ def test_get_chat_session_project_root_path_returns_project_root(tmp_path) -> No
 def test_delete_chat_items_removes_session_workspace_and_reassigns_active_session(tmp_path) -> None:
     state = _make_chat_state()
     original_root = chat_service.settings.ARIS_PROJECTS_ROOT
+    original_memory_dir = chat_service.settings.ARIS_MEMORY_DIR
     chat_service.settings.ARIS_PROJECTS_ROOT = str(tmp_path)
+    chat_service.settings.ARIS_MEMORY_DIR = str(tmp_path / "memories")
     try:
         older = chat_service.create_chat_session(state, title="Older", activate=True)
         newer = chat_service.create_chat_session(state, title="Newer", activate=True)
         older_workspace = Path(older["workspace_path"])
         newer_workspace = Path(newer["workspace_path"])
+        newer_session_file = _session_file_path(newer["id"])
 
         deleted = chat_service.delete_chat_items(state, session_ids=[newer["id"]])
     finally:
         chat_service.settings.ARIS_PROJECTS_ROOT = original_root
+        chat_service.settings.ARIS_MEMORY_DIR = original_memory_dir
 
     assert deleted["deleted_session_ids"] == [newer["id"]]
     assert deleted["deleted_project_ids"] == []
-    assert newer_workspace.exists() is False
     assert older_workspace.exists() is True
+    assert newer_workspace == older_workspace
+    assert newer_session_file.exists() is False
     assert chat_service.get_active_chat_session_id(state) == older["id"]
 
 
@@ -1133,7 +1267,7 @@ def test_create_chat_session_uses_english_slug_for_group_and_workspace(tmp_path)
     assert session["title"] == "Si Bands Study"
     assert session["session_slug"] == "si-bands-study"
     assert session["session_group_label"] == "Default Project/si-bands-study"
-    assert Path(session["workspace_path"]).name == "si-bands-study"
+    assert Path(session["workspace_path"]).name != "si-bands-study"
 
 
 def test_create_chat_session_with_non_english_title_falls_back_to_default_english_name(tmp_path) -> None:
@@ -1148,4 +1282,4 @@ def test_create_chat_session_with_non_english_title_falls_back_to_default_englis
     assert session["title"] == "New Conversation"
     assert session["session_slug"] == "new-conversation"
     assert session["session_group_label"] == "Default Project/new-conversation"
-    assert Path(session["workspace_path"]).name == "new-conversation"
+    assert Path(session["workspace_path"]).exists()
