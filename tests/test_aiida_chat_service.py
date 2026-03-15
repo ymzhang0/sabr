@@ -116,6 +116,17 @@ def test_chat_session_snapshot_preserves_environment_python_path() -> None:
     assert snapshot["environment_python_path"] == "/tmp/project/.venv/bin/python"
 
 
+def test_chat_session_snapshot_preserves_active_environment_python_path() -> None:
+    snapshot = chat_service._build_chat_session_snapshot(
+        {
+            "environment_active_python_path": "/tmp/worker-default/.venv/bin/python",
+            "session_environment": "worker-default",
+        }
+    )
+
+    assert snapshot["environment_active_python_path"] == "/tmp/worker-default/.venv/bin/python"
+
+
 def test_build_worker_workspace_headers_include_environment_python_path() -> None:
     state = _make_chat_state()
     session = chat_service.create_chat_session(state, title="Injected preview", activate=True)
@@ -129,6 +140,21 @@ def test_build_worker_workspace_headers_include_environment_python_path() -> Non
 
     assert headers is not None
     assert headers["X-ARIS-Active-Python-Path"] == "/tmp/project/.venv/bin/python"
+
+
+def test_build_worker_workspace_headers_fall_back_to_active_environment_python_path() -> None:
+    state = _make_chat_state()
+    session = chat_service.create_chat_session(state, title="Worker default", activate=True)
+    stored_session, _store = chat_service._find_chat_session(state, session["id"])
+    assert stored_session is not None
+    stored_session["snapshot"] = chat_service._build_chat_session_snapshot(
+        {"environment_active_python_path": "/tmp/worker-default/.venv/bin/python"}
+    )
+
+    headers = chat_service._build_worker_workspace_headers(state, session["id"])
+
+    assert headers is not None
+    assert headers["X-ARIS-Active-Python-Path"] == "/tmp/worker-default/.venv/bin/python"
 
 
 def test_legacy_chat_session_store_migrates_messages_to_session_files(tmp_path) -> None:

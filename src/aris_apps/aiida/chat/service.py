@@ -10,7 +10,7 @@ import unicodedata
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from loguru import logger
@@ -1051,6 +1051,7 @@ def _normalize_chat_session_snapshot(raw_snapshot: Any) -> dict[str, Any]:
         "session_environment": session_environment or None,
         "session_environment_auto": bool(snapshot.get("session_environment_auto", True)),
         "environment_python_path": str(snapshot.get("environment_python_path") or "").strip() or None,
+        "environment_active_python_path": str(snapshot.get("environment_active_python_path") or "").strip() or None,
         "prompt_override": prompt_override or None,
         "session_parameters": _normalize_session_parameters(snapshot.get("session_parameters")),
     }
@@ -1407,6 +1408,11 @@ def _build_chat_session_snapshot(
     session_prompt_override_raw = normalized_metadata.get("session_prompt_override")
     if not isinstance(session_prompt_override_raw, str) or not session_prompt_override_raw.strip():
         session_prompt_override_raw = normalized_metadata.get("prompt_override")
+    active_python_path = str(normalized_metadata.get("environment_active_python_path") or "").strip() or None
+    if active_python_path is None:
+        interpreter_info = normalized_metadata.get("interpreter_info")
+        if isinstance(interpreter_info, Mapping):
+            active_python_path = str(interpreter_info.get("python_path") or "").strip() or None
     snapshot = {
         "context_nodes": _normalize_focus_context_nodes(normalized_metadata.get("context_nodes")),
         "pinned_nodes": _normalize_focus_context_nodes(normalized_metadata.get("pinned_nodes")),
@@ -1415,6 +1421,7 @@ def _build_chat_session_snapshot(
         "session_environment": str(normalized_metadata.get("session_environment") or "").strip().lower() or None,
         "session_environment_auto": bool(normalized_metadata.get("session_environment_auto", True)),
         "environment_python_path": str(normalized_metadata.get("environment_python_path") or "").strip() or None,
+        "environment_active_python_path": active_python_path,
         "prompt_override": _strip_auto_environment_prompt(session_prompt_override_raw) or None,
         "session_parameters": _normalize_session_parameters(normalized_metadata.get("session_parameters")),
     }
@@ -1589,7 +1596,7 @@ def _build_worker_workspace_headers(state: Any, session_id: str | None = None) -
         workspace_path=workspace_path,
         session_id=session.get("id"),
         project_id=project.get("id"),
-        python_path=snapshot.get("environment_python_path"),
+        python_path=snapshot.get("environment_python_path") or snapshot.get("environment_active_python_path"),
     )
 
 

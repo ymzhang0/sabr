@@ -63,6 +63,7 @@ export type ChatSessionSnapshot = {
   selected_model: string | null;
   session_environment: string | null;
   session_environment_auto: boolean;
+  environment_active_python_path?: string | null;
   prompt_override: string | null;
   session_parameters: SessionParameter[];
 };

@@ -243,12 +243,21 @@ function buildEnvironmentSystemPrompt(): string | null {
 function buildEnvironmentMetadata(): Record<string, unknown> {
   const state = getEnvironmentState();
   const interpreterInfo = buildInterpreterInfo();
+  const inspection = state.inspection;
+  const activePythonPath = (
+    typeof inspection?.python_interpreter_path === "string" && inspection.python_interpreter_path.trim()
+      ? inspection.python_interpreter_path.trim()
+      : typeof inspection?.python_path === "string" && inspection.python_path.trim()
+        ? inspection.python_path.trim()
+        : interpreterInfo.python_path
+  );
   return {
     interpreter_info: interpreterInfo,
     environment_mode: state.useWorkerDefault ? "worker-default" : "project",
     environment_status: state.inspectionStatus,
     environment_project_path: state.currentProjectPath,
     environment_python_path: interpreterInfo.python_path,
+    environment_active_python_path: activePythonPath,
     environment_plugins: state.availablePlugins,
     environment_codes: state.availableCodes,
     environment_computers: state.availableComputers,
