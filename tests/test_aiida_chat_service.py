@@ -1,10 +1,16 @@
 """Tests for chat context metadata normalization and priority injection."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+os.environ.setdefault("GOOGLE_API_KEY", "dummy")
+
+from src.aris_apps.aiida.agent import researcher
 from src.aris_apps.aiida.chat import service as chat_service
 
 
@@ -127,6 +133,24 @@ def test_normalize_task_mode_falls_back_to_none_for_unknown_values() -> None:
     assert chat_service._normalize_task_mode("") == "none"
     assert chat_service._normalize_task_mode("eos") == "none"
     assert chat_service._normalize_task_mode(None) == "none"
+
+
+def test_normalize_submission_request_accepts_batch_parameter_grid() -> None:
+    request = chat_service._normalize_submission_request(
+        {
+            "mode": "batch",
+            "workchain": "quantumespresso.pw.base",
+            "structure_pks": [19],
+            "code": "pw@localhost",
+            "protocol": "moderate",
+            "parameter_grid": {"scale_factor": [0.96, 0.98, 1.0, 1.02, 1.04]},
+        }
+    )
+
+    assert request is not None
+    assert request["mode"] == "batch"
+    assert request["structure_pks"] == [19]
+    assert request["parameter_grid"] == {"scale_factor": [0.96, 0.98, 1.0, 1.02, 1.04]}
 
 
 def test_chat_session_snapshot_preserves_active_environment_python_path() -> None:
@@ -525,6 +549,46 @@ def test_build_chat_message_payload_blocks_single_draft_for_batch_intent() -> No
     assert "submission_draft" not in payload
     assert payload["status"] == "SUBMISSION_BLOCKED"
     assert payload["recovery_plan"]["issues"][0]["type"] == "batch_draft_required"
+
+
+@pytest.mark.anyio
+async def test_prepare_structured_submission_request_auto_builds_batch_preview(
+    monkeypatch,
+) -> None:
+    async def _fake_submit_new_batch_workflow(ctx, **kwargs):  # noqa: ANN001
+        assert kwargs["structure_pks"] == [19]
+        assert kwargs["parameter_grid"] == {"scale_factor": [0.96, 0.98, 1.0, 1.02, 1.04]}
+        return {
+            "status": "SUBMISSION_DRAFT",
+            "submission_draft": {
+                "process_label": "PwBaseWorkChain",
+                "inputs": {},
+                "meta": {
+                    "draft": [{}, {}, {}, {}, {}],
+                    "structure_pks": [19],
+                    "job_count": 5,
+                },
+            },
+        }
+
+    monkeypatch.setattr(researcher, "submit_new_batch_workflow", _fake_submit_new_batch_workflow)
+
+    payload = await chat_service._prepare_structured_submission_request(
+        {
+            "mode": "batch",
+            "workchain": "quantumespresso.pw.base",
+            "structure_pks": [19],
+            "code": "pw@localhost",
+            "protocol": "moderate",
+            "parameter_grid": {"scale_factor": [0.96, 0.98, 1.0, 1.02, 1.04]},
+        },
+        deps=SimpleNamespace(),
+        tool_calls=[],
+    )
+
+    assert payload is not None
+    assert payload["status"] == "SUBMISSION_DRAFT"
+    assert payload["submission_draft"]["meta"]["job_count"] == 5
 
 
 def test_build_chat_message_payload_extracts_submission_draft_from_answer_text() -> None:

@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { Panel } from "@/components/ui/panel";
 import { cancelPendingSubmission, getActiveSpecializations, getNodeHoverMetadata, saveChatProjectFile, submitPreviewDraft } from "@/lib/api";
-import { extractAssistantScriptArtifact } from "@/lib/FileManager";
+import { extractAssistantScriptArtifact, normalizeAssistantScriptCodeFences } from "@/lib/FileManager";
 import { useEnvironmentActions, useEnvironmentStore } from "@/store/EnvironmentStore";
 import { cn } from "@/lib/utils";
 import type {
@@ -97,6 +97,12 @@ type RecoveryPlanState = {
   status: string | null;
   nextStep: string | null;
   plan: RecoveryPlanPayload | null;
+};
+
+type AssistantContentBlock = {
+  type: "text" | "code";
+  content: string;
+  language: string | null;
 };
 
 const SUBMISSION_DRAFT_TAG = "[SUBMISSION_DRAFT]";
@@ -1303,6 +1309,100 @@ function renderTextWithSmartCitations(
     nodes.push(text.slice(cursor));
   }
   return nodes;
+}
+
+function parseAssistantContentBlocks(text: string): AssistantContentBlock[] {
+  const normalizedText = normalizeAssistantScriptCodeFences(text);
+  const blocks: AssistantContentBlock[] = [];
+  const fenceRegex = /```([A-Za-z0-9_-]+)?\s*([\s\S]*?)```/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null = fenceRegex.exec(normalizedText);
+
+  while (match) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (start > cursor) {
+      const textBlock = normalizedText.slice(cursor, start).trim();
+      if (textBlock) {
+        blocks.push({ type: "text", content: textBlock, language: null });
+      }
+    }
+
+    const codeContent = String(match[2] || "").trimEnd();
+    if (codeContent) {
+      blocks.push({
+        type: "code",
+        content: codeContent,
+        language: String(match[1] || "").trim().toLowerCase() || "python",
+      });
+    }
+    cursor = end;
+    match = fenceRegex.exec(normalizedText);
+  }
+
+  if (cursor < normalizedText.length) {
+    const tail = normalizedText.slice(cursor).trim();
+    if (tail) {
+      blocks.push({ type: "text", content: tail, language: null });
+    }
+  }
+
+  return blocks.length > 0 ? blocks : [{ type: "text", content: text.trim(), language: null }];
+}
+
+function renderAssistantMessageContent(
+  text: string,
+  handleOpenDetail: (pk: number) => void,
+  hoverMetadataByPk: Record<number, NodeHoverMetadataState>,
+  ensureHoverMetadata: (pk: number) => void,
+): ReactNode {
+  const blocks = parseAssistantContentBlocks(text);
+  return (
+    <div className="space-y-3">
+      {blocks.map((block, index) => {
+        if (block.type === "code") {
+          const lineCount = block.content.split(/\r?\n/).length;
+          const shouldCollapse = lineCount > 8 || block.content.length > 280;
+          const label = block.language === "python" ? "Python script" : `${block.language || "Code"} block`;
+          const codeBody = (
+            <pre className="overflow-x-auto rounded-xl bg-zinc-950 px-3 py-3 text-xs leading-5 text-zinc-100">
+              <code>{block.content}</code>
+            </pre>
+          );
+          return shouldCollapse ? (
+            <details
+              key={`assistant-block-${index}`}
+              className="rounded-xl border border-zinc-200/80 bg-white/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/70"
+            >
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
+                <span>{label}</span>
+                <span className="text-[10px] normal-case tracking-normal">{lineCount} lines</span>
+              </summary>
+              <div className="mt-3">{codeBody}</div>
+            </details>
+          ) : (
+            <div key={`assistant-block-${index}`} className="space-y-2">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
+                {label}
+              </p>
+              {codeBody}
+            </div>
+          );
+        }
+
+        return (
+          <div key={`assistant-block-${index}`} className="whitespace-pre-wrap">
+            {renderTextWithSmartCitations(
+              block.content,
+              handleOpenDetail,
+              hoverMetadataByPk,
+              ensureHoverMetadata,
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 async function copyTextToClipboard(text: string): Promise<void> {
@@ -2859,14 +2959,12 @@ export function ChatPanel({
                         >
                           {hasRecoverySignal ? <RecoveryPlanCard recovery={recovery} /> : null}
                           {visibleAssistantText.trim() ? (
-                            <p className="whitespace-pre-wrap">
-                              {renderTextWithSmartCitations(
-                                visibleAssistantText,
-                                onOpenDetail,
-                                nodeHoverMetadataByPk,
-                                ensureNodeHoverMetadata,
-                              )}
-                            </p>
+                            renderAssistantMessageContent(
+                              visibleAssistantText,
+                              onOpenDetail,
+                              nodeHoverMetadataByPk,
+                              ensureNodeHoverMetadata,
+                            )
                           ) : null}
                           {autoSavedScript ? (
                             <div

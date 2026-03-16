@@ -23,6 +23,14 @@ TASK_MODE_RULE = (
     "or high-throughput preparation request. Use 'single' only for one runnable submission preview. "
     "Use 'none' for analysis-only or non-submission turns."
 )
+SUBMISSION_REQUEST_RULE = (
+    "When task_mode is 'single' or 'batch' and you intend ARIS to prepare a preview automatically, "
+    "also set the structured 'submission_request' field with tool-ready arguments. "
+    "For 'batch', use: {'mode':'batch','workchain':'...','structure_pks':[...],'code':'...','protocol':'...','overrides':{...},"
+    "'protocol_kwargs':{...},'parameter_grid':{...},'matrix_mode':'product'}. "
+    "For sweeps derived from one or more seed structures, still use mode='batch' with the relevant structure_pks list "
+    "and an explicit parameter_grid. Let the model decide the parameter space; do not hardcode workflow categories in the protocol."
+)
 
 REFERENCED_NODES_HEADER = "### REFERENCED AiiDA NODES"
 REFERENCED_NODES_INTRO = "Treat these user-selected nodes as first-class context for this turn:"
@@ -33,6 +41,7 @@ _BASE_OPERATIONAL_RULES: tuple[str, ...] = (
     "CYCLIC RETRY: If a calculation fails, use 'inspect_process' to read logs, diagnose, and retry with new parameters.",
     "SUGGESTIONS: Always provide 2-3 'Smart Chips' (suggestions) under 5 words in your response.",
     TASK_MODE_RULE,
+    SUBMISSION_REQUEST_RULE,
     SUBMISSION_DRAFT_REQUIRED_RULE,
     "If a workflow is validated and ready for user confirmation, include a raw JSON block prefixed by '[SUBMISSION_DRAFT]'.",
     f"Format:\n  {SUBMISSION_DRAFT_PREFIX}\n  {SUBMISSION_DRAFT_FORMAT_EXAMPLE}",
@@ -236,6 +245,7 @@ __all__ = [
     "SUBMISSION_DRAFT_REQUIRED_RULE",
     "SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE",
     "TASK_MODE_RULE",
+    "SUBMISSION_REQUEST_RULE",
     "REFERENCED_NODES_HEADER",
     "REFERENCED_NODES_INTRO",
     "REFERENCED_NODES_OMITTED_TEMPLATE",

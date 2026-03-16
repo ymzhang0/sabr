@@ -1,6 +1,7 @@
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Folder, Loader2, X } from "lucide-react";
+import { AlertTriangle, Atom, Box, CheckCircle2, ChevronDown, ChevronRight, Cpu, Folder, FolderTree, GitBranch, Loader2, Server, Settings2, X } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState, useRef } from "react";
 
+import { PreviewCard, type PreviewCardBadge, type PreviewCardMetaItem, PreviewCardSection } from "@/components/dashboard/PreviewCard";
 import { Button } from "@/components/ui/button";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
 import { cn } from "@/lib/utils";
@@ -581,7 +582,7 @@ function renderPkLinkedText(
         <button
           key={`${seed} -${start} -${pk} `}
           type="button"
-          className="font-mono text-sky-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-200"
+          className="font-mono text-blue-500 underline-offset-2 transition-colors hover:underline hover:text-blue-600 dark:text-blue-300 dark:hover:text-blue-200"
           onClick={() => onOpenDetail(pk)}
         >
           {full}
@@ -608,6 +609,18 @@ function renderValueNode(value: unknown, seed: string, onOpenDetail: (pk: number
     <span className="break-all" title={text}>
       {renderPkLinkedText(text, seed, onOpenDetail)}
     </span>
+  );
+}
+
+function renderPreviewPkLink(pk: number, onOpenDetail: (pk: number) => void, label?: string): ReactNode {
+  return (
+    <button
+      type="button"
+      className="font-mono text-blue-500 transition-colors hover:underline hover:text-blue-600 dark:text-blue-300 dark:hover:text-blue-200"
+      onClick={() => onOpenDetail(pk)}
+    >
+      {label ?? `PK: ${pk}`}
+    </button>
   );
 }
 
@@ -3234,47 +3247,43 @@ export function SubmissionModal({
     return null;
   }
 
-  const renderPrimaryCell = (
+  const renderPreviewFallback = (label: string) => (
+    <span className="text-sm font-medium text-slate-400 dark:text-slate-500">{label}</span>
+  );
+
+  const renderPreviewFieldValue = (
     key: string,
-    title: string,
     field: SubmissionPrimaryInputField | null,
     missingLabel: string,
-    pathHint?: string | null,
-  ) => {
+  ): ReactNode => {
     const fieldPk = toPositiveInteger(field?.pk);
-    return (
-      <div
-        key={`${turnId} -primary - ${key} `}
-        className="rounded-xl border border-slate-200/85 bg-white/85 px-3 py-3 dark:border-slate-800 dark:bg-slate-950/50"
-      >
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-slate-400">{title}</p>
-        {pathHint ? (
-          <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${pathHint} `}>
-            inputs.{pathHint}
-          </p>
-        ) : null}
-        {field && !isMissingValue(field.value) ? (
-          <div className="mt-2 text-sm text-slate-800 dark:text-slate-100">
-            {fieldPk !== null ? (
-              <button
-                type="button"
-                className="break-all text-left font-semibold text-sky-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-sky-900 dark:text-sky-300 dark:hover:text-sky-200"
-                onClick={() => onOpenDetail(fieldPk)}
-                title={stringifyCompact(field.value)}
-              >
-                {stringifyCompact(field.value)}
-              </button>
-            ) : (
-              renderValueNode(field.value, `${turnId} -primary - ${key} `, onOpenDetail)
-            )}
-          </div>
-        ) : (
-          <span className="mt-2 inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-300">
-            {missingLabel}
-          </span>
-        )}
-      </div>
-    );
+    if (!field || isMissingValue(field.value)) {
+      return renderPreviewFallback(missingLabel);
+    }
+    if (fieldPk !== null) {
+      return (
+        <button
+          type="button"
+          className="break-all text-left text-sm font-medium text-slate-700 transition-colors hover:text-slate-900 dark:text-slate-100 dark:hover:text-white"
+          onClick={() => onOpenDetail(fieldPk)}
+          title={stringifyCompact(field.value)}
+        >
+          {stringifyCompact(field.value)}
+        </button>
+      );
+    }
+    return renderValueNode(field.value, `${turnId} -preview - ${key} `, onOpenDetail);
+  };
+
+  const renderPreviewFieldHelper = (field: SubmissionPrimaryInputField | null, pathHint?: string | null): ReactNode => {
+    const fieldPk = toPositiveInteger(field?.pk);
+    if (fieldPk !== null) {
+      return renderPreviewPkLink(fieldPk, onOpenDetail);
+    }
+    if (pathHint) {
+      return <span className="truncate">inputs.{pathHint}</span>;
+    }
+    return null;
   };
 
   const renderEditableFieldControl = (
@@ -3781,6 +3790,282 @@ export function SubmissionModal({
     );
   };
 
+  const previewHeaderBadges: PreviewCardBadge[] = isBatchDraft
+    ? [
+      {
+        id: "tasks",
+        label: "Tasks",
+        value: batchJobs.length,
+        tone: "info",
+      },
+      {
+        id: "selected",
+        label: "Selected",
+        value: `${selectedBatchJobs.length}/${batchJobs.length}`,
+      },
+      {
+        id: "time",
+        label: "Time Est.",
+        value: runtimeSummary,
+      },
+      {
+        id: "atoms",
+        label: "Atoms",
+        value: atomSummary,
+      },
+    ]
+    : [
+      {
+        id: "time",
+        label: "Time Est.",
+        value: runtimeSummary,
+      },
+      {
+        id: "atoms",
+        label: "Atoms",
+        value: atomSummary,
+      },
+      {
+        id: "symmetry",
+        label: "Symmetry",
+        value: symmetrySummary,
+      },
+    ];
+
+  const previewMetadataItems: PreviewCardMetaItem[] = isBatchDraft
+    ? [
+      {
+        id: "structures",
+        label: "Structures",
+        icon: Box,
+        value: <span>{batchJobs.length} linked tasks</span>,
+        helper: `${selectedBatchJobs.length}/${batchJobs.length} selected for submission`,
+      },
+      {
+        id: "code",
+        label: "Code",
+        icon: Cpu,
+        value: renderPreviewFieldValue("code", primaryFields.code, "System selected"),
+        helper: renderPreviewFieldHelper(primaryFields.code, primaryCodePath),
+      },
+      {
+        id: "protocol",
+        label: "Protocol",
+        icon: Settings2,
+        value: renderValueNode(
+          keyParameterEntries.find((entry) => entry.label === "Protocol")?.value ?? "Default",
+          `${turnId}-preview-protocol`,
+          onOpenDetail,
+        ),
+        helper:
+          keyParameterEntries.find((entry) => entry.label === "Protocol")?.path
+            ? (
+              <span className="truncate">
+                inputs.{keyParameterEntries.find((entry) => entry.label === "Protocol")?.path}
+              </span>
+            )
+            : null,
+      },
+      {
+        id: "kpoints",
+        label: "K-Points",
+        icon: GitBranch,
+        value: renderValueNode(
+          keyParameterEntries.find((entry) => entry.label === "K-points")?.value ?? "Default",
+          `${turnId}-preview-kpoints`,
+          onOpenDetail,
+        ),
+        helper:
+          keyParameterEntries.find((entry) => entry.label === "K-points")?.path
+            ? (
+              <span className="truncate">
+                inputs.{keyParameterEntries.find((entry) => entry.label === "K-points")?.path}
+              </span>
+            )
+            : null,
+      },
+      {
+        id: "resources",
+        label: "Resources",
+        icon: Server,
+        value: <span>{batchResourceSummary}</span>,
+      },
+      {
+        id: "workdir",
+        label: "Workdir",
+        icon: FolderTree,
+        value: targetWorkdirPath
+          ? renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true)
+          : renderPreviewFallback("Not available"),
+        helper: targetWorkdirPath ? <span className="truncate">inputs.{targetWorkdirPath}</span> : null,
+      },
+    ]
+    : [
+      {
+        id: "code",
+        label: "Code",
+        icon: Cpu,
+        value: renderPreviewFieldValue("code", primaryFields.code, "System selected"),
+        helper: renderPreviewFieldHelper(primaryFields.code, primaryCodePath),
+      },
+      {
+        id: "structure",
+        label: "Structure",
+        icon: Box,
+        value: renderPreviewFieldValue("structure", primaryFields.structure, "Default"),
+        helper: renderPreviewFieldHelper(primaryFields.structure, structureSummaryPath),
+      },
+      {
+        id: "pseudos",
+        label: "Pseudopotentials",
+        icon: Atom,
+        value: renderPreviewFieldValue("pseudos", primaryFields.pseudos, "System selected"),
+        helper: renderPreviewFieldHelper(primaryFields.pseudos, pseudosSummaryPath),
+      },
+      {
+        id: "kpoints",
+        label: "K-Points",
+        icon: GitBranch,
+        value: renderValueNode(
+          keyParameterEntries.find((entry) => entry.label === "K-points")?.value ?? "Default",
+          `${turnId}-preview-kpoints`,
+          onOpenDetail,
+        ),
+        helper:
+          keyParameterEntries.find((entry) => entry.label === "K-points")?.path
+            ? (
+              <span className="truncate">
+                inputs.{keyParameterEntries.find((entry) => entry.label === "K-points")?.path}
+              </span>
+            )
+            : null,
+      },
+      {
+        id: "protocol",
+        label: "Protocol",
+        icon: Settings2,
+        value: renderValueNode(
+          keyParameterEntries.find((entry) => entry.label === "Protocol")?.value ?? "Default",
+          `${turnId}-preview-protocol`,
+          onOpenDetail,
+        ),
+        helper:
+          keyParameterEntries.find((entry) => entry.label === "Protocol")?.path
+            ? (
+              <span className="truncate">
+                inputs.{keyParameterEntries.find((entry) => entry.label === "Protocol")?.path}
+              </span>
+            )
+            : null,
+      },
+      {
+        id: "computer",
+        label: "Computer",
+        icon: Server,
+        value: targetComputer
+          ? renderValueNode(targetComputer, `${turnId}-preview-target-computer`, onOpenDetail)
+          : renderPreviewFallback("System selected"),
+      },
+      {
+        id: "workdir",
+        label: "Workdir",
+        icon: FolderTree,
+        value: targetWorkdirPath
+          ? renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true)
+          : renderPreviewFallback("Not available"),
+        helper: targetWorkdirPath ? <span className="truncate">inputs.{targetWorkdirPath}</span> : null,
+      },
+    ];
+
+  const previewStateBadge =
+    state.status === "submitted" ? (
+      <span className="inline-flex h-8 items-center rounded-full border border-emerald-200/80 bg-emerald-50/80 px-2.5 text-[11px] font-medium text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
+        Submitted
+      </span>
+    ) : state.status === "cancelled" ? (
+      <span className="inline-flex h-8 items-center rounded-full border border-slate-200/80 bg-slate-100/80 px-2.5 text-[11px] font-medium text-slate-600 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
+        Cancelled
+      </span>
+    ) : state.status === "error" ? (
+      <span className="inline-flex h-8 items-center rounded-full border border-rose-200/80 bg-rose-50/80 px-2.5 text-[11px] font-medium text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
+        Archived
+      </span>
+    ) : state.status === "submitting" ? (
+      <span className="inline-flex h-8 items-center rounded-full border border-blue-200/80 bg-blue-50/80 px-2.5 text-[11px] font-medium text-blue-700 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300">
+        Submitting
+      </span>
+    ) : null;
+
+  const previewHeaderActions = (
+    <>
+      {previewStateBadge}
+      {isInlineMode && onToggleExpanded ? (
+        <button
+          type="button"
+          className="inline-flex h-8 items-center gap-1 rounded-full border border-slate-300 bg-white px-2.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          onClick={onToggleExpanded}
+          aria-expanded={isExpanded}
+          aria-label={isExpanded ? "Collapse submission card" : "Expand submission card"}
+        >
+          <span>{isExpanded ? "Collapse" : "Expand"}</span>
+          <ChevronDown
+            className={cn(
+              "h-4 w-4 transition-transform duration-200",
+              isExpanded ? "rotate-180" : "rotate-0",
+            )}
+          />
+        </button>
+      ) : null}
+      {!isInlineMode ? (
+        <>
+          {isPreviewActionable ? (
+            <Button
+              size="sm"
+              className="h-8 rounded-full bg-blue-600 px-3 text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
+              onClick={handleLaunch}
+              disabled={
+                state.status === "submitting" ||
+                isBusy ||
+                (isBatchDraft && selectedBatchJobs.length === 0)
+              }
+            >
+              {state.status === "submitting" ? (
+                <span className="inline-flex items-center gap-1">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Submitting...
+                </span>
+              ) : isBatchDraft ? (
+                "Confirm Batch"
+              ) : (
+                "Launch"
+              )}
+            </Button>
+          ) : null}
+          {isPreviewActionable ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-full border-slate-300 bg-white text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
+              onClick={onCancel}
+              disabled={state.status === "submitting"}
+            >
+              Cancel
+            </Button>
+          ) : null}
+          <button
+            type="button"
+            className="rounded-full p-1.5 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+            onClick={onClose}
+            disabled={!canClose}
+            aria-label="Close modal"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </>
+      ) : null}
+    </>
+  );
+
   return (
     <div
       className={cn(
@@ -3888,129 +4173,15 @@ export function SubmissionModal({
               ) : null}
             </div>
           ) : null}
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-blue-700/80 dark:text-blue-300/80">
-                Submission Review
-              </p>
-              <h2 className="mt-1 text-lg font-semibold tracking-tight text-slate-900 dark:text-slate-100">
-                {submissionDraft.process_label}
-              </h2>
-              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
-                {isBatchDraft ? (
-                  <span className="inline-flex rounded-full bg-blue-100 px-2.5 py-0.5 font-semibold text-blue-700 dark:bg-blue-900/35 dark:text-blue-200">
-                    Batch: {batchJobs.length} Tasks
-                  </span>
-                ) : (
-                  <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                    Structure: {primaryFields.structure?.pk ? `#${primaryFields.structure.pk} ` : "System selected"}
-                  </span>
-                )}
-                <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                  Symmetry: {symmetrySummary}
-                </span>
-                <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                  Time Est.: {runtimeSummary}
-                </span>
-                <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                  Atoms: {atomSummary}
-                </span>
-                {isBatchDraft ? (
-                  <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                    Resources: {batchResourceSummary}
-                  </span>
-                ) : null}
-                {isBatchDraft ? (
-                  <span className="inline-flex rounded-full bg-slate-100/85 px-2 py-0.5 dark:bg-slate-800/80">
-                    {selectedBatchJobs.length}/{batchJobs.length} selected
-                  </span>
-                ) : null}
-              </div>
-            </div>
-            <div className="flex items-start gap-2">
-              {state.status === "submitted" ? (
-                <span className="inline-flex h-9 items-center rounded-md border border-emerald-200 bg-emerald-50 px-2.5 text-xs font-medium text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-300">
-                  Submitted
-                </span>
-              ) : state.status === "cancelled" ? (
-                <span className="inline-flex h-9 items-center rounded-md border border-slate-200 bg-slate-100 px-2.5 text-xs font-medium text-slate-600 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
-                  Cancelled
-                </span>
-              ) : state.status === "error" ? (
-                <span className="inline-flex h-9 items-center rounded-md border border-rose-200 bg-rose-50 px-2.5 text-xs font-medium text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-300">
-                  Archived
-                </span>
-              ) : state.status === "submitting" ? (
-                <span className="inline-flex h-9 items-center rounded-md border border-blue-200 bg-blue-50 px-2.5 text-xs font-medium text-blue-700 dark:border-blue-900/60 dark:bg-blue-950/40 dark:text-blue-300">
-                  Submitting
-                </span>
-              ) : null}
-              {isInlineMode && onToggleExpanded ? (
-                <button
-                  type="button"
-                  className="inline-flex h-9 items-center gap-1 rounded-md border border-slate-300 bg-white/80 px-2.5 text-xs text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-                  onClick={onToggleExpanded}
-                  aria-expanded={isExpanded}
-                  aria-label={isExpanded ? "Collapse submission card" : "Expand submission card"}
-                >
-                  <span>{isExpanded ? "Collapse" : "Expand"}</span>
-                  <ChevronDown
-                    className={cn(
-                      "h-4 w-4 transition-transform duration-200",
-                      isExpanded ? "rotate-180" : "rotate-0",
-                    )}
-                  />
-                </button>
-              ) : null}
-              {!isInlineMode ? (
-                <>
-                  {isPreviewActionable ? (
-                    <Button
-                      size="sm"
-                      className="bg-blue-600 text-white hover:bg-blue-500 dark:bg-blue-500 dark:hover:bg-blue-400"
-                      onClick={handleLaunch}
-                      disabled={
-                        state.status === "submitting" ||
-                        isBusy ||
-                        (isBatchDraft && selectedBatchJobs.length === 0)
-                      }
-                    >
-                      {state.status === "submitting" ? (
-                        <span className="inline-flex items-center gap-1">
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          Submitting...
-                        </span>
-                      ) : isBatchDraft ? (
-                        "Confirm Batch"
-                      ) : (
-                        "Launch"
-                      )}
-                    </Button>
-                  ) : null}
-                  {isPreviewActionable ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="border-slate-300 bg-white/80 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800"
-                      onClick={onCancel}
-                      disabled={state.status === "submitting"}
-                    >
-                      Cancel
-                    </Button>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="rounded-lg p-1.5 text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
-                    onClick={onClose}
-                    disabled={!canClose}
-                    aria-label="Close modal"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </>
-              ) : null}
-            </div>
-          </div>
+          <PreviewCard
+            eyebrow="Submission Review"
+            title={submissionDraft.process_label}
+            badges={previewHeaderBadges}
+            actions={previewHeaderActions}
+            metadata={previewMetadataItems}
+            columns={isBatchDraft ? 3 : 3}
+            className="shadow-none"
+          />
         </div>
 
         {!isExpanded ? (
@@ -4022,29 +4193,6 @@ export function SubmissionModal({
         ) : null}
         {isExpanded ? (
           <>
-            {!isProtocolBuilder && !isBatchDraft ? (
-              <div className="mt-4 grid gap-2 md:grid-cols-3">
-                {keyParameterEntries.map((entry) => (
-                  <div
-                    key={`${turnId} -key - parameter - ${entry.label} `}
-                    className="rounded-xl border border-slate-200/85 bg-slate-50/70 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/35"
-                  >
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                      {entry.label}
-                    </p>
-                    {entry.path ? (
-                      <p className="mt-1 truncate text-[10px] text-slate-500 dark:text-slate-400" title={`inputs.${entry.path} `}>
-                        inputs.{entry.path}
-                      </p>
-                    ) : null}
-                    <p className="mt-1 break-all text-sm text-slate-800 dark:text-slate-100" title={stringifyCompact(entry.value)}>
-                      {renderValueNode(entry.value, `${turnId} -key - parameter - ${entry.label} `, onOpenDetail)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
             {isBatchDraft ? (
               <div className="mt-4 space-y-4">
                 <div className="rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50 via-white to-slate-50 px-4 py-4 dark:border-blue-900/50 dark:from-blue-950/20 dark:via-slate-950/30 dark:to-slate-950/40">
@@ -4261,100 +4409,36 @@ export function SubmissionModal({
                   </div>
                 </div>
               </div>
-            ) : (
-              <>
-                {!isProtocolBuilder ? (
-                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                    {renderPrimaryCell(
-                      "code",
-                      primaryCodePath ? `Code(${primaryCodePath.split(".").pop()})` : "Code",
-                      primaryFields.code,
-                      "System Selected",
-                      primaryCodePath,
-                    )}
-                    {renderPrimaryCell("structure", "Structure", primaryFields.structure, "Default", structureSummaryPath)}
-                    {renderPrimaryCell(
-                      "pseudos",
-                      "Pseudopotentials",
-                      primaryFields.pseudos,
-                      "System Selected",
-                      pseudosSummaryPath,
-                    )}
-                  </div>
-                ) : null}
-
-                {!isProtocolBuilder ? (
-                  <div className={cn("mt-3 rounded-xl border border-slate-200/85 bg-slate-50/70 py-2.5 px-3 dark:border-slate-800 dark:bg-slate-900/35")}>
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="flex items-center gap-2">
-                        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Computer</p>
-                        <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
-                          {targetComputer ? (
-                            <span className="inline-flex rounded-full bg-slate-200/50 px-2 py-0.5 text-xs text-slate-700 dark:bg-slate-800/80 dark:text-slate-200">{renderValueNode(targetComputer, `${turnId} -target`, onOpenDetail)}</span>
-                          ) : (
-                            <span className="inline-flex rounded-full bg-slate-200/80 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                              System Selected
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex w-full sm:w-auto flex-1 items-center justify-end gap-2 max-w-sm">
-                        <p className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-500 dark:text-slate-400">Workdir</p>
-                        <div className="w-full shrink">
-                          {targetWorkdirPath ? (
-                            renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true)
-                          ) : (
-                            <span className="inline-flex h-8 items-center rounded-full bg-slate-200/80 px-2.5 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                              Not available
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-              </>
-            )}
+            ) : null}
 
             {!isBatchDraft ? (
-              <div className={cn("rounded-xl border border-slate-200/85 bg-slate-50/75 px-3 py-3 dark:border-slate-800 dark:bg-slate-900/35", isProtocolBuilder ? "mt-4" : "mt-3")}>
-                <div className="flex flex-col gap-2">
-                  {protocolHint ? (
-                    <div className="rounded-md border border-sky-200 bg-sky-50 px-2 py-1.5 font-mono text-[10px] text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-300">
-                      <span className="font-semibold">Protocol Call: </span>
-                      {protocolHint}
-                    </div>
-                  ) : null}
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
-                      Builder Port Hierarchy
-                    </p>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                        {recommendedDraftFields.length} recommended
-                      </span>
-                      <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                        {allDraftFields.length} editable ports
-                      </span>
-                      <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800/80 dark:text-slate-300">
-                        {groupedInputSections.length} spec groups
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-2 grid gap-2 lg:grid-cols-[240px_minmax(0,1fr)]">
-                <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-lg border border-slate-200/85 bg-white/90 p-2 dark:border-slate-800 dark:bg-slate-950/45">
+              <div className={cn(isProtocolBuilder ? "mt-4" : "mt-3")}>
+                <PreviewCardSection
+                  title="Builder Port Hierarchy"
+                  hint={
+                    protocolHint ? (
+                      <span className="font-mono text-[10px] tracking-normal">Protocol Call: {protocolHint}</span>
+                    ) : null
+                  }
+                  stats={[
+                    { id: "recommended", value: `${recommendedDraftFields.length} recommended` },
+                    { id: "editable", value: `${allDraftFields.length} editable ports` },
+                    { id: "groups", value: `${groupedInputSections.length} spec groups` },
+                  ]}
+                >
+                <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
+                <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
                   <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                     Atomic Inputs
                   </p>
                   {namespaceTree.atomicEntries.length > 0 ? (
-                    <div className="mt-1.5 space-y-1">
+                    <div className="mt-2 space-y-1">
                       {namespaceTree.atomicEntries.map((entry) => {
                         const leaf = entry.path.split(".").pop() ?? entry.path;
                         return (
                           <div
                             key={`${turnId} -atomic - ${entry.path} `}
-                            className="rounded-md border border-slate-200/80 bg-slate-50/80 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-900/50"
+                            className="border-b border-slate-100 px-1 py-1.5 text-xs last:border-b-0 dark:border-slate-800/80"
                           >
                             <p className="font-semibold text-slate-700 dark:text-slate-200">{formatSettingKey(leaf)}</p>
                             <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
@@ -4370,7 +4454,7 @@ export function SubmissionModal({
                     </p>
                   )}
 
-                  <div className="mt-3 border-t border-slate-200/80 pt-2 dark:border-slate-800">
+                  <div className="mt-3 border-t border-slate-100 pt-2 dark:border-slate-800">
                     <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                       Namespaces
                     </p>
@@ -4406,7 +4490,7 @@ export function SubmissionModal({
                   </div>
                 </aside>
 
-                <div className="rounded-lg border border-slate-200/85 bg-white/90 p-2.5 dark:border-slate-800 dark:bg-slate-950/45">
+                <div className="rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
                   <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
                     <button
                       type="button"
@@ -4529,6 +4613,7 @@ export function SubmissionModal({
                   )}
                 </div>
                 </div>
+                </PreviewCardSection>
               </div>
             ) : null}
 

@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+def _payload_contains_submission_preview(payload: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if isinstance(payload.get("submission_draft"), dict):
+        return True
+    payload_type = str(payload.get("type") or payload.get("status") or "").strip().upper()
+    if payload_type == "SUBMISSION_DRAFT":
+        return True
+    return False
 
 
 class ARISResponse(BaseModel):
@@ -11,6 +22,10 @@ class ARISResponse(BaseModel):
     task_mode: Literal["none", "single", "batch"] = Field(
         default="none",
         description="Machine-readable task topology marker for this turn.",
+    )
+    submission_request: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional machine-readable submission request for protocol-driven preview preparation.",
     )
     data_payload: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -33,5 +48,15 @@ class ARISResponse(BaseModel):
                     "Keep it under 5 words for UI compatibility."
                 )
         return value
+
+    @model_validator(mode="after")
+    def validate_preview_protocol(self) -> "ARISResponse":
+        if self.task_mode in {"single", "batch"}:
+            if self.submission_request is None and not _payload_contains_submission_preview(self.data_payload):
+                raise ValueError(
+                    "Responses with task_mode='single' or task_mode='batch' must include either "
+                    "submission_request or a ready submission_draft in data_payload."
+                )
+        return self
 
 __all__ = ["ARISResponse"]

@@ -4,6 +4,7 @@ const PYTHON_CODE_BLOCK_REGEX = /```python\s*([\s\S]*?)```/gi;
 const GENERIC_CODE_BLOCK_REGEX = /```(?:py|python)?\s*([\s\S]*?)```/gi;
 const BACKTICK_PYTHON_PATH_REGEX = /`([^`\n]+\.py)`/g;
 const PLAIN_PYTHON_PATH_REGEX = /(?:^|[\s:(])((?:codes\/)?[A-Za-z0-9._/-]+\.py)(?=$|[\s`),.:;])/g;
+const SCRIPT_SECTION_HEADING_REGEX = /^(#{1,6}\s+.*(?:自动化脚本|推荐脚本|python\s+脚本|python\s+script|脚本内容|script)(?:.*\.py.*)?|(?:自动化脚本|推荐脚本|python\s+脚本|python\s+script).*(?:\.py)?)\s*$/gim;
 
 const ACTION_RULES: Array<{ pattern: RegExp; value: string }> = [
   { pattern: /\b(submit|launch|run workchain|run calculation|prepare submission)\b/i, value: "submit" },
@@ -192,12 +193,130 @@ function extractLastRegexGroup(regex: RegExp, text: string): string | null {
   return lastValue;
 }
 
+function isLikelyPythonCodeLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return true;
+  }
+  if (trimmed.startsWith("```")) {
+    return true;
+  }
+  if (line.startsWith("    ") || line.startsWith("\t")) {
+    return true;
+  }
+  if (/^(from|import|def|class|if\b|elif\b|else:|for\b|while\b|try:|except\b|finally:|with\b|return\b|yield\b|raise\b|assert\b|print\b|submit\b|builder\b|load_[A-Za-z_]+\b|#)\b/.test(trimmed)) {
+    return true;
+  }
+  if (/^[A-Za-z_][\w.]*\s*=/.test(trimmed)) {
+    return true;
+  }
+  return /[:=()[\]{}]/.test(trimmed) && /[A-Za-z_]/.test(trimmed);
+}
+
+function splitLeadingPythonBlock(sectionBody: string): { leading: string; code: string; trailing: string } | null {
+  const lines = sectionBody.split(/\r?\n/);
+  let start = 0;
+  while (start < lines.length && !lines[start].trim()) {
+    start += 1;
+  }
+  if (start >= lines.length) {
+    return null;
+  }
+
+  const codeLines: string[] = [];
+  let index = start;
+  let codeLikeCount = 0;
+  let sawCode = false;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      if (sawCode) {
+        codeLines.push(line);
+      }
+      index += 1;
+      continue;
+    }
+    if (!isLikelyPythonCodeLine(line)) {
+      break;
+    }
+    sawCode = true;
+    codeLikeCount += 1;
+    codeLines.push(line);
+    index += 1;
+  }
+
+  while (codeLines.length > 0 && !codeLines[codeLines.length - 1].trim()) {
+    codeLines.pop();
+  }
+  if (codeLikeCount < 3 || codeLines.length === 0) {
+    return null;
+  }
+
+  return {
+    leading: lines.slice(0, start).join("\n"),
+    code: codeLines.join("\n").trimEnd(),
+    trailing: lines.slice(index).join("\n"),
+  };
+}
+
+export function normalizeAssistantScriptCodeFences(text: string): string {
+  const source = String(text || "");
+  if (!source.trim()) {
+    return source;
+  }
+  const headingRegex = new RegExp(SCRIPT_SECTION_HEADING_REGEX.source, "gim");
+  const matches = Array.from(source.matchAll(headingRegex));
+  if (matches.length === 0) {
+    return source;
+  }
+
+  let cursor = 0;
+  let normalized = "";
+
+  matches.forEach((match, index) => {
+    const heading = String(match[0] || "");
+    const headingStart = match.index ?? 0;
+    const headingEnd = headingStart + heading.length;
+    const nextHeadingStart = matches[index + 1]?.index ?? source.length;
+    const sectionBody = source.slice(headingEnd, nextHeadingStart);
+    if (/^\s*```/m.test(sectionBody)) {
+      return;
+    }
+
+    const parsed = splitLeadingPythonBlock(sectionBody);
+    if (!parsed) {
+      return;
+    }
+
+    normalized += source.slice(cursor, headingStart);
+    normalized += [
+      heading,
+      parsed.leading || "",
+      "",
+      "```python",
+      parsed.code,
+      "```",
+      parsed.trailing || "",
+    ]
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n");
+    cursor = nextHeadingStart;
+  });
+
+  if (!normalized) {
+    return source;
+  }
+  normalized += source.slice(cursor);
+  return normalized;
+}
+
 function extractAssistantScriptContent(text: string): string | null {
-  const pythonBlock = extractLastRegexGroup(PYTHON_CODE_BLOCK_REGEX, text);
+  const normalizedText = normalizeAssistantScriptCodeFences(text);
+  const pythonBlock = extractLastRegexGroup(PYTHON_CODE_BLOCK_REGEX, normalizedText);
   if (pythonBlock) {
     return pythonBlock;
   }
-  const genericBlock = extractLastRegexGroup(GENERIC_CODE_BLOCK_REGEX, text);
+  const genericBlock = extractLastRegexGroup(GENERIC_CODE_BLOCK_REGEX, normalizedText);
   if (!genericBlock) {
     return null;
   }

@@ -10,6 +10,7 @@ import unicodedata
 from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
@@ -150,6 +151,94 @@ def _normalize_task_mode(value: Any) -> str:
     if cleaned in {"single", "batch", "none"}:
         return cleaned
     return "none"
+
+
+def _normalize_submission_request(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+
+    mode = _normalize_task_mode(value.get("mode"))
+    if mode not in {"single", "batch"}:
+        return None
+
+    workchain = str(value.get("workchain") or "").strip()
+    code = str(value.get("code") or "").strip()
+    protocol = str(value.get("protocol") or "moderate").strip() or "moderate"
+    if not workchain or not code:
+        return None
+
+    normalized: dict[str, Any] = {
+        "mode": mode,
+        "workchain": workchain,
+        "code": code,
+        "protocol": protocol,
+    }
+
+    if mode == "single":
+        structure_pk = _coerce_positive_int(value.get("structure_pk"))
+        if structure_pk is None:
+            return None
+        normalized["structure_pk"] = structure_pk
+    else:
+        raw_structure_pks = value.get("structure_pks")
+        if not isinstance(raw_structure_pks, list):
+            return None
+        structure_pks = [_coerce_positive_int(item) for item in raw_structure_pks]
+        structure_pks = [item for item in structure_pks if item is not None]
+        if not structure_pks:
+            return None
+        normalized["structure_pks"] = structure_pks
+        matrix_mode = str(value.get("matrix_mode") or "product").strip().lower() or "product"
+        normalized["matrix_mode"] = "zip" if matrix_mode == "zip" else "product"
+
+    for key in ("overrides", "protocol_kwargs", "parameter_grid"):
+        raw = value.get(key)
+        if isinstance(raw, Mapping):
+            normalized[key] = dict(raw)
+
+    return normalized
+
+
+async def _prepare_structured_submission_request(
+    request: dict[str, Any] | None,
+    deps: Any,
+    tool_calls: list[str] | None = None,
+) -> dict[str, Any] | None:
+    normalized_request = _normalize_submission_request(request)
+    if not normalized_request:
+        return None
+
+    from src.aris_apps.aiida.agent import researcher as researcher_module
+
+    ctx = SimpleNamespace(deps=deps)
+    mode = normalized_request["mode"]
+    if tool_calls is not None:
+        tool_calls.append(
+            "AUTO submit_new_batch_workflow" if mode == "batch" else "AUTO submit_new_workflow"
+        )
+
+    if mode == "batch":
+        return await researcher_module.submit_new_batch_workflow(
+            ctx,
+            workchain=str(normalized_request["workchain"]),
+            structure_pks=list(normalized_request["structure_pks"]),
+            code=str(normalized_request["code"]),
+            protocol=str(normalized_request["protocol"]),
+            overrides=dict(normalized_request.get("overrides") or {}),
+            protocol_kwargs=dict(normalized_request.get("protocol_kwargs") or {}),
+            parameter_grid=dict(normalized_request.get("parameter_grid") or {}) or None,
+            matrix_mode=str(normalized_request.get("matrix_mode") or "product"),
+        )
+
+    return await researcher_module.submit_new_workflow(
+        ctx,
+        workchain=str(normalized_request["workchain"]),
+        structure_pk=int(normalized_request["structure_pk"]),
+        code=str(normalized_request["code"]),
+        protocol=str(normalized_request["protocol"]),
+        overrides=dict(normalized_request.get("overrides") or {}),
+        protocol_kwargs=dict(normalized_request.get("protocol_kwargs") or {}),
+    )
 
 
 def _trim_text(value: Any, *, limit: int = 120) -> str:
@@ -3906,6 +3995,25 @@ async def _execute_chat_turn(
 
             answer_text = str(output.answer) if hasattr(output, "answer") else str(output)
             output_task_mode = _normalize_task_mode(getattr(output, "task_mode", None))
+            structured_submission_request = getattr(output, "submission_request", None)
+            raw_output_payload = getattr(output, "data_payload", None)
+            existing_submission_draft = (
+                _extract_submission_draft_from_output_payload(raw_output_payload)
+                if isinstance(raw_output_payload, dict)
+                else None
+            )
+            auto_prepared_payload = None
+            if output_task_mode == "batch" and not _submission_draft_is_batch(existing_submission_draft):
+                auto_prepared_payload = await _prepare_structured_submission_request(
+                    structured_submission_request,
+                    current_deps,
+                    bridge_tool_calls,
+                )
+            if isinstance(auto_prepared_payload, dict):
+                merged_output_payload = dict(raw_output_payload) if isinstance(raw_output_payload, dict) else {}
+                merged_output_payload.update(auto_prepared_payload)
+                if hasattr(output, "data_payload"):
+                    output.data_payload = merged_output_payload
             message_payload = _build_chat_message_payload(
                 output,
                 current_deps,

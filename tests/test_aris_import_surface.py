@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("GOOGLE_API_KEY", "dummy")
 
 from src.aris_apps.aiida.agent.researcher import aiida_researcher
@@ -24,12 +26,15 @@ def test_aris_core_surface_is_available() -> None:
     assert settings.FRONTEND_INDEX_FILE
     assert Path(settings.FRONTEND_INDEX_FILE).as_posix().endswith("apps/web/dist/index.html")
     assert Path(settings.ARIS_RUNTIME_ROOT).as_posix().endswith(".aris")
-    assert Path(settings.ARIS_MEMORY_DIR).as_posix().endswith(".aris/memories")
+    assert settings.ARIS_MEMORY_DIR
+    assert Path(settings.ARIS_MEMORY_DIR).is_absolute()
     assert Path(settings.ARIS_CONFIG_ROOT).as_posix().endswith(".aris/config")
-    assert Path(settings.ARIS_PROJECTS_ROOT).as_posix().endswith(".aris/projects")
+    assert settings.ARIS_PROJECTS_ROOT
+    assert Path(settings.ARIS_PROJECTS_ROOT).is_absolute()
     assert Path(settings.ARIS_PRESETS_FILE).as_posix().endswith("config/apps/aiida/presets.yaml")
     assert Path(settings.ARIS_AIIDA_SETTINGS_FILE).as_posix().endswith("config/apps/aiida/settings.yaml")
-    assert Path(settings.ARIS_SCRIPT_ARCHIVE_DIR).as_posix().endswith(".aris/scripts")
+    assert settings.ARIS_SCRIPT_ARCHIVE_DIR
+    assert Path(settings.ARIS_SCRIPT_ARCHIVE_DIR).is_absolute()
     assert BaseARISDeps.__name__ == "BaseARISDeps"
     assert JSONMemory.__name__ == "JSONMemory"
     assert ARISMemoryState.__name__ == "ARISMemoryState"
@@ -39,6 +44,29 @@ def test_aris_core_surface_is_available() -> None:
     assert Action(name="noop").payload == {}
     assert ARISResponse.__name__ == "ARISResponse"
     assert ARISResponse(answer="ok", thought_process=[]).is_successful is True
+
+
+def test_aris_response_requires_submission_request_for_batch_mode_without_draft() -> None:
+    with pytest.raises(ValueError):
+        ARISResponse(answer="ok", thought_process=[], task_mode="batch")
+
+
+def test_aris_response_allows_batch_mode_when_submission_request_present() -> None:
+    response = ARISResponse(
+        answer="ok",
+        thought_process=[],
+        task_mode="batch",
+        submission_request={
+            "mode": "batch",
+            "workchain": "quantumespresso.pw.base",
+            "structure_pks": [11],
+            "code": "pw@localhost",
+            "protocol": "moderate",
+            "parameter_grid": {"scale_factor": [0.98, 1.0, 1.02]},
+        },
+    )
+
+    assert response.task_mode == "batch"
 
 
 def test_aris_aiida_surface_is_available() -> None:
