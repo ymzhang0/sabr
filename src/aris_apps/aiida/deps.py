@@ -26,7 +26,6 @@ class AiiDADeps(BaseARISDeps):
     # that need to be shared between different tools in the same loop
     registry: Dict[str, Any] = field(default_factory=dict)
     context_nodes: List[Dict[str, Any]] = field(default_factory=list)
-    intent_hints: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         """

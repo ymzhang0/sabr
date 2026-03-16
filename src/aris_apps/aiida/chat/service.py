@@ -145,92 +145,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _extract_requested_structure_count(user_intent: str) -> int | None:
-    text = str(user_intent or "").strip()
-    if not text:
-        return None
-
-    patterns = (
-        r"生成\s*(\d+)\s*个\s*(?:等间距)?(?:的)?(?:\s*[A-Za-z0-9._-]+)?\s*结构",
-        r"(\d+)\s*个\s*(?:等间距)?(?:的)?(?:\s*[A-Za-z0-9._-]+)?\s*结构",
-        r"\b(?:generate|create|prepare|build)\s+(\d+)\s+(?:equally\s+spaced\s+)?(?:structures?|jobs?|tasks?)\b",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        try:
-            count = int(match.group(1))
-        except (TypeError, ValueError):
-            continue
-        if count > 1:
-            return count
-    return None
-
-
-def _extract_requested_kpoints_distance(user_intent: str) -> float | None:
-    text = str(user_intent or "").strip()
-    if not text:
-        return None
-
-    patterns = (
-        r"k[\s-]*points?\s*distance\s*(?:设置为|设为|set\s+to|to|=|:)?\s*([0-9]+(?:\.[0-9]+)?)",
-        r"k[\s-]*point\s*distance\s*(?:设置为|设为|set\s+to|to|=|:)?\s*([0-9]+(?:\.[0-9]+)?)",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        try:
-            return float(match.group(1))
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _extract_intent_hints(user_intent: str) -> dict[str, Any]:
-    text = str(user_intent or "").strip()
-    if not text:
-        return {}
-
-    lowered = text.lower()
-    requested_structure_count = _extract_requested_structure_count(text)
-    expected_batch = requested_structure_count is not None
-    if not expected_batch:
-        expected_batch = any(
-            marker in text
-            for marker in (
-                "批量",
-                "高通量",
-                "多个结构",
-                "这些结构",
-                "参数扫描",
-                "参数网格",
-                "等间距",
-            )
-        ) or any(
-            marker in lowered
-            for marker in (
-                "batch",
-                "high-throughput",
-                "multiple structures",
-                "structure list",
-                "parameter sweep",
-                "parameter grid",
-            )
-        )
-
-    hints: dict[str, Any] = {}
-    if expected_batch:
-        hints["expected_batch"] = True
-    if requested_structure_count is not None:
-        hints["requested_structure_count"] = requested_structure_count
-
-    kpoints_distance = _extract_requested_kpoints_distance(text)
-    if kpoints_distance is not None:
-        hints["kpoints_distance"] = kpoints_distance
-
-    return hints
+def _normalize_task_mode(value: Any) -> str:
+    cleaned = str(value or "").strip().lower()
+    if cleaned in {"single", "batch", "none"}:
+        return cleaned
+    return "none"
 
 
 def _trim_text(value: Any, *, limit: int = 120) -> str:
@@ -2741,13 +2660,6 @@ def _extract_pending_submission_payload(deps: Any) -> dict[str, Any] | None:
     return pending if isinstance(pending, dict) else None
 
 
-def _deps_expect_batch(deps: Any) -> bool:
-    raw_hints = getattr(deps, "intent_hints", None)
-    if not isinstance(raw_hints, dict):
-        return False
-    return bool(raw_hints.get("expected_batch"))
-
-
 def _submission_draft_is_batch(submission_draft: dict[str, Any] | None) -> bool:
     if not isinstance(submission_draft, dict):
         return False
@@ -3129,6 +3041,7 @@ def _build_chat_message_payload(
     *,
     tool_calls: list[str] | None = None,
     answer_text: str | None = None,
+    task_mode: str | None = None,
 ) -> dict[str, Any] | None:
     combined: dict[str, Any] = {}
     forced_batch_block = False
@@ -3177,7 +3090,14 @@ def _build_chat_message_payload(
                 validation_summary=validation_summary if isinstance(validation_summary, dict) else None,
             )
 
-    if _deps_expect_batch(deps) and isinstance(resolved_submission_draft, dict) and not _submission_draft_is_batch(
+    resolved_task_mode = _normalize_task_mode(task_mode)
+    if resolved_task_mode == "none":
+        if isinstance(resolved_submission_draft, dict):
+            resolved_task_mode = "batch" if _submission_draft_is_batch(resolved_submission_draft) else "single"
+        elif isinstance(output_payload, dict):
+            resolved_task_mode = _normalize_task_mode(output_payload.get("task_mode"))
+
+    if resolved_task_mode == "batch" and isinstance(resolved_submission_draft, dict) and not _submission_draft_is_batch(
         resolved_submission_draft
     ):
         resolved_submission_draft = None
@@ -3186,6 +3106,7 @@ def _build_chat_message_payload(
     if isinstance(resolved_submission_draft, dict):
         combined["type"] = "SUBMISSION_DRAFT"
         combined["submission_draft"] = resolved_submission_draft
+    combined["task_mode"] = resolved_task_mode
 
     recovery_plan, next_step, status = _extract_recovery_payload(
         output_payload if isinstance(output_payload, dict) else None,
@@ -3820,7 +3741,6 @@ async def _execute_chat_turn(
 
             normalized_node_ids = _merge_context_node_ids(context_node_ids, metadata)
             context_nodes = fetch_context_nodes(normalized_node_ids)
-            intent_hints = _extract_intent_hints(user_intent)
             if context_nodes:
                 _update_assistant_message(
                     state,
@@ -3840,8 +3760,6 @@ async def _execute_chat_turn(
                 deps_kwargs["app_state"] = state
             if "context_nodes" in getattr(deps_class, "__annotations__", {}):
                 deps_kwargs["context_nodes"] = context_nodes
-            if "intent_hints" in getattr(deps_class, "__annotations__", {}):
-                deps_kwargs["intent_hints"] = intent_hints
             current_deps = deps_class(**deps_kwargs)
             step_history: list[str] = getattr(current_deps, "step_history", [])
 
@@ -3987,14 +3905,16 @@ async def _execute_chat_turn(
                 output.thought_process = current_deps.step_history
 
             answer_text = str(output.answer) if hasattr(output, "answer") else str(output)
+            output_task_mode = _normalize_task_mode(getattr(output, "task_mode", None))
             message_payload = _build_chat_message_payload(
                 output,
                 current_deps,
                 tool_calls=bridge_tool_calls,
                 answer_text=answer_text,
+                task_mode=output_task_mode,
             )
             if (
-                intent_hints.get("expected_batch")
+                output_task_mode == "batch"
                 and not (
                     isinstance(message_payload, dict)
                     and isinstance(message_payload.get("submission_draft"), dict)

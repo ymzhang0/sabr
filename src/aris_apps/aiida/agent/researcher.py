@@ -916,30 +916,6 @@ def _normalize_structure_pk_list(structure_pks: Sequence[Any]) -> list[int]:
     return normalized
 
 
-def _get_intent_hints(ctx: RunContext[AiiDADeps]) -> dict[str, Any]:
-    raw_hints = getattr(ctx.deps, "intent_hints", None)
-    return dict(raw_hints) if isinstance(raw_hints, Mapping) else {}
-
-
-def _requested_kpoints_distance(ctx: RunContext[AiiDADeps]) -> float | None:
-    raw_value = _get_intent_hints(ctx).get("kpoints_distance")
-    if isinstance(raw_value, bool) or raw_value is None:
-        return None
-    try:
-        return float(raw_value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _intent_requires_batch(ctx: RunContext[AiiDADeps]) -> bool:
-    return bool(_get_intent_hints(ctx).get("expected_batch"))
-
-
-def _requested_structure_count(ctx: RunContext[AiiDADeps]) -> int | None:
-    raw_value = _get_intent_hints(ctx).get("requested_structure_count")
-    return _coerce_positive_int(raw_value)
-
-
 def _merge_nested_mapping(target: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     for raw_key, value in patch.items():
         key = str(raw_key).strip()
@@ -952,15 +928,11 @@ def _merge_nested_mapping(target: dict[str, Any], patch: Mapping[str, Any]) -> d
     return target
 
 
-def _normalize_workchain_request_payload(
-    ctx: RunContext[AiiDADeps],
-    payload: Mapping[str, Any],
-) -> dict[str, Any]:
+def _normalize_workchain_request_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized = copy.deepcopy(dict(payload))
     workchain = str(normalized.get("workchain") or normalized.get("entry_point") or "").strip().lower()
     raw_overrides = normalized.get("overrides")
     overrides = copy.deepcopy(dict(raw_overrides)) if isinstance(raw_overrides, Mapping) else {}
-    requested_kpoints_distance = _requested_kpoints_distance(ctx)
 
     if workchain == "quantumespresso.pw.bands":
         top_level_scf = normalized.pop("scf", None)
@@ -982,47 +954,19 @@ def _normalize_workchain_request_payload(
             if explicit_generic_distance is not None
             else explicit_bands_distance
             if explicit_bands_distance is not None
-            else requested_kpoints_distance
+            else None
         )
         if effective_distance is not None:
             scf_overrides = copy.deepcopy(dict(overrides.get("scf"))) if isinstance(overrides.get("scf"), Mapping) else {}
             scf_overrides.setdefault("kpoints_distance", copy.deepcopy(effective_distance))
             overrides["scf"] = scf_overrides
             overrides.setdefault("bands_kpoints_distance", copy.deepcopy(effective_distance))
-    elif requested_kpoints_distance is not None:
-        overrides.setdefault("kpoints_distance", requested_kpoints_distance)
 
     if overrides:
         normalized["overrides"] = overrides
     elif "overrides" in normalized:
         normalized["overrides"] = {}
     return normalized
-
-
-def _batch_required_response(
-    ctx: RunContext[AiiDADeps],
-    *,
-    workchain: str,
-    attempted_structure_pk: int | None = None,
-) -> dict[str, Any]:
-    requested_count = _requested_structure_count(ctx)
-    count_hint = f"{requested_count} structures" if requested_count is not None else "multiple structures"
-    response = {
-        "error": "Batch submission is required for this request.",
-        "status": "SUBMISSION_BLOCKED",
-        "workchain": workchain,
-        "details": (
-            f"The current request asks for {count_hint}. "
-            "Do not collapse it into a single structure preview."
-        ),
-        "next_step": (
-            "Call submit_new_batch_workflow with the full structure_pks list "
-            "and shared overrides before presenting any [SUBMISSION_DRAFT]."
-        ),
-    }
-    if attempted_structure_pk is not None:
-        response["attempted_structure_pk"] = attempted_structure_pk
-    return response
 
 
 def _set_nested_draft_value(payload: dict[str, Any], path: str, value: Any) -> None:
@@ -1891,16 +1835,8 @@ async def submit_new_workflow(
     protocol_kwargs: dict[str, Any] | None = None,
 ):
     """Draft and validate a new WorkChain; do not submit until user confirmation."""
-    if _intent_requires_batch(ctx):
-        return _batch_required_response(
-            ctx,
-            workchain=workchain,
-            attempted_structure_pk=structure_pk,
-        )
-
     ctx.deps.log_step(f"Preparing workflow for validation: {workchain}")
     request_payload = _normalize_workchain_request_payload(
-        ctx,
         {
             "workchain": workchain,
             "structure_pk": structure_pk,
@@ -1908,7 +1844,7 @@ async def submit_new_workflow(
             "protocol": protocol,
             "overrides": overrides or {},
             **dict(protocol_kwargs or {}),
-        },
+        }
     )
     normalized_overrides = request_payload.get("overrides") if isinstance(request_payload.get("overrides"), Mapping) else {}
     normalized_protocol_kwargs = {
@@ -2030,7 +1966,7 @@ async def submit_new_batch_workflow(
             "error": "Failed to prepare batch workflow requests",
             "details": str(exc),
         }
-    expanded_requests = [_normalize_workchain_request_payload(ctx, request_payload) for request_payload in raw_expanded_requests]
+    expanded_requests = [_normalize_workchain_request_payload(request_payload) for request_payload in raw_expanded_requests]
 
     ctx.deps.log_step(f"Preparing batch workflow for validation: {workchain} ({len(expanded_requests)} jobs)")
 

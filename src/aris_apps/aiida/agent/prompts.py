@@ -17,6 +17,12 @@ SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE = (
     "Present validation results and include the exact [SUBMISSION_DRAFT] JSON block "
     "before waiting for explicit confirmation."
 )
+TASK_MODE_RULE = (
+    "Every response MUST set the structured 'task_mode' field to exactly one of: "
+    "'none', 'single', or 'batch'. Use 'batch' for any multi-structure, parameter-grid, "
+    "or high-throughput preparation request. Use 'single' only for one runnable submission preview. "
+    "Use 'none' for analysis-only or non-submission turns."
+)
 
 REFERENCED_NODES_HEADER = "### REFERENCED AiiDA NODES"
 REFERENCED_NODES_INTRO = "Treat these user-selected nodes as first-class context for this turn:"
@@ -26,6 +32,7 @@ _BASE_OPERATIONAL_RULES: tuple[str, ...] = (
     "ENVIRONMENT SYNC: The aiida-worker bridge is the source of truth for profile, resources, and workflow metadata.",
     "CYCLIC RETRY: If a calculation fails, use 'inspect_process' to read logs, diagnose, and retry with new parameters.",
     "SUGGESTIONS: Always provide 2-3 'Smart Chips' (suggestions) under 5 words in your response.",
+    TASK_MODE_RULE,
     SUBMISSION_DRAFT_REQUIRED_RULE,
     "If a workflow is validated and ready for user confirmation, include a raw JSON block prefixed by '[SUBMISSION_DRAFT]'.",
     f"Format:\n  {SUBMISSION_DRAFT_PREFIX}\n  {SUBMISSION_DRAFT_FORMAT_EXAMPLE}",
@@ -88,6 +95,11 @@ _BASE_TOOLBOX_RULES: tuple[str, ...] = (
     (
         "Do not downgrade multi-structure or parameter-sweep requests into a single submission preview. "
         "If the user asks for multiple structures, you MUST end with submit_new_batch_workflow or explain why batch preparation is blocked."
+    ),
+    (
+        "The structured output is the canonical protocol. Do not rely on natural-language phrases such as "
+        "'this is a batch task' as the only machine-readable signal; set task_mode correctly and keep the "
+        "answer text focused on user-facing guidance."
     ),
     (
         "Workflow selection rule: for equation-of-state, total-energy, magnetic comparison, and cutoff-convergence "
@@ -223,6 +235,7 @@ __all__ = [
     "SUBMISSION_DRAFT_PREFIX",
     "SUBMISSION_DRAFT_REQUIRED_RULE",
     "SUBMISSION_DRAFT_NEXT_STEP_GUIDANCE",
+    "TASK_MODE_RULE",
     "REFERENCED_NODES_HEADER",
     "REFERENCED_NODES_INTRO",
     "REFERENCED_NODES_OMITTED_TEMPLATE",

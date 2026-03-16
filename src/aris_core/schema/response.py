@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -8,6 +8,10 @@ from pydantic import BaseModel, Field, field_validator
 class ARISResponse(BaseModel):
     answer: str = Field(description="Natural language summary of the result.")
     thought_process: List[str] = Field(description="Step-by-step logic summary.")
+    task_mode: Literal["none", "single", "batch"] = Field(
+        default="none",
+        description="Machine-readable task topology marker for this turn.",
+    )
     data_payload: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Raw data resulting from tool calls.",

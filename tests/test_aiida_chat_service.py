@@ -116,6 +116,19 @@ def test_chat_session_snapshot_preserves_environment_python_path() -> None:
     assert snapshot["environment_python_path"] == "/tmp/project/.venv/bin/python"
 
 
+def test_normalize_task_mode_accepts_known_values() -> None:
+    assert chat_service._normalize_task_mode("single") == "single"
+    assert chat_service._normalize_task_mode("batch") == "batch"
+    assert chat_service._normalize_task_mode("none") == "none"
+    assert chat_service._normalize_task_mode("  BATCH ") == "batch"
+
+
+def test_normalize_task_mode_falls_back_to_none_for_unknown_values() -> None:
+    assert chat_service._normalize_task_mode("") == "none"
+    assert chat_service._normalize_task_mode("eos") == "none"
+    assert chat_service._normalize_task_mode(None) == "none"
+
+
 def test_chat_session_snapshot_preserves_active_environment_python_path() -> None:
     snapshot = chat_service._build_chat_session_snapshot(
         {
@@ -318,14 +331,20 @@ def test_inject_context_priority_instruction_adds_primary_scope() -> None:
     assert intent in scoped
 
 
-def test_extract_intent_hints_detects_batch_and_kpoints_distance() -> None:
-    hints = chat_service._extract_intent_hints(
-        "生成 7 个等间距的 Si 结构并执行能带计算，kpoints distance设置为0.5。"
+def test_build_chat_message_payload_includes_structured_task_mode() -> None:
+    output = SimpleNamespace(task_mode="batch", data_payload={"source": "agent"})
+    deps = SimpleNamespace(get_registry_value=lambda _key: None)
+
+    payload = chat_service._build_chat_message_payload(
+        output,
+        deps,
+        tool_calls=None,
+        answer_text="Preparing a batch draft.",
+        task_mode=output.task_mode,
     )
 
-    assert hints["expected_batch"] is True
-    assert hints["requested_structure_count"] == 7
-    assert hints["kpoints_distance"] == 0.5
+    assert payload is not None
+    assert payload["task_mode"] == "batch"
 
 
 def test_summarize_chat_session_batch_progress_counts_terminal_and_active_jobs() -> None:
@@ -491,17 +510,18 @@ def test_build_chat_message_payload_blocks_single_draft_for_batch_intent() -> No
     }
     deps = SimpleNamespace(
         get_registry_value=lambda key: pending if key == "aiida_pending_submission" else None,
-        intent_hints={"expected_batch": True, "requested_structure_count": 7},
     )
-    output = SimpleNamespace(data_payload={"source": "agent"})
+    output = SimpleNamespace(task_mode="batch", data_payload={"source": "agent"})
 
     payload = chat_service._build_chat_message_payload(
         output,
         deps,
         tool_calls=None,
+        task_mode=output.task_mode,
     )
 
     assert payload is not None
+    assert payload["task_mode"] == "batch"
     assert "submission_draft" not in payload
     assert payload["status"] == "SUBMISSION_BLOCKED"
     assert payload["recovery_plan"]["issues"][0]["type"] == "batch_draft_required"

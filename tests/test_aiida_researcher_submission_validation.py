@@ -18,13 +18,11 @@ def _ctx(
     *,
     session_id: str | None = None,
     app_state: object | None = None,
-    intent_hints: dict[str, object] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         deps=AiiDADeps(
             session_id=session_id,
             app_state=app_state,
-            intent_hints=dict(intent_hints or {}),
         )
     )
 
@@ -149,28 +147,7 @@ async def test_submit_new_workflow_validates_before_submission(monkeypatch: pyte
 
 
 @pytest.mark.anyio
-async def test_submit_new_workflow_blocks_single_preview_for_batch_intent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def _fake_draft(*args, **kwargs):  # noqa: ARG001
-        raise AssertionError("draft_workchain_builder should not be called for batch-only intent")
-
-    monkeypatch.setattr(researcher, "draft_workchain_builder", _fake_draft)
-
-    result = await researcher.submit_new_workflow(
-        _ctx(intent_hints={"expected_batch": True, "requested_structure_count": 7}),
-        workchain="quantumespresso.pw.bands",
-        structure_pk=11,
-        code="pw@localhost",
-    )
-
-    assert result["status"] == "SUBMISSION_BLOCKED"
-    assert "Batch submission is required" in result["error"]
-    assert "submit_new_batch_workflow" in result["next_step"]
-
-
-@pytest.mark.anyio
-async def test_submit_new_workflow_applies_bands_kpoints_hint(
+async def test_submit_new_workflow_applies_explicit_bands_kpoints_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -205,10 +182,11 @@ async def test_submit_new_workflow_applies_bands_kpoints_hint(
     monkeypatch.setattr(researcher, "validate_job", _fake_validate)
 
     result = await researcher.submit_new_workflow(
-        _ctx(intent_hints={"kpoints_distance": 0.5}),
+        _ctx(),
         workchain="quantumespresso.pw.bands",
         structure_pk=11,
         code="pw@localhost",
+        protocol_kwargs={"kpoints_distance": 0.5},
     )
 
     assert result["status"] == "SUBMISSION_DRAFT"
