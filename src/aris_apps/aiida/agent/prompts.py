@@ -31,6 +31,11 @@ SUBMISSION_REQUEST_RULE = (
     "For sweeps derived from one or more seed structures, still use mode='batch' with the relevant structure_pks list "
     "and an explicit parameter_grid. Let the model decide the parameter space; do not hardcode workflow categories in the protocol."
 )
+PREVIEW_NARRATIVE_RULE = (
+    "When you present a submission preview to the user, explicitly say whether it is a 'Single job preview' or a "
+    "'Batch job preview'. For batch previews, also summarize the shared inputs and the varying dimensions or matrix "
+    "axes in plain language before the [SUBMISSION_DRAFT] block."
+)
 
 REFERENCED_NODES_HEADER = "### REFERENCED AiiDA NODES"
 REFERENCED_NODES_INTRO = "Treat these user-selected nodes as first-class context for this turn:"
@@ -42,6 +47,7 @@ _BASE_OPERATIONAL_RULES: tuple[str, ...] = (
     "SUGGESTIONS: Always provide 2-3 'Smart Chips' (suggestions) under 5 words in your response.",
     TASK_MODE_RULE,
     SUBMISSION_REQUEST_RULE,
+    PREVIEW_NARRATIVE_RULE,
     SUBMISSION_DRAFT_REQUIRED_RULE,
     "If a workflow is validated and ready for user confirmation, include a raw JSON block prefixed by '[SUBMISSION_DRAFT]'.",
     f"Format:\n  {SUBMISSION_DRAFT_PREFIX}\n  {SUBMISSION_DRAFT_FORMAT_EXAMPLE}",

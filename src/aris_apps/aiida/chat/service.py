@@ -2825,6 +2825,87 @@ def _extract_actionable_submission_draft(
     return None
 
 
+def _build_submission_preview_overview(
+    submission_draft: dict[str, Any],
+    *,
+    preferred_mode: str | None = None,
+) -> dict[str, Any]:
+    meta = submission_draft.get("meta") if isinstance(submission_draft.get("meta"), dict) else {}
+    batch_aggregation = (
+        submission_draft.get("batch_aggregation")
+        if isinstance(submission_draft.get("batch_aggregation"), dict)
+        else meta.get("batch_aggregation")
+        if isinstance(meta.get("batch_aggregation"), dict)
+        else {}
+    )
+    raw_draft = meta.get("draft")
+    raw_job_count = _coerce_positive_int(meta.get("job_count"))
+    job_count = raw_job_count
+    if job_count is None and isinstance(raw_draft, list):
+        job_count = len([item for item in raw_draft if isinstance(item, dict)]) or None
+    if job_count is None and isinstance(batch_aggregation.get("items"), list):
+        job_count = len([item for item in batch_aggregation["items"] if isinstance(item, dict)]) or None
+    if job_count is None and isinstance(meta.get("structure_pks"), list):
+        job_count = len([item for item in meta["structure_pks"] if _coerce_positive_int(item) is not None]) or None
+
+    varying_paths: list[str] = []
+    raw_variable_paths = batch_aggregation.get("variable_paths")
+    if isinstance(raw_variable_paths, list):
+        varying_paths = [
+            str(path).strip()
+            for path in raw_variable_paths
+            if isinstance(path, str) and str(path).strip()
+        ]
+    if not varying_paths and isinstance(batch_aggregation.get("items"), list):
+        seen_varying: set[str] = set()
+        for item in batch_aggregation["items"]:
+            diff = item.get("diff") if isinstance(item, dict) and isinstance(item.get("diff"), dict) else {}
+            for path in _flatten_input_values(diff).keys():
+                cleaned = str(path).strip()
+                if cleaned:
+                    seen_varying.add(cleaned)
+        varying_paths = sorted(seen_varying)
+
+    common_inputs = (
+        batch_aggregation.get("common")
+        if isinstance(batch_aggregation.get("common"), dict)
+        else submission_draft.get("inputs")
+        if isinstance(submission_draft.get("inputs"), dict)
+        else {}
+    )
+    shared_paths = [path for path in sorted(_flatten_input_values(common_inputs).keys()) if str(path).strip()]
+
+    mode = preferred_mode if preferred_mode in {"single", "batch"} else None
+    if mode is None:
+        mode = "batch" if _submission_draft_is_batch(submission_draft) else "single"
+    if mode == "single" and job_count and job_count > 1:
+        mode = "batch"
+
+    return {
+        "mode": mode,
+        "job_count": job_count or 1,
+        "shared_paths": shared_paths,
+        "varying_paths": varying_paths,
+        "shared_count": len(shared_paths),
+        "varying_count": len(varying_paths),
+    }
+
+
+def _apply_submission_preview_overview(
+    submission_draft: dict[str, Any],
+    *,
+    preferred_mode: str | None = None,
+) -> dict[str, Any]:
+    meta = submission_draft.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+        submission_draft["meta"] = meta
+    overview = _build_submission_preview_overview(submission_draft, preferred_mode=preferred_mode)
+    meta["preview_mode"] = overview["mode"]
+    meta["preview_overview"] = overview
+    return submission_draft
+
+
 def _strip_submission_draft_tail(answer_text: str | None) -> str:
     text = str(answer_text or "")
     if not text.strip():
@@ -2951,11 +3032,14 @@ def _normalize_submission_draft_payload(
         "advanced_settings": advanced_settings,
         "meta": meta,
     }
+    raw_batch_aggregation = raw_submission_draft.get("batch_aggregation")
+    if isinstance(raw_batch_aggregation, dict):
+        payload["batch_aggregation"] = raw_batch_aggregation
     if isinstance(raw_all_inputs, dict):
         payload["all_inputs"] = raw_all_inputs
     if isinstance(raw_input_groups, list):
         payload["input_groups"] = raw_input_groups
-    return enrich_submission_draft_payload(payload)
+    return _apply_submission_preview_overview(enrich_submission_draft_payload(payload))
 
 
 def _build_submission_draft_payload(
@@ -2995,7 +3079,7 @@ def _build_submission_draft_payload(
         "advanced_settings": advanced_settings,
         "meta": meta,
     }
-    return enrich_submission_draft_payload(payload)
+    return _apply_submission_preview_overview(enrich_submission_draft_payload(payload))
 
 
 def _extract_balanced_json_object(fragment: str) -> str | None:
@@ -3249,6 +3333,12 @@ def _build_chat_message_payload(
             resolved_task_mode = "batch" if _submission_draft_is_batch(resolved_submission_draft) else "single"
         elif isinstance(output_payload, dict):
             resolved_task_mode = _normalize_task_mode(output_payload.get("task_mode"))
+
+    if isinstance(resolved_submission_draft, dict):
+        resolved_submission_draft = _apply_submission_preview_overview(
+            resolved_submission_draft,
+            preferred_mode=resolved_task_mode,
+        )
 
     if resolved_task_mode == "batch" and isinstance(resolved_submission_draft, dict) and not _submission_draft_is_batch(
         resolved_submission_draft

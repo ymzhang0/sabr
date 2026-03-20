@@ -84,6 +84,15 @@ type SubmissionBatchAggregation = {
   variation_count?: number;
 };
 
+type SubmissionPreviewOverview = {
+  mode?: "single" | "batch" | string;
+  job_count?: number | null;
+  shared_paths?: string[];
+  varying_paths?: string[];
+  shared_count?: number | null;
+  varying_count?: number | null;
+};
+
 export type SubmissionValidationSummary = {
   status?: string;
   is_valid?: boolean;
@@ -135,6 +144,9 @@ export type SubmissionDraftPayload = {
     available_codes?: SubmissionAvailableCode[] | null;
     required_code_plugin?: string | null;
     port_spec?: SubmissionPortSpec | null;
+    job_count?: number | null;
+    preview_mode?: "single" | "batch" | string | null;
+    preview_overview?: SubmissionPreviewOverview | null;
   };
 };
 
@@ -239,6 +251,31 @@ export function resolveSubmitDraftFromPreviewPayload(
   }
 
   return inputs;
+}
+
+function normalizePreviewOverview(value: unknown): SubmissionPreviewOverview | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const sharedPaths = Array.isArray(record.shared_paths)
+    ? record.shared_paths
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+    : [];
+  const varyingPaths = Array.isArray(record.varying_paths)
+    ? record.varying_paths
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+    : [];
+  return {
+    mode: typeof record.mode === "string" && record.mode.trim() ? record.mode.trim() : undefined,
+    job_count: toPositiveInteger(record.job_count),
+    shared_paths: sharedPaths,
+    varying_paths: varyingPaths,
+    shared_count: toPositiveInteger(record.shared_count),
+    varying_count: toPositiveInteger(record.varying_count),
+  };
 }
 
 function toPositiveInteger(value: unknown): number | null {
@@ -2901,11 +2938,30 @@ export function SubmissionModal({
     () => (submissionDraft ? extractBatchJobRows(submissionDraft) : []),
     [submissionDraft],
   );
-  const isBatchDraft = batchJobs.length > 1;
+  const previewOverview = useMemo(
+    () => normalizePreviewOverview(submissionDraft?.meta.preview_overview),
+    [submissionDraft?.meta.preview_overview],
+  );
+  const explicitPreviewMode =
+    submissionDraft?.meta.preview_mode === "batch"
+      ? "batch"
+      : submissionDraft?.meta.preview_mode === "single"
+        ? "single"
+        : null;
   const batchAggregation = useMemo(
     () => (submissionDraft ? resolveBatchAggregation(submissionDraft, batchJobs) : null),
     [batchJobs, submissionDraft],
   );
+  const inferredBatchJobCount =
+    batchJobs.length ||
+    toPositiveInteger(submissionDraft?.meta.job_count) ||
+    toPositiveInteger(batchAggregation?.item_count) ||
+    toPositiveInteger(previewOverview?.job_count) ||
+    0;
+  const isBatchDraft =
+    explicitPreviewMode === "batch" ||
+    batchJobs.length > 1 ||
+    inferredBatchJobCount > 1;
   const batchCommonSource = useMemo<Record<string, unknown>>(
     () => (asRecord(batchAggregation?.common) ?? asRecord(submissionDraft?.inputs) ?? {}),
     [batchAggregation?.common, submissionDraft?.inputs],
@@ -3027,6 +3083,15 @@ export function SubmissionModal({
       batchVariationDiffs,
     );
   }, [batchAggregation?.items, batchAggregation?.variable_paths, batchVariationDiffs]);
+  const batchJobCount = inferredBatchJobCount > 0 ? inferredBatchJobCount : batchJobs.length;
+  const batchSharedPathCount =
+    previewOverview?.shared_count && previewOverview.shared_count > 0
+      ? previewOverview.shared_count
+      : batchCommonEntries.length;
+  const batchVaryingPathCount =
+    previewOverview?.varying_count && previewOverview.varying_count > 0
+      ? previewOverview.varying_count
+      : batchVariationPaths.length;
   const selectedBatchJobs = useMemo(
     () => batchJobs.filter((job) => selectedBatchIds.includes(job.id)),
     [batchJobs, selectedBatchIds],
@@ -3671,13 +3736,13 @@ export function SubmissionModal({
       {
         id: "tasks",
         label: "Tasks",
-        value: batchJobs.length,
+        value: batchJobCount,
         tone: "info",
       },
       {
         id: "selected",
         label: "Selected",
-        value: `${selectedBatchJobs.length}/${batchJobs.length}`,
+        value: `${selectedBatchJobs.length}/${batchJobCount}`,
       },
       {
         id: "time",
@@ -3712,10 +3777,10 @@ export function SubmissionModal({
     ? [
       {
         id: "structures",
-        label: "Structures",
+        label: "Batch Scope",
         icon: Box,
-        value: <span>{batchJobs.length} linked tasks</span>,
-        helper: `${selectedBatchJobs.length}/${batchJobs.length} selected for submission`,
+        value: <span>{batchJobCount} linked tasks</span>,
+        helper: `${selectedBatchJobs.length}/${batchJobCount} selected for submission`,
       },
       {
         id: "code",
@@ -3761,15 +3826,26 @@ export function SubmissionModal({
             : null,
       },
       {
-        id: "resources",
-        label: "Resources",
+        id: "shared",
+        label: "Shared Inputs",
         icon: Server,
-        value: <span>{batchResourceSummary}</span>,
+        value: <span>{batchSharedPathCount} shared paths</span>,
+        helper: batchResourceSummary,
+      },
+      {
+        id: "varying",
+        label: "Variation Matrix",
+        icon: FolderTree,
+        value: <span>{batchVaryingPathCount} varying paths</span>,
+        helper:
+          batchVariationPaths.length > 0
+            ? batchVariationPaths.slice(0, 3).join(", ")
+            : "No varying paths detected",
       },
       {
         id: "workdir",
         label: "Workdir",
-        icon: FolderTree,
+        icon: Folder,
         value: targetWorkdirPath
           ? renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true)
           : renderPreviewFallback("Not available"),
@@ -4050,7 +4126,7 @@ export function SubmissionModal({
             </div>
           ) : null}
           <PreviewCard
-            eyebrow="Submission Review"
+            eyebrow={isBatchDraft ? "Batch Submission Review" : "Submission Review"}
             title={submissionDraft.process_label}
             badges={previewHeaderBadges}
             actions={previewHeaderActions}
@@ -4078,25 +4154,25 @@ export function SubmissionModal({
                         Batch Summary
                       </p>
                       <h3 className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">
-                        {batchJobs.length} linked tasks ready for submission
+                        {batchJobCount} linked tasks ready for submission
                       </h3>
                       <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-                        Shared resources: {batchResourceSummary}
+                        Shared inputs: {batchSharedPathCount} paths. Varying dimensions: {batchVaryingPathCount}.
                       </p>
                     </div>
                     <span className="inline-flex rounded-full bg-blue-600 px-3 py-1 text-xs font-semibold text-white shadow-sm dark:bg-blue-500">
-                      Batch: {batchJobs.length} Tasks
+                      Batch: {batchJobCount} Tasks
                     </span>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
                     <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
-                      {selectedBatchJobs.length}/{batchJobs.length} selected
+                      {selectedBatchJobs.length}/{batchJobCount} selected
                     </span>
                     <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
-                      {batchCommonEntries.length} shared parameters
+                      {batchSharedPathCount} shared parameters
                     </span>
                     <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
-                      {batchVariationPaths.length} varying fields
+                      {batchVaryingPathCount} varying fields
                     </span>
                     <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
                       Time Est.: {runtimeSummary}
@@ -4112,12 +4188,12 @@ export function SubmissionModal({
                       </p>
                       <p className="mt-1 text-sm text-slate-700 dark:text-slate-200">
                         {batchVariationPaths.length > 0
-                          ? `${batchVariationPaths.length} varying fields across ${batchJobs.length} tasks`
+                          ? `${batchVariationPaths.length} varying fields across ${batchJobCount} tasks`
                           : "No variable inputs detected across the selected tasks."}
                       </p>
                     </div>
                     <span className="text-xs text-slate-500 dark:text-slate-400">
-                      {selectedBatchJobs.length}/{batchJobs.length} selected
+                      {selectedBatchJobs.length}/{batchJobCount} selected
                     </span>
                   </div>
                   <div className="minimal-scrollbar max-h-[360px] overflow-auto">
@@ -4252,16 +4328,26 @@ export function SubmissionModal({
 
             <div className={cn(isProtocolBuilder ? "mt-4" : "mt-3")}>
               <PreviewCardSection
-                title="Builder Port Hierarchy"
+                title={isBatchDraft ? "Shared Builder Ports" : "Builder Port Hierarchy"}
                 hint={
-                  protocolHint ? (
+                  isBatchDraft ? (
+                    <span className="text-[10px] tracking-normal text-slate-500 dark:text-slate-400">
+                      Shared ports are shown here. Use the variation matrix above for per-job differences.
+                    </span>
+                  ) : protocolHint ? (
                     <span className="font-mono text-[10px] tracking-normal">Protocol Call: {protocolHint}</span>
                   ) : null
                 }
                 stats={[
-                  { id: "recommended", value: `${recommendedDraftFields.length} recommended` },
-                  { id: "editable", value: `${allDraftFields.length} editable ports` },
-                  { id: "groups", value: `${groupedInputSections.length} spec groups` },
+                  isBatchDraft
+                    ? { id: "shared", value: `${batchSharedPathCount} shared paths` }
+                    : { id: "recommended", value: `${recommendedDraftFields.length} recommended` },
+                  isBatchDraft
+                    ? { id: "varying", value: `${batchVaryingPathCount} varying paths` }
+                    : { id: "editable", value: `${allDraftFields.length} editable ports` },
+                  isBatchDraft
+                    ? { id: "jobs", value: `${batchJobCount} batch jobs` }
+                    : { id: "groups", value: `${groupedInputSections.length} spec groups` },
                 ]}
               >
                 <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">

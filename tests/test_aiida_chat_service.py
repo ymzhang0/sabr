@@ -788,6 +788,14 @@ def test_normalize_submission_draft_payload_derives_batch_submit_draft_from_jobs
         {
             "process_label": "quantumespresso.pw.base",
             "inputs": {"kpoints_distance": 0.3},
+            "batch_aggregation": {
+                "common": {"kpoints_distance": 0.3},
+                "items": [
+                    {"label": "Structure #6", "diff": {"structure": {"pk": 6}}},
+                    {"label": "Structure #7", "diff": {"structure": {"pk": 7}}},
+                ],
+                "variable_paths": ["structure"],
+            },
             "jobs": [
                 {
                     "workchain": "quantumespresso.pw.base",
@@ -812,6 +820,10 @@ def test_normalize_submission_draft_payload_derives_batch_submit_draft_from_jobs
     assert isinstance(normalized["meta"]["draft"], list)
     assert normalized["meta"]["draft"][0]["structure_pk"] == 6
     assert normalized["meta"]["draft"][1]["structure_pk"] == 7
+    assert normalized["meta"]["preview_mode"] == "batch"
+    assert normalized["meta"]["preview_overview"]["job_count"] == 2
+    assert normalized["meta"]["preview_overview"]["varying_paths"] == ["structure"]
+    assert normalized["batch_aggregation"]["variable_paths"] == ["structure"]
 
 
 def test_build_user_message_payload_keeps_context_nodes() -> None:
