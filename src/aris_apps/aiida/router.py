@@ -2249,9 +2249,10 @@ async def frontend_processes_stream(
     limit: int = Query(default=15, ge=1, le=100),
     group_label: str | None = Query(default=None),
     node_type: str | None = Query(default=None),
+    root_only: bool = Query(default=True),
 ):
     try:
-        _get_frontend_nodes(limit=1, group_label=group_label, node_type=node_type)
+        _get_frontend_nodes(limit=1, group_label=group_label, node_type=node_type, root_only=root_only)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -2267,7 +2268,7 @@ async def frontend_processes_stream(
 
             try:
                 processes = _serialize_processes(
-                    _get_frontend_nodes(limit=limit, group_label=group_label, node_type=node_type)
+                    _get_frontend_nodes(limit=limit, group_label=group_label, node_type=node_type, root_only=root_only)
                 )
                 digest = hashlib.sha1(json.dumps(processes, sort_keys=True).encode("utf-8")).hexdigest()
                 now = time.monotonic()

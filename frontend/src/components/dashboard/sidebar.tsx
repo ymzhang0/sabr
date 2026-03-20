@@ -132,6 +132,13 @@ function canInspectNode(process: ProcessItem): boolean {
   return PROCESS_LIKE_NODE_TYPES.has(process.node_type) || DATA_NODE_TYPES.has(process.node_type);
 }
 
+function isTaskNode(process: ProcessItem): boolean {
+  if (process.process_state !== null) {
+    return true;
+  }
+  return PROCESS_LIKE_NODE_TYPES.has(process.node_type);
+}
+
 function canCloneNode(process: ProcessItem): boolean {
   const nodeType = String(process.node_type || "").trim();
   if (!nodeType) {
@@ -719,7 +726,7 @@ export function Sidebar({
       }
       // Type Toggle
       if (nodeTypeFilter === "structures" && !isStructureNode(proc)) return false;
-      if (nodeTypeFilter === "tasks" && !canInspectNode(proc)) return false;
+      if (nodeTypeFilter === "tasks" && !isTaskNode(proc)) return false;
       if (nodeTypeFilter === "failed") {
         const normalized = normalizeState(proc.process_state || proc.state);
         if (!FAILED_PROCESS_STATES.has(normalized)) return false;

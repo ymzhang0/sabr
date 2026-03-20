@@ -321,9 +321,10 @@ export async function getProcesses(
   nodeType?: string,
   label?: string,
   processState?: string,
+  rootOnly = true,
 ): Promise<ProcessesResponse> {
   const { data } = await frontendApi.get<ProcessesResponse>("/processes", {
-    params: { limit, group_label: groupLabel, node_type: nodeType, label, process_state: processState },
+    params: { limit, group_label: groupLabel, node_type: nodeType, label, process_state: processState, root_only: rootOnly },
   });
   return data;
 }

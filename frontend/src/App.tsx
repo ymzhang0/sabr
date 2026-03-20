@@ -231,6 +231,10 @@ function resolveProcessNodeType(nodeTypeFilter: string): string | undefined {
   return undefined;
 }
 
+function resolveProcessRootOnly(_nodeTypeFilter: string): boolean {
+  return false;
+}
+
 function dedupeFocusNodes(nodes: FocusNode[]): FocusNode[] {
   const seen = new Set<number>();
   return nodes.filter((node) => {
@@ -695,7 +699,14 @@ export default function App() {
   const processesQuery = useQuery({
     queryKey: ["processes", selectedGroup, selectedGroupLabel, processLimit, nodeTypeFilter],
     queryFn: () => {
-      return getProcesses(processLimit, selectedGroupLabel ?? undefined, resolveProcessNodeType(nodeTypeFilter));
+      return getProcesses(
+        processLimit,
+        selectedGroupLabel ?? undefined,
+        resolveProcessNodeType(nodeTypeFilter),
+        undefined,
+        undefined,
+        resolveProcessRootOnly(nodeTypeFilter),
+      );
     },
     enabled: bootstrapQuery.isSuccess,
     refetchInterval: 60_000,
@@ -884,6 +895,9 @@ export default function App() {
     const resolvedNodeType = resolveProcessNodeType(nodeTypeFilter);
     if (resolvedNodeType) {
       searchParams.set("node_type", resolvedNodeType);
+    }
+    if (!resolveProcessRootOnly(nodeTypeFilter)) {
+      searchParams.set("root_only", "false");
     }
 
     const streamUrl = searchParams.size > 0
