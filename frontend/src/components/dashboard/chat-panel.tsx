@@ -9,6 +9,7 @@ import {
   type SubmissionModalState,
   type SubmissionDraftPayload,
   type SubmissionSubmitDraft,
+  resolveSubmitDraftFromPreviewPayload,
 } from "@/components/dashboard/submission-modal";
 import { ThinkingIndicator, type ProcessLogEntry } from "@/components/dashboard/thinking-indicator";
 import { Button } from "@/components/ui/button";
@@ -233,18 +234,7 @@ function normalizeSubmissionDraftPreview(rawSubmissionDraft: Record<string, unkn
       : "AiiDA Workflow";
   const inputs = asRecord(rawSubmissionDraft.inputs) ?? {};
   const metaRecord = asRecord(rawSubmissionDraft.meta) ?? {};
-  const batchCandidates = [
-    metaRecord.draft,
-    rawSubmissionDraft.jobs,
-    rawSubmissionDraft.tasks,
-    rawSubmissionDraft.submissions,
-    rawSubmissionDraft.drafts,
-  ];
-  const submitDraftArray = batchCandidates
-    .map((candidate) => toRecordArray(candidate))
-    .find((candidate) => candidate.length > 0);
-  const submitDraftRecord = asRecord(metaRecord.draft);
-  const submitDraft: SubmissionSubmitDraft = submitDraftArray ?? submitDraftRecord ?? inputs;
+  const submitDraft: SubmissionSubmitDraft = resolveSubmitDraftFromPreviewPayload(rawSubmissionDraft);
   const rawPrimaryInputs = asRecord(rawSubmissionDraft.primary_inputs);
   const rawRecommendedInputs =
     asRecord(rawSubmissionDraft.recommended_inputs) ??

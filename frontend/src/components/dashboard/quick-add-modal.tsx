@@ -515,13 +515,16 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
-                <header className="px-6 py-4 border-b border-zinc-100 dark:border-zinc-900 flex items-center justify-between">
+            <div className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-[28px] shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
+                <header className="px-6 py-5 border-b border-zinc-100 dark:border-zinc-900 flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <div className="p-2 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
+                        <div className="p-2 bg-slate-100 dark:bg-zinc-900 rounded-2xl">
                             <Plus className="h-5 w-5 text-zinc-600 dark:text-zinc-400" />
                         </div>
-                        <h2 className="text-xl font-semibold tracking-tight">Quick Add Infrastructure</h2>
+                        <div>
+                            <h2 className="text-xl font-semibold tracking-tight">Create Computer</h2>
+                            <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Parse an SSH snippet or review the form before saving.</p>
+                        </div>
                     </div>
                     <Button variant="ghost" size="icon" onClick={onClose}>
                         <X className="h-5 w-5" />
@@ -616,152 +619,175 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                         <div className="space-y-6 animate-in slide-in-from-right-2 duration-300">
                                 <div className="space-y-6">
                                     {parseResult.preset_matched && (
-                                        <div className="bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-xl p-4 flex gap-3 animate-in fade-in zoom-in-95">
+                                        <div className="rounded-2xl bg-emerald-50/90 p-4 dark:bg-emerald-950/30 animate-in fade-in zoom-in-95">
+                                          <div className="flex gap-3">
                                             <Sparkles className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                                             <div>
                                                 <h4 className="text-sm font-semibold text-emerald-800 dark:text-emerald-300">Preset Applied Automatically</h4>
                                                 <p className="text-sm text-emerald-700 dark:text-emerald-400 mt-1">
-                                                    Identified domain <code className="font-mono text-xs bg-emerald-100 dark:bg-emerald-900/50 px-1 py-0.5 rounded">{parseResult.preset_domain}</code>. Known parameters have been pre-filled. You can review them in Advanced Settings.
+                                                    Identified domain <code className="font-mono text-xs bg-emerald-100 dark:bg-emerald-900/50 px-1 py-0.5 rounded">{parseResult.preset_domain}</code>. Known parameters have been pre-filled. Review execution details under Advanced Configuration if needed.
                                                 </p>
                                             </div>
+                                          </div>
                                         </div>
                                     )}
                                     {parseResult.computer && (
-                                        <div className="p-4 bg-zinc-50 dark:bg-zinc-900/30 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-4">
+                                        <div className="rounded-2xl bg-slate-50/90 p-5 dark:bg-zinc-900/40 space-y-5">
                                             <div className="flex items-center gap-2 text-zinc-500">
                                                 <Cpu className="h-4 w-4" />
-                                                <span className="text-xs font-bold uppercase tracking-wider">Basic Configuration</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider">Computer Setup</span>
                                             </div>
-                                            <div className="grid grid-cols-2 gap-4">
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Label</label>
-                                                    <input
-                                                        value={parseResult.computer.label || ""}
-                                                        onChange={(e) => updateComputer({ label: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Hostname</label>
-                                                    <input
-                                                        value={parseResult.computer.hostname || ""}
-                                                        onChange={(e) => updateComputer({ hostname: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1 col-span-2">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Description</label>
-                                                    <input
-                                                        value={parseResult.computer.description || ""}
-                                                        onChange={(e) => updateComputer({ description: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Transport Type</label>
-                                                    <select
-                                                        value={selectedTransport}
-                                                        onChange={(e) => handleTransportChange(e.target.value)}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    >
-                                                        {availableTransports.map((transport) => (
-                                                            <option key={transport} value={transport}>{transport}</option>
-                                                        ))}
-                                                    </select>
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Scheduler Type</label>
-                                                    <input
-                                                        value={parseResult.computer.scheduler_type || ""}
-                                                        onChange={(e) => updateComputer({ scheduler_type: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">User Email</label>
-                                                    <input
-                                                        value={parseResult.computer.user || ""}
-                                                        onChange={(e) => updateComputer({ user: e.target.value })}
-                                                        placeholder="Optional AiiDA user email"
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                {isAsyncTransport ? (
-                                                    <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Host</label>
-                                                        <input
-                                                            value={parseResult.computer.host || ""}
-                                                            onChange={(e) => updateComputer({ host: e.target.value })}
-                                                            placeholder="Host entry from ~/.ssh/config"
-                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                        />
+                                            <div className="space-y-5">
+                                                <div className="space-y-3">
+                                                    <div>
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-zinc-400">Identity</p>
+                                                        <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400">Core naming fields for the computer entry.</p>
                                                     </div>
-                                                ) : !isLocalTransport ? (
-                                                    <div className="space-y-1">
-                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Username</label>
-                                                        <input
-                                                            value={parseResult.computer.username || ""}
-                                                            onChange={(e) => updateComputer({ username: e.target.value })}
-                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                        />
+                                                    <div className="grid grid-cols-2 gap-x-4 gap-y-5">
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-400">Label</label>
+                                                            <input
+                                                                value={parseResult.computer.label || ""}
+                                                                onChange={(e) => updateComputer({ label: e.target.value })}
+                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-400">Description</label>
+                                                            <input
+                                                                value={parseResult.computer.description || ""}
+                                                                onChange={(e) => updateComputer({ description: e.target.value })}
+                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                            />
+                                                        </div>
                                                     </div>
-                                                ) : (
-                                                    <div className="rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
-                                                        Local transport does not require remote SSH authentication fields.
+                                                </div>
+
+                                                <div className="space-y-3">
+                                                    <div>
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-zinc-400">Technical</p>
+                                                        <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400">Connection mode, scheduler, and remote identity.</p>
                                                     </div>
-                                                )}
-                                                <div className="space-y-1 col-span-2">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Work Directory</label>
-                                                    <input
-                                                        value={parseResult.computer.work_dir || ""}
-                                                        onChange={(e) => updateComputer({ work_dir: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Procs / Machine</label>
-                                                    <input
-                                                        type="number"
-                                                        value={parseResult.computer.mpiprocs_per_machine || ""}
-                                                        onChange={(e) => updateComputer({ mpiprocs_per_machine: parseInt(e.target.value, 10) || 1 })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">Default Memory / Machine (kB)</label>
-                                                    <input
-                                                        type="number"
-                                                        value={parseResult.computer.default_memory_per_machine ?? ""}
-                                                        onChange={(e) => updateComputer({ default_memory_per_machine: e.target.value ? parseInt(e.target.value, 10) || null : null })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
-                                                </div>
-                                                <div className="space-y-1 col-span-2">
-                                                    <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Run Command</label>
-                                                    <input
-                                                        value={parseResult.computer.mpirun_command || ""}
-                                                        onChange={(e) => updateComputer({ mpirun_command: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
-                                                    />
+                                                    <div className="grid grid-cols-2 gap-x-4 gap-y-5">
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-400">Hostname</label>
+                                                            <input
+                                                                value={parseResult.computer.hostname || ""}
+                                                                onChange={(e) => updateComputer({ hostname: e.target.value })}
+                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-400">Transport</label>
+                                                            <select
+                                                                value={selectedTransport}
+                                                                onChange={(e) => handleTransportChange(e.target.value)}
+                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                            >
+                                                                {availableTransports.map((transport) => (
+                                                                    <option key={transport} value={transport}>{transport}</option>
+                                                                ))}
+                                                            </select>
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-400">Scheduler</label>
+                                                            <input
+                                                                value={parseResult.computer.scheduler_type || ""}
+                                                                onChange={(e) => updateComputer({ scheduler_type: e.target.value })}
+                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1.5">
+                                                            <label className="text-[10px] uppercase font-bold text-zinc-400">User Email</label>
+                                                            <input
+                                                                value={parseResult.computer.user || ""}
+                                                                onChange={(e) => updateComputer({ user: e.target.value })}
+                                                                placeholder="Optional AiiDA user email"
+                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                            />
+                                                        </div>
+                                                        {isAsyncTransport ? (
+                                                            <div className="space-y-1.5">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Host</label>
+                                                                <input
+                                                                    value={parseResult.computer.host || ""}
+                                                                    onChange={(e) => updateComputer({ host: e.target.value })}
+                                                                    placeholder="Host entry from ~/.ssh/config"
+                                                                    className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                                />
+                                                            </div>
+                                                        ) : !isLocalTransport ? (
+                                                            <div className="space-y-1.5">
+                                                                <label className="text-[10px] uppercase font-bold text-zinc-400">Username</label>
+                                                                <input
+                                                                    value={parseResult.computer.username || ""}
+                                                                    onChange={(e) => updateComputer({ username: e.target.value })}
+                                                                    className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                                />
+                                                            </div>
+                                                        ) : (
+                                                            <div className="col-span-2 rounded-xl bg-white/80 px-3.5 py-3 text-xs text-zinc-500 dark:bg-zinc-950/80 dark:text-zinc-400">
+                                                                Local transport does not require remote SSH authentication fields.
+                                                            </div>
+                                                        )}
+                                                    </div>
                                                 </div>
                                             </div>
 
                                             {isAsyncTransport && (
-                                                <div className="rounded-lg border border-amber-200/70 bg-amber-50/80 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300">
+                                                <div className="rounded-xl bg-amber-50/90 px-3.5 py-3 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
                                                     <span className="font-semibold">core.ssh_async</span> follows the AiiDA async SSH configure model: <code className="font-mono">Host</code> must match an entry in <code className="font-mono">~/.ssh/config</code>, and sync-only fields like <code className="font-mono">username</code>, <code className="font-mono">port</code>, or <code className="font-mono">proxy_jump</code> do not apply.
                                                 </div>
                                             )}
 
                                             <button
                                                 onClick={() => setShowAdvanced(!showAdvanced)}
-                                                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 pt-2 transition-colors"
+                                                className="flex items-center gap-1 text-xs font-semibold text-blue-600 hover:text-blue-700 dark:text-blue-400 pt-1 transition-colors"
                                             >
                                                 {showAdvanced ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                                                {showAdvanced ? "Hide Advanced Settings" : "Show Advanced Settings"}
+                                                {showAdvanced ? "Hide Advanced Configuration" : "Show Advanced Configuration"}
                                             </button>
 
                                             {showAdvanced && (
-                                                <div className="grid grid-cols-2 gap-4 pt-4 border-t border-zinc-200 dark:border-zinc-800 animate-in slide-in-from-top-2 duration-200">
+                                                <div className="grid grid-cols-2 gap-x-4 gap-y-5 pt-4 border-t border-slate-200 dark:border-zinc-800 animate-in slide-in-from-top-2 duration-200">
+                                                    <div className="col-span-2">
+                                                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-zinc-400">Execution</p>
+                                                        <p className="mt-1 text-xs text-slate-500 dark:text-zinc-400">Working directory, MPI defaults, and runtime shell options.</p>
+                                                    </div>
+                                                    <div className="space-y-1.5 col-span-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Work Directory</label>
+                                                        <input
+                                                            value={parseResult.computer.work_dir || ""}
+                                                            onChange={(e) => updateComputer({ work_dir: e.target.value })}
+                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                        />
+                                                    </div>
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Procs / Machine</label>
+                                                        <input
+                                                            type="number"
+                                                            value={parseResult.computer.mpiprocs_per_machine || ""}
+                                                            onChange={(e) => updateComputer({ mpiprocs_per_machine: parseInt(e.target.value, 10) || 1 })}
+                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                        />
+                                                    </div>
+                                                    <div className="space-y-1.5">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">Default Memory / Machine (kB)</label>
+                                                        <input
+                                                            type="number"
+                                                            value={parseResult.computer.default_memory_per_machine ?? ""}
+                                                            onChange={(e) => updateComputer({ default_memory_per_machine: e.target.value ? parseInt(e.target.value, 10) || null : null })}
+                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                        />
+                                                    </div>
+                                                    <div className="space-y-1.5 col-span-2">
+                                                        <label className="text-[10px] uppercase font-bold text-zinc-400">MPI Run Command</label>
+                                                        <input
+                                                            value={parseResult.computer.mpirun_command || ""}
+                                                            onChange={(e) => updateComputer({ mpirun_command: e.target.value })}
+                                                            className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                        />
+                                                    </div>
                                                     <div className="space-y-1">
                                                         <label className="text-[10px] uppercase font-bold text-zinc-400">Shebang</label>
                                                         <input value={parseResult.computer.shebang || ""} onChange={(e) => updateComputer({ shebang: e.target.value })} className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400" />
@@ -910,12 +936,12 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                     )}
 
                                     {parseResult.code && Object.keys(parseResult.code).length > 0 && (
-                                        <div className="p-4 bg-zinc-50 dark:bg-zinc-900/30 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-4">
+                                        <div className="rounded-2xl bg-slate-50/90 p-5 dark:bg-zinc-900/40 space-y-4">
                                             <div className="flex items-center gap-2 text-zinc-500">
                                                 <Code2 className="h-4 w-4" />
-                                                <span className="text-xs font-bold uppercase tracking-wider">Default Code Configuration</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider">Code Defaults</span>
                                             </div>
-                                            <div className="grid grid-cols-2 gap-4">
+                                            <div className="grid grid-cols-2 gap-x-4 gap-y-5">
                                                 <div className="space-y-1">
                                                     <label className="text-[10px] uppercase font-bold text-zinc-400">Target Plugin</label>
                                                     <input
@@ -972,7 +998,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                     )}
                 </div>
 
-                <footer className="px-6 py-4 border-t border-zinc-100 dark:border-zinc-900 bg-zinc-50/50 dark:bg-zinc-900/50 flex items-center justify-end gap-3">
+                <footer className="sticky bottom-0 px-6 py-4 border-t border-zinc-100 dark:border-zinc-900 bg-white/95 dark:bg-zinc-950/95 backdrop-blur flex items-center justify-end gap-3">
                     <Button variant="ghost" onClick={onClose} disabled={isSubmitting}>Cancel</Button>
                     <Button
                         disabled={!parseResult || isSubmitting}

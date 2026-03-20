@@ -180,6 +180,67 @@ function toRecordArray(value: unknown): Array<Record<string, unknown>> {
     .filter((item): item is Record<string, unknown> => Boolean(item));
 }
 
+function resolvePreviewEntryPoint(
+  submissionDraft: SubmissionDraftPayload | Record<string, unknown>,
+): string | null {
+  const record = submissionDraft as Record<string, unknown>;
+  const metaRecord = asRecord(record.meta) ?? {};
+  const candidates = [
+    metaRecord.entry_point,
+    metaRecord.workchain,
+    record.entry_point,
+    record.workchain,
+    record.process_label,
+  ];
+  for (const candidate of candidates) {
+    const text = typeof candidate === "string" ? candidate.trim() : "";
+    if (!text) {
+      continue;
+    }
+    if (!text.includes(".") && !text.includes(":")) {
+      continue;
+    }
+    return text;
+  }
+  return null;
+}
+
+export function resolveSubmitDraftFromPreviewPayload(
+  submissionDraft: SubmissionDraftPayload | Record<string, unknown>,
+): SubmissionSubmitDraft {
+  const record = submissionDraft as Record<string, unknown>;
+  const inputs = asRecord(record.inputs) ?? {};
+  const metaRecord = asRecord(record.meta) ?? {};
+  const batchCandidates = [
+    metaRecord.draft,
+    record.jobs,
+    record.tasks,
+    record.submissions,
+    record.drafts,
+  ];
+  const submitDraftArray = batchCandidates
+    .map((candidate) => toRecordArray(candidate))
+    .find((candidate) => candidate.length > 0);
+  if (submitDraftArray) {
+    return submitDraftArray;
+  }
+
+  const submitDraftRecord = asRecord(metaRecord.draft);
+  if (submitDraftRecord) {
+    return submitDraftRecord;
+  }
+
+  const entryPoint = resolvePreviewEntryPoint(record);
+  if (entryPoint && Object.keys(inputs).length > 0) {
+    return {
+      entry_point: entryPoint,
+      inputs: cloneDraftRecord(inputs),
+    };
+  }
+
+  return inputs;
+}
+
 function toPositiveInteger(value: unknown): number | null {
   if (typeof value === "number" && Number.isInteger(value) && value > 0) {
     return value;
@@ -350,7 +411,7 @@ function normalizePortSpec(raw: unknown): NormalizedPortSpec {
     if (typeof entry !== "string") {
       return;
     }
-    const cleaned = stripTechnicalPrefix(entry);
+    const cleaned = entry.trim();
     if (!cleaned) {
       return;
     }
@@ -367,7 +428,7 @@ function normalizePortSpec(raw: unknown): NormalizedPortSpec {
     if (typeof entry !== "string") {
       return;
     }
-    const cleaned = stripTechnicalPrefix(entry);
+    const cleaned = entry.trim();
     if (cleaned) {
       codePaths.add(cleaned);
     }
@@ -383,7 +444,7 @@ function normalizePortSpec(raw: unknown): NormalizedPortSpec {
     if (!rawPath) {
       return;
     }
-    const path = stripTechnicalPrefix(rawPath);
+    const path = rawPath.trim();
     if (!path) return;
 
     const kind = typeof portRecord.kind === "string" ? portRecord.kind.trim().toLowerCase() : "";
@@ -791,19 +852,8 @@ const INTERNAL_METADATA_KEYS = new Set([
   "preview",
   "errors",
   "missing_ports",
-  "builder_inputs",
 ]);
 
-function stripTechnicalPrefix(path: string): string {
-  const trimmed = path.trim();
-  if (trimmed.toLowerCase().startsWith("builder_inputs.")) {
-    return trimmed.substring("builder_inputs.".length).trim();
-  }
-  if (trimmed.toLowerCase() === "builder_inputs") {
-    return "";
-  }
-  return trimmed;
-}
 
 function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): SubmissionAllInputEntry[] {
   const directAllInputs = asRecord(submissionDraft.all_inputs) ?? asRecord(submissionDraft.meta.all_inputs);
@@ -823,7 +873,7 @@ function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): Subm
       if (!rawNormalizedPath) {
         return;
       }
-      const normalizedPath = stripTechnicalPrefix(rawNormalizedPath);
+      const normalizedPath = rawNormalizedPath;
       if (!normalizedPath || seen.has(normalizedPath)) {
         return;
       }
@@ -855,17 +905,13 @@ function allInputEntriesFromDraft(submissionDraft: SubmissionDraftPayload): Subm
   }
 
   const rawInputs = asRecord(submissionDraft.inputs) ?? {};
-  const builderInputs = asRecord(rawInputs.builder_inputs);
-  // Promote builder_inputs if it is the primary container for workflow parameters
-  const source = (builderInputs && Object.keys(builderInputs).length > 0) ? builderInputs : rawInputs;
-
-  const flattened = flattenInputPorts(source);
+  const flattened = flattenInputPorts(rawInputs);
   Object.entries(flattened).forEach(([path, value]) => {
     const rawNormalizedPath = path.trim();
     if (!rawNormalizedPath) {
       return;
     }
-    const normalizedPath = stripTechnicalPrefix(rawNormalizedPath);
+    const normalizedPath = rawNormalizedPath;
     if (!normalizedPath || seen.has(normalizedPath)) {
       return;
     }
@@ -2256,29 +2302,29 @@ function normalizeBatchAggregation(value: unknown): SubmissionBatchAggregation |
   const common = asRecord(record.common) ?? {};
   const items = Array.isArray(record.items)
     ? record.items.reduce<SubmissionBatchAggregationItem[]>((accumulator, entry, index) => {
-        const item = asRecord(entry);
-        if (!item) {
-          return accumulator;
-        }
-        accumulator.push({
-          id:
-            typeof item.id === "string" || typeof item.id === "number"
-              ? item.id
-              : index + 1,
-          label:
-            typeof item.label === "string" && item.label.trim()
-              ? item.label.trim()
-              : null,
-          structure_pk: toPositiveInteger(item.structure_pk),
-          diff: asRecord(item.diff) ?? {},
-        });
+      const item = asRecord(entry);
+      if (!item) {
         return accumulator;
-      }, [])
+      }
+      accumulator.push({
+        id:
+          typeof item.id === "string" || typeof item.id === "number"
+            ? item.id
+            : index + 1,
+        label:
+          typeof item.label === "string" && item.label.trim()
+            ? item.label.trim()
+            : null,
+        structure_pk: toPositiveInteger(item.structure_pk),
+        diff: asRecord(item.diff) ?? {},
+      });
+      return accumulator;
+    }, [])
     : [];
   const variablePaths = Array.isArray(record.variable_paths)
     ? record.variable_paths
-        .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
-        .filter(Boolean)
+      .map((entry) => (typeof entry === "string" ? entry.trim() : ""))
+      .filter(Boolean)
     : [];
 
   if (Object.keys(common).length === 0 && items.length === 0 && variablePaths.length === 0) {
@@ -2654,8 +2700,6 @@ export function SubmissionModal({
   const [codeSearchByPath, setCodeSearchByPath] = useState<Record<string, string>>({});
   const [selectedNamespace, setSelectedNamespace] = useState("");
   const [showValidationDetails, setShowValidationDetails] = useState(false);
-  const [showBatchCommonParameters, setShowBatchCommonParameters] = useState(false);
-  const [collapsedBatchCommonPaths, setCollapsedBatchCommonPaths] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     if (!open || mode === "inline") {
@@ -2853,9 +2897,39 @@ export function SubmissionModal({
     () => findFirstPathByLeafCandidates(inspectorInputEntries, ["protocol", "relax_type"]),
     [inspectorInputEntries],
   );
+  const batchJobs = useMemo(
+    () => (submissionDraft ? extractBatchJobRows(submissionDraft) : []),
+    [submissionDraft],
+  );
+  const isBatchDraft = batchJobs.length > 1;
+  const batchAggregation = useMemo(
+    () => (submissionDraft ? resolveBatchAggregation(submissionDraft, batchJobs) : null),
+    [batchJobs, submissionDraft],
+  );
+  const batchCommonSource = useMemo<Record<string, unknown>>(
+    () => (asRecord(batchAggregation?.common) ?? asRecord(submissionDraft?.inputs) ?? {}),
+    [batchAggregation?.common, submissionDraft?.inputs],
+  );
+  const batchCommonPaths = useMemo(
+    () => new Set(Object.keys(flattenComparableInputPorts(batchCommonSource))),
+    [batchCommonSource],
+  );
+  const batchCommonEntries = useMemo(
+    () =>
+      inspectorInputEntries.filter((entry) => {
+        const leaf = entry.path.split(".").pop()?.trim().toLowerCase() ?? "";
+        return batchCommonPaths.has(entry.path) && !INTERNAL_METADATA_KEYS.has(leaf);
+      }),
+    [batchCommonPaths, inspectorInputEntries],
+  );
+  const activeInputEntries = useMemo(
+    () => (isBatchDraft ? batchCommonEntries : inspectorInputEntries),
+    [isBatchDraft, batchCommonEntries, inspectorInputEntries],
+  );
+
   const namespaceTree = useMemo(
-    () => buildNamespaceTreeIndex(inspectorInputEntries, portSpec.namespaces),
-    [inspectorInputEntries, portSpec.namespaces],
+    () => buildNamespaceTreeIndex(activeInputEntries, portSpec.namespaces),
+    [activeInputEntries, portSpec.namespaces],
   );
   const namespaceSidebarItems = useMemo(
     () => flattenNamespaceTree(namespaceTree.childrenByNamespace),
@@ -2933,35 +3007,6 @@ export function SubmissionModal({
       .map(([key, value]) => ({ key: key.trim(), value }));
   }, [submissionDraft]);
 
-  const batchJobs = useMemo(
-    () => (submissionDraft ? extractBatchJobRows(submissionDraft) : []),
-    [submissionDraft],
-  );
-  const isBatchDraft = batchJobs.length > 1;
-  const batchAggregation = useMemo(
-    () => (submissionDraft ? resolveBatchAggregation(submissionDraft, batchJobs) : null),
-    [batchJobs, submissionDraft],
-  );
-  const batchCommonSource = useMemo<Record<string, unknown>>(
-    () => (asRecord(batchAggregation?.common) ?? asRecord(submissionDraft?.inputs) ?? {}),
-    [batchAggregation?.common, submissionDraft?.inputs],
-  );
-  const batchCommonPaths = useMemo(
-    () => new Set(Object.keys(flattenComparableInputPorts(batchCommonSource))),
-    [batchCommonSource],
-  );
-  const batchCommonEntries = useMemo(
-    () =>
-      inspectorInputEntries.filter((entry) => {
-        const leaf = entry.path.split(".").pop()?.trim().toLowerCase() ?? "";
-        return batchCommonPaths.has(entry.path) && !INTERNAL_METADATA_KEYS.has(leaf);
-      }),
-    [batchCommonPaths, inspectorInputEntries],
-  );
-  const batchCommonDisplayTree = useMemo(
-    () => normalizeBatchCommonDisplayValue(batchCommonSource),
-    [batchCommonSource],
-  );
   const batchVariationDiffs = useMemo(
     () => (batchAggregation?.items ?? []).map((item) => flattenComparableInputPorts(item.diff ?? {})),
     [batchAggregation],
@@ -2991,15 +3036,8 @@ export function SubmissionModal({
     if (!submissionDraft) {
       return null;
     }
-    const metaDraftRecord = asRecord(submissionDraft.meta.draft);
-    if (metaDraftRecord) {
-      return metaDraftRecord;
-    }
-    const metaDraftArray = toRecordArray(submissionDraft.meta.draft);
-    if (metaDraftArray.length > 0) {
-      return metaDraftArray[0];
-    }
-    return submissionDraft.inputs;
+    const resolved = resolveSubmitDraftFromPreviewPayload(submissionDraft);
+    return Array.isArray(resolved) ? resolved[0] ?? null : resolved;
   }, [submissionDraft]);
 
   useEffect(() => {
@@ -3020,8 +3058,6 @@ export function SubmissionModal({
       setCodeSearchByPath({});
       setSelectedNamespace("");
       setShowValidationDetails(false);
-      setShowBatchCommonParameters(false);
-      setCollapsedBatchCommonPaths({});
       prevTurnIdRef.current = turnId;
       return;
     }
@@ -3051,8 +3087,6 @@ export function SubmissionModal({
       setExpandedJsonFields({});
       setCodeSearchByPath(nextCodeSearch);
       setShowValidationDetails(false);
-      setShowBatchCommonParameters(false);
-      setCollapsedBatchCommonPaths({});
     }
 
     prevTurnIdRef.current = turnId;
@@ -3188,12 +3222,6 @@ export function SubmissionModal({
     });
   };
 
-  const toggleBatchCommonPathCollapsed = (path: string) => {
-    setCollapsedBatchCommonPaths((current) => ({
-      ...current,
-      [path]: !Boolean(current[path]),
-    }));
-  };
 
   const updateDraftFieldValue = (path: string, nextValue: boolean | string) => {
     setDraftState((current) => {
@@ -3225,17 +3253,7 @@ export function SubmissionModal({
 
     const selectedDraft: SubmissionSubmitDraft = isBatchDraft
       ? selectedBatchJobs.map((job) => job.draft)
-      : (() => {
-        const metaDraftRecord = asRecord(submissionDraft.meta.draft);
-        if (metaDraftRecord) {
-          return metaDraftRecord;
-        }
-        const metaDraftArray = toRecordArray(submissionDraft.meta.draft);
-        if (metaDraftArray.length > 0) {
-          return metaDraftArray[0];
-        }
-        return submissionDraft.inputs;
-      })();
+      : resolveSubmitDraftFromPreviewPayload(submissionDraft);
     const mergedDraft = applyEditorValuesToSubmitDraft(
       selectedDraft,
       valuesByPath,
@@ -3626,11 +3644,11 @@ export function SubmissionModal({
           className={cn(
             isCommonTree
               ? cn(
-                  "w-full rounded-none border-0 border-b bg-transparent px-0 py-1 font-mono text-xs outline-none transition-colors",
-                  field.kind === "number"
-                    ? "text-blue-600 dark:text-blue-300"
-                    : "text-slate-700 dark:text-slate-100",
-                )
+                "w-full rounded-none border-0 border-b bg-transparent px-0 py-1 font-mono text-xs outline-none transition-colors",
+                field.kind === "number"
+                  ? "text-blue-600 dark:text-blue-300"
+                  : "text-slate-700 dark:text-slate-100",
+              )
               : "w-full rounded-md border px-2 py-1.5 text-xs text-slate-800 outline-none transition-colors dark:bg-slate-900 dark:text-slate-100",
             compact && !isCommonTree ? "h-8" : !isCommonTree ? "h-9" : "",
             error
@@ -3646,149 +3664,7 @@ export function SubmissionModal({
     );
   };
 
-  const renderBatchCommonStaticValue = (value: unknown): ReactNode => {
-    if (typeof value === "number") {
-      return <span className="font-mono text-sm text-blue-600 dark:text-blue-300">{String(value)}</span>;
-    }
-    if (typeof value === "boolean") {
-      return (
-        <span className="font-mono text-sm font-semibold text-violet-600 dark:text-violet-300">
-          {value ? "true" : "false"}
-        </span>
-      );
-    }
-    if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) {
-      return <span className="font-mono text-sm text-slate-400 dark:text-slate-500">Default</span>;
-    }
-    return (
-      <span className="break-all font-mono text-sm text-slate-700 dark:text-slate-200">
-        {String(value)}
-      </span>
-    );
-  };
 
-  const renderBatchCommonLeafValue = (path: string, value: unknown): ReactNode => {
-    const uiType = inferUiTypeFromPathAndValue(path, entryValueByPath[path] ?? value);
-    const leafKey = path.split(".").pop()?.trim().toLowerCase() ?? "";
-    const isCodeField = codeFieldPaths.has(path) || leafKey === "code";
-    if (draftState[path]) {
-      return renderEditableFieldControl(path, uiType, true, {
-        isCodeField,
-        isInheritedCode: inheritedCodePaths.has(path),
-        appearance: "common-tree",
-      });
-    }
-    return renderBatchCommonStaticValue(value);
-  };
-
-  const renderBatchCommonTree = (value: unknown, path = "", _depth = 0): ReactNode => {
-    const normalizedValue = normalizeBatchCommonDisplayValue(value);
-    if (normalizedValue === null || normalizedValue === undefined) {
-      return null;
-    }
-
-    if (Array.isArray(normalizedValue)) {
-      const uiType = path ? inferUiTypeFromPathAndValue(path, entryValueByPath[path] ?? normalizedValue) : "dict";
-      if (path && uiType === "mesh" && draftState[path]) {
-        return renderBatchCommonLeafValue(path, normalizedValue);
-      }
-      const useNumbering = normalizedValue.some((entry) => Array.isArray(entry) || Boolean(asRecord(entry)));
-      return (
-        <div className="space-y-2">
-          {normalizedValue.map((entry, index) => (
-            <div key={`${path || "root"} -list-item- ${index} `} className="flex items-start gap-3">
-              <span className="w-4 shrink-0 pt-1 text-xs text-slate-400 dark:text-slate-500">
-                {useNumbering ? `${index + 1}.` : "\u2022"}
-              </span>
-              <div className="min-w-0 flex-1">
-                {Array.isArray(entry) || asRecord(entry)
-                  ? renderBatchCommonTree(entry, path ? `${path}.${index}` : String(index), _depth + 1)
-                  : renderBatchCommonStaticValue(entry)}
-              </div>
-            </div>
-          ))}
-        </div>
-      );
-    }
-
-    const record = asRecord(normalizedValue);
-    if (!record) {
-      return path ? renderBatchCommonLeafValue(path, normalizedValue) : renderBatchCommonStaticValue(normalizedValue);
-    }
-
-    return (
-      <div className="space-y-3">
-        {Object.entries(record).map(([rawKey, childValue]) => {
-          const key = rawKey.trim();
-          if (!key) {
-            return null;
-          }
-          const childPath = path ? `${path}.${key}` : key;
-          const normalizedChild = normalizeBatchCommonDisplayValue(childValue);
-          if (normalizedChild === null || normalizedChild === undefined) {
-            return null;
-          }
-
-          const childUiType = inferUiTypeFromPathAndValue(childPath, entryValueByPath[childPath] ?? normalizedChild);
-          const isLeaf =
-            !Array.isArray(normalizedChild) &&
-            !asRecord(normalizedChild);
-          const isEditableArrayLeaf =
-            Array.isArray(normalizedChild) && childUiType === "mesh" && Boolean(draftState[childPath]);
-          const isCollapsed = Boolean(collapsedBatchCommonPaths[childPath]);
-
-          if (isLeaf || isEditableArrayLeaf) {
-            return (
-              <div
-                key={`${turnId} -batch-common-tree-leaf- ${childPath} `}
-                className="grid gap-x-4 gap-y-1 sm:grid-cols-[minmax(0,220px)_1fr]"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-slate-500 dark:text-slate-400">
-                    {formatSettingKey(key)}
-                  </p>
-                  <p className="mt-0.5 truncate text-[11px] text-slate-400 dark:text-slate-500" title={`inputs.${childPath} `}>
-                    inputs.{childPath}
-                  </p>
-                </div>
-                <div className="min-w-0">
-                  {renderBatchCommonLeafValue(childPath, normalizedChild)}
-                </div>
-              </div>
-            );
-          }
-
-          return (
-            <div key={`${turnId} -batch-common-tree-group- ${childPath} `} className="space-y-2">
-              <button
-                type="button"
-                className="flex w-full items-start gap-2 text-left"
-                onClick={() => toggleBatchCommonPathCollapsed(childPath)}
-                aria-expanded={!isCollapsed}
-              >
-                <span className="mt-0.5 shrink-0 text-slate-400 dark:text-slate-500">
-                  {isCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                </span>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-slate-500 dark:text-slate-400">
-                    {formatSettingKey(key)}
-                  </p>
-                  <p className="mt-0.5 truncate text-[11px] text-slate-400 dark:text-slate-500" title={`inputs.${childPath} `}>
-                    inputs.{childPath}
-                  </p>
-                </div>
-              </button>
-              {!isCollapsed ? (
-                <div className="border-l border-[#e2e8f0] pl-6 dark:border-slate-700/80">
-                  {renderBatchCommonTree(normalizedChild, childPath, _depth + 1)}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
-    );
-  };
 
   const previewHeaderBadges: PreviewCardBadge[] = isBatchDraft
     ? [
@@ -4228,43 +4104,6 @@ export function SubmissionModal({
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-200/90 bg-white dark:border-slate-800 dark:bg-slate-950/30">
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
-                    onClick={() => setShowBatchCommonParameters((current) => !current)}
-                    aria-expanded={showBatchCommonParameters}
-                  >
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
-                        Common Parameters
-                      </p>
-                      <p className="mt-1 text-sm text-slate-700 dark:text-slate-200">
-                        {batchCommonSummaryText}
-                      </p>
-                    </div>
-                    <ChevronDown
-                      className={cn(
-                        "h-4 w-4 text-slate-400 transition-transform duration-200",
-                        showBatchCommonParameters ? "rotate-180" : "rotate-0",
-                      )}
-                    />
-                  </button>
-                  {showBatchCommonParameters ? (
-                    <div className="px-4 pb-4">
-                      {batchCommonEntries.length > 0 && batchCommonDisplayTree ? (
-                        <div className="minimal-scrollbar max-h-[360px] overflow-auto">
-                          {renderBatchCommonTree(batchCommonDisplayTree)}
-                        </div>
-                      ) : (
-                        <p className="text-sm text-slate-500 dark:text-slate-400">
-                          No shared parameters were inferred for this batch.
-                        </p>
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-
                 <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-900/35">
                   <div className="flex flex-col gap-1 border-b border-slate-200/80 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
                     <div>
@@ -4411,211 +4250,209 @@ export function SubmissionModal({
               </div>
             ) : null}
 
-            {!isBatchDraft ? (
-              <div className={cn(isProtocolBuilder ? "mt-4" : "mt-3")}>
-                <PreviewCardSection
-                  title="Builder Port Hierarchy"
-                  hint={
-                    protocolHint ? (
-                      <span className="font-mono text-[10px] tracking-normal">Protocol Call: {protocolHint}</span>
-                    ) : null
-                  }
-                  stats={[
-                    { id: "recommended", value: `${recommendedDraftFields.length} recommended` },
-                    { id: "editable", value: `${allDraftFields.length} editable ports` },
-                    { id: "groups", value: `${groupedInputSections.length} spec groups` },
-                  ]}
-                >
+            <div className={cn(isProtocolBuilder ? "mt-4" : "mt-3")}>
+              <PreviewCardSection
+                title="Builder Port Hierarchy"
+                hint={
+                  protocolHint ? (
+                    <span className="font-mono text-[10px] tracking-normal">Protocol Call: {protocolHint}</span>
+                  ) : null
+                }
+                stats={[
+                  { id: "recommended", value: `${recommendedDraftFields.length} recommended` },
+                  { id: "editable", value: `${allDraftFields.length} editable ports` },
+                  { id: "groups", value: `${groupedInputSections.length} spec groups` },
+                ]}
+              >
                 <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
-                <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
-                  <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                    Atomic Inputs
-                  </p>
-                  {namespaceTree.atomicEntries.length > 0 ? (
-                    <div className="mt-2 space-y-1">
-                      {namespaceTree.atomicEntries.map((entry) => {
-                        const leaf = entry.path.split(".").pop() ?? entry.path;
-                        return (
-                          <div
-                            key={`${turnId} -atomic - ${entry.path} `}
-                            className="border-b border-slate-100 px-1 py-1.5 text-xs last:border-b-0 dark:border-slate-800/80"
-                          >
-                            <p className="font-semibold text-slate-700 dark:text-slate-200">{formatSettingKey(leaf)}</p>
-                            <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
-                              {entry.path}
-                            </p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
-                      No direct scalar inputs at root.
-                    </p>
-                  )}
-
-                  <div className="mt-3 border-t border-slate-100 pt-2 dark:border-slate-800">
+                  <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
                     <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
-                      Namespaces
+                      Atomic Inputs
                     </p>
-                    {namespaceSidebarItems.length > 0 ? (
-                      <div className="mt-1 space-y-1">
-                        {namespaceSidebarItems.map((namespaceItem) => {
-                          const label = namespaceItem.path.split(".").pop() ?? namespaceItem.path;
-                          const isSelected = namespaceItem.path === selectedNamespace;
+                    {namespaceTree.atomicEntries.length > 0 ? (
+                      <div className="mt-2 space-y-1">
+                        {namespaceTree.atomicEntries.map((entry) => {
+                          const leaf = entry.path.split(".").pop() ?? entry.path;
                           return (
-                            <button
-                              key={`${turnId} -namespace - ${namespaceItem.path} `}
-                              type="button"
-                              className={cn(
-                                "flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs transition-colors",
-                                isSelected
-                                  ? "border-blue-300/90 bg-blue-50 text-blue-700 dark:border-blue-700/70 dark:bg-blue-950/35 dark:text-blue-200"
-                                  : "border-transparent text-slate-700 hover:border-slate-200 hover:bg-slate-50 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-900/60",
-                              )}
-                              onClick={() => setSelectedNamespace(namespaceItem.path)}
-                              style={{ paddingLeft: `${0.5 + namespaceItem.depth * 0.65}rem` }}
+                            <div
+                              key={`${turnId} -atomic - ${entry.path} `}
+                              className="border-b border-slate-100 px-1 py-1.5 text-xs last:border-b-0 dark:border-slate-800/80"
                             >
-                              <Folder className="h-3.5 w-3.5 shrink-0" />
-                              <span className="truncate">{formatSettingKey(label)}</span>
-                            </button>
+                              <p className="font-semibold text-slate-700 dark:text-slate-200">{formatSettingKey(leaf)}</p>
+                              <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
+                                {entry.path}
+                              </p>
+                            </div>
                           );
                         })}
                       </div>
                     ) : (
                       <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
-                        No nested namespaces detected.
+                        No direct scalar inputs at root.
+                      </p>
+                    )}
+
+                    <div className="mt-3 border-t border-slate-100 pt-2 dark:border-slate-800">
+                      <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                        Namespaces
+                      </p>
+                      {namespaceSidebarItems.length > 0 ? (
+                        <div className="mt-1 space-y-1">
+                          {namespaceSidebarItems.map((namespaceItem) => {
+                            const label = namespaceItem.path.split(".").pop() ?? namespaceItem.path;
+                            const isSelected = namespaceItem.path === selectedNamespace;
+                            return (
+                              <button
+                                key={`${turnId} -namespace - ${namespaceItem.path} `}
+                                type="button"
+                                className={cn(
+                                  "flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs transition-colors",
+                                  isSelected
+                                    ? "border-blue-300/90 bg-blue-50 text-blue-700 dark:border-blue-700/70 dark:bg-blue-950/35 dark:text-blue-200"
+                                    : "border-transparent text-slate-700 hover:border-slate-200 hover:bg-slate-50 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-900/60",
+                                )}
+                                onClick={() => setSelectedNamespace(namespaceItem.path)}
+                                style={{ paddingLeft: `${0.5 + namespaceItem.depth * 0.65}rem` }}
+                              >
+                                <Folder className="h-3.5 w-3.5 shrink-0" />
+                                <span className="truncate">{formatSettingKey(label)}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <p className="mt-1.5 px-1 text-[11px] text-slate-500 dark:text-slate-400">
+                          No nested namespaces detected.
+                        </p>
+                      )}
+                    </div>
+                  </aside>
+
+                  <div className="rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
+                    <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
+                      <button
+                        type="button"
+                        className={cn(
+                          "rounded-md px-1.5 py-0.5 font-semibold",
+                          selectedNamespace === ""
+                            ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
+                            : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
+                        )}
+                        onClick={() => setSelectedNamespace("")}
+                      >
+                        inputs
+                      </button>
+                      {namespaceBreadcrumb.map((breadcrumb) => (
+                        <span key={`${turnId} -breadcrumb - ${breadcrumb.path} `} className="inline-flex items-center gap-1">
+                          <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+                          <button
+                            type="button"
+                            className={cn(
+                              "rounded-md px-1.5 py-0.5",
+                              breadcrumb.path === selectedNamespace
+                                ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
+                                : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
+                            )}
+                            onClick={() => setSelectedNamespace(breadcrumb.path)}
+                          >
+                            {breadcrumb.label}
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+
+                    {selectedNamespaceChildren.length > 0 ? (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {selectedNamespaceChildren.map((childPath) => {
+                          const childLabel = childPath.split(".").pop() ?? childPath;
+                          return (
+                            <button
+                              key={`${turnId} -namespace - folder - ${childPath} `}
+                              type="button"
+                              className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:bg-slate-800"
+                              onClick={() => setSelectedNamespace(childPath)}
+                            >
+                              <Folder className="h-3.5 w-3.5" />
+                              <span>{formatSettingKey(childLabel)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+
+                    {selectedNamespaceLeafEntries.length > 0 ? (
+                      <div className="minimal-scrollbar mt-2 max-h-[330px] overflow-auto">
+                        <table className="w-full min-w-[500px] text-left text-xs">
+                          <thead className="sticky top-0 bg-slate-100/95 text-[10px] uppercase tracking-[0.1em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
+                            <tr>
+                              <th className="w-[44%] px-2 py-1.5 font-semibold">Parameter</th>
+                              <th className="px-2 py-1.5 font-semibold">Value</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {selectedNamespaceLeafEntries.map((entry) => {
+                              const leafKey = entry.path.split(".").pop() ?? entry.path;
+                              const uiType = inferUiTypeFromPathAndValue(entry.path, entry.value);
+                              const field = draftState[entry.path];
+                              const isModified = field ? isFieldModified(field) : false;
+                              const isCodeField = codeFieldPaths.has(entry.path) || leafKey.toLowerCase() === "code";
+                              const isInheritedCode = isCodeField && inheritedCodePaths.has(entry.path);
+                              return (
+                                <tr
+                                  key={`${turnId} -namespace - entry - ${entry.path} `}
+                                  className="border-t border-slate-200/70 align-top dark:border-slate-800"
+                                >
+                                  <td className="px-2 py-1.5">
+                                    <p className="truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                                      {formatSettingKey(leafKey)}
+                                    </p>
+                                    <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
+                                      {entry.path}
+                                    </p>
+                                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                                      {entry.isRecommended ? (
+                                        <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                                          AI
+                                        </span>
+                                      ) : null}
+                                      {isModified ? (
+                                        <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                                          Modified
+                                        </span>
+                                      ) : null}
+                                      {isCodeField ? (
+                                        <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                                          Code
+                                        </span>
+                                      ) : null}
+                                      {isInheritedCode ? (
+                                        <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                                          Inherited
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    {renderEditableFieldControl(entry.path, uiType, true, {
+                                      isCodeField,
+                                      isInheritedCode,
+                                    })}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                        No direct parameters in this namespace. Select a sub-namespace folder to continue.
                       </p>
                     )}
                   </div>
-                </aside>
-
-                <div className="rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
-                  <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
-                    <button
-                      type="button"
-                      className={cn(
-                        "rounded-md px-1.5 py-0.5 font-semibold",
-                        selectedNamespace === ""
-                          ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-                          : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
-                      )}
-                      onClick={() => setSelectedNamespace("")}
-                    >
-                      inputs
-                    </button>
-                    {namespaceBreadcrumb.map((breadcrumb) => (
-                      <span key={`${turnId} -breadcrumb - ${breadcrumb.path} `} className="inline-flex items-center gap-1">
-                        <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
-                        <button
-                          type="button"
-                          className={cn(
-                            "rounded-md px-1.5 py-0.5",
-                            breadcrumb.path === selectedNamespace
-                              ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-                              : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
-                          )}
-                          onClick={() => setSelectedNamespace(breadcrumb.path)}
-                        >
-                          {breadcrumb.label}
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-
-                  {selectedNamespaceChildren.length > 0 ? (
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {selectedNamespaceChildren.map((childPath) => {
-                        const childLabel = childPath.split(".").pop() ?? childPath;
-                        return (
-                          <button
-                            key={`${turnId} -namespace - folder - ${childPath} `}
-                            type="button"
-                            className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:bg-slate-800"
-                            onClick={() => setSelectedNamespace(childPath)}
-                          >
-                            <Folder className="h-3.5 w-3.5" />
-                            <span>{formatSettingKey(childLabel)}</span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-
-                  {selectedNamespaceLeafEntries.length > 0 ? (
-                    <div className="minimal-scrollbar mt-2 max-h-[330px] overflow-auto">
-                      <table className="w-full min-w-[500px] text-left text-xs">
-                        <thead className="sticky top-0 bg-slate-100/95 text-[10px] uppercase tracking-[0.1em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
-                          <tr>
-                            <th className="w-[44%] px-2 py-1.5 font-semibold">Parameter</th>
-                            <th className="px-2 py-1.5 font-semibold">Value</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {selectedNamespaceLeafEntries.map((entry) => {
-                            const leafKey = entry.path.split(".").pop() ?? entry.path;
-                            const uiType = inferUiTypeFromPathAndValue(entry.path, entry.value);
-                            const field = draftState[entry.path];
-                            const isModified = field ? isFieldModified(field) : false;
-                            const isCodeField = codeFieldPaths.has(entry.path) || leafKey.toLowerCase() === "code";
-                            const isInheritedCode = isCodeField && inheritedCodePaths.has(entry.path);
-                            return (
-                              <tr
-                                key={`${turnId} -namespace - entry - ${entry.path} `}
-                                className="border-t border-slate-200/70 align-top dark:border-slate-800"
-                              >
-                                <td className="px-2 py-1.5">
-                                  <p className="truncate text-[11px] font-semibold text-slate-700 dark:text-slate-200">
-                                    {formatSettingKey(leafKey)}
-                                  </p>
-                                  <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
-                                    {entry.path}
-                                  </p>
-                                  <div className="mt-1 flex flex-wrap items-center gap-1">
-                                    {entry.isRecommended ? (
-                                      <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
-                                        AI
-                                      </span>
-                                    ) : null}
-                                    {isModified ? (
-                                      <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
-                                        Modified
-                                      </span>
-                                    ) : null}
-                                    {isCodeField ? (
-                                      <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
-                                        Code
-                                      </span>
-                                    ) : null}
-                                    {isInheritedCode ? (
-                                      <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                                        Inherited
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                </td>
-                                <td className="px-2 py-1.5">
-                                  {renderEditableFieldControl(entry.path, uiType, true, {
-                                    isCodeField,
-                                    isInheritedCode,
-                                  })}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  ) : (
-                    <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                      No direct parameters in this namespace. Select a sub-namespace folder to continue.
-                    </p>
-                  )}
                 </div>
-                </div>
-                </PreviewCardSection>
-              </div>
-            ) : null}
+              </PreviewCardSection>
+            </div>
 
             {!isBatchDraft && pkEntries.length > 0 ? (
               <div className="mt-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/30">

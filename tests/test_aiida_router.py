@@ -386,6 +386,65 @@ async def test_submit_bridge_workchain_single_adds_submitted_pk(monkeypatch: pyt
 
 
 @pytest.mark.anyio
+async def test_submit_bridge_workchain_unwraps_direct_entry_point_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_request: dict[str, object] = {}
+
+    async def _fake_auto_assign_submission_groups(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def _fake_request_json(
+        method: str,
+        path: str,
+        json: dict[str, object],
+        headers: dict[str, str] | None = None,
+    ):  # noqa: ARG001
+        assert method == "POST"
+        assert path == "/submission/submit"
+        captured_request["payload"] = json
+        assert headers == {"X-ARIS-Session-Id": "chat-0307"}
+        return {"status": "SUBMITTED", "pk": 654}
+
+    monkeypatch.setattr(aiida_router, "request_json", _fake_request_json)
+    monkeypatch.setattr(
+        aiida_router,
+        "_build_submission_request_headers",
+        lambda _state: {"X-ARIS-Session-Id": "chat-0307"},
+    )
+    monkeypatch.setattr(aiida_router, "_auto_assign_submission_groups", _fake_auto_assign_submission_groups)
+
+    captured: dict[str, object] = {}
+
+    class _DummyMemory:
+        def set_kv(self, key: str, value: object) -> None:
+            captured[key] = value
+
+    state = SimpleNamespace(memory=_DummyMemory())
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    payload = aiida_router.SubmissionDraftRequest(
+        draft={
+            "entry_point": "quantumespresso.pw.base",
+            "inputs": {
+                "pw": {"code": "pw@localhost"},
+                "structure": {"pk": 6},
+            },
+        }
+    )
+
+    response = await aiida_router.submit_bridge_workchain(request, payload)
+
+    assert captured_request["payload"] == {
+        "entry_point": "quantumespresso.pw.base",
+        "inputs": {
+            "pw": {"code": "pw@localhost"},
+            "structure": {"pk": 6},
+        },
+    }
+    assert response["submitted_pks"] == [654]
+    assert response["process_pks"] == [654]
+    assert captured[aiida_router.PENDING_SUBMISSION_KEY] is None
+
+
+@pytest.mark.anyio
 async def test_frontend_create_chat_project_ensures_project_group(monkeypatch: pytest.MonkeyPatch) -> None:
     state = SimpleNamespace()
     request = SimpleNamespace(app=SimpleNamespace(state=state))

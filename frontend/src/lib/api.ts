@@ -92,6 +92,9 @@ export function getTerminalWsUrl(path = "/api/terminal"): string {
 export const LOGS_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/logs/stream`);
 export const CHAT_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/chat/stream`);
 export const PROCESS_EVENTS_URL = getFrontendStreamUrl(`${AIIDA_API_PREFIX}/process/events`);
+export const GROUPS_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/groups/stream`);
+export const PROCESSES_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/processes/stream`);
+export const INFRASTRUCTURE_STREAM_URL = getFrontendStreamUrl(`${FRONTEND_API_PREFIX}/infrastructure/stream`);
 export const TERMINAL_WS_URL = getTerminalWsUrl("/api/terminal");
 
 export const frontendApi = axios.create({

@@ -1533,7 +1533,18 @@ async def _submit_bridge_workchain_impl(
     if require_batch_list and not isinstance(draft_payload, list):
         raise HTTPException(status_code=422, detail="Batch submission draft list is required")
     worker_request_headers = _build_submission_request_headers(request.app.state)
-    worker_payload: dict[str, Any] = {"draft": draft_payload}
+    worker_payload: dict[str, Any]
+    if (
+        isinstance(draft_payload, dict)
+        and isinstance(draft_payload.get("inputs"), dict)
+        and str(draft_payload.get("entry_point") or "").strip()
+    ):
+        worker_payload = {
+            "entry_point": str(draft_payload.get("entry_point")).strip(),
+            "inputs": dict(draft_payload.get("inputs") or {}),
+        }
+    else:
+        worker_payload = {"draft": draft_payload}
     if payload.interpreter_info is not None:
         worker_payload["interpreter_info"] = payload.interpreter_info.model_dump()
     if payload.metadata is not None:
@@ -1868,6 +1879,39 @@ async def frontend_groups():
     return {"items": _serialize_groups(items)}
 
 
+@router.get("/frontend/groups/stream", tags=[FRONTEND_TAG])
+async def frontend_groups_stream(request: Request):
+    async def event_generator():
+        stream_id = id(request)
+        last_digest = ""
+        heartbeat_ts = time.monotonic()
+        logger.info(log_event("aiida.frontend.groups_stream.connected", stream_id=stream_id))
+
+        while True:
+            if await request.is_disconnected():
+                logger.info(log_event("aiida.frontend.groups_stream.disconnected", stream_id=stream_id))
+                break
+
+            try:
+                groups = _serialize_groups(_get_frontend_groups())
+                digest = hashlib.sha1(json.dumps(groups, sort_keys=True).encode("utf-8")).hexdigest()
+                now = time.monotonic()
+                should_push = (digest != last_digest) or ((now - heartbeat_ts) >= 15)
+                if should_push:
+                    yield {"event": "groups", "data": json.dumps({"items": groups})}
+                    last_digest = digest
+                    heartbeat_ts = now
+            except Exception as error:  # noqa: BLE001
+                logger.exception(
+                    log_event("aiida.frontend.groups_stream.failed", stream_id=stream_id, error=str(error))
+                )
+                yield {"event": "groups", "data": json.dumps({"items": []})}
+
+            await asyncio.sleep(2.5)
+
+    return EventSourceResponse(event_generator())
+
+
 @router.post("/frontend/groups/create", tags=[FRONTEND_TAG])
 async def frontend_create_group(payload: FrontendGroupCreateRequest):
     if not hub.current_profile:
@@ -2123,7 +2167,8 @@ async def frontend_setup_code(payload: CodeSetupRequest):
         logger.info(log_event("aiida.frontend.setup_code.success", pk=response.get("pk")))
         return response
     except Exception as exc:
-        logger.error(log_event("aiida.frontend.setup_code.failed", error=str(exc)))
+        error_payload = exc.payload if isinstance(exc, BridgeAPIError) else None
+        logger.error(log_event("aiida.frontend.setup_code.failed", error=str(exc), detail=error_payload))
         _raise_worker_http_error(exc)
 
 @router.get("/frontend/infrastructure/computer/{computer_label}/codes", response_model=list[CodeDetailedResponse], tags=[FRONTEND_TAG])
@@ -2238,6 +2283,39 @@ async def frontend_processes_stream(
                 yield {"event": "processes", "data": json.dumps({"items": []})}
 
             await asyncio.sleep(1.5)
+
+    return EventSourceResponse(event_generator())
+
+
+@router.get("/frontend/infrastructure/stream", tags=[FRONTEND_TAG])
+async def frontend_infrastructure_stream(request: Request):
+    async def event_generator():
+        stream_id = id(request)
+        last_digest = ""
+        heartbeat_ts = time.monotonic()
+        logger.info(log_event("aiida.frontend.infrastructure_stream.connected", stream_id=stream_id))
+
+        while True:
+            if await request.is_disconnected():
+                logger.info(log_event("aiida.frontend.infrastructure_stream.disconnected", stream_id=stream_id))
+                break
+
+            try:
+                infrastructure = await bridge_service.inspect_infrastructure_v2()
+                digest = hashlib.sha1(json.dumps(infrastructure, sort_keys=True).encode("utf-8")).hexdigest()
+                now = time.monotonic()
+                should_push = (digest != last_digest) or ((now - heartbeat_ts) >= 15)
+                if should_push:
+                    yield {"event": "infrastructure", "data": json.dumps({"items": infrastructure})}
+                    last_digest = digest
+                    heartbeat_ts = now
+            except Exception as error:  # noqa: BLE001
+                logger.exception(
+                    log_event("aiida.frontend.infrastructure_stream.failed", stream_id=stream_id, error=str(error))
+                )
+                yield {"event": "error", "data": json.dumps({"error": str(error)})}
+
+            await asyncio.sleep(2.5)
 
     return EventSourceResponse(event_generator())
 

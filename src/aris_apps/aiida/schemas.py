@@ -288,7 +288,7 @@ class CodeSetupRequest(BaseModel):
     remote_abspath: str
     prepend_text: str | None = None
     append_text: str | None = None
-    with_mpi: bool = True
+    with_mpi: bool | None = True
     use_double_quotes: bool = False
 
 class CodeDetailedResponse(BaseModel):
@@ -299,5 +299,5 @@ class CodeDetailedResponse(BaseModel):
     remote_abspath: str
     prepend_text: str | None = None
     append_text: str | None = None
-    with_mpi: bool
+    with_mpi: bool | None
     use_double_quotes: bool

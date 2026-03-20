@@ -3,8 +3,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   CHAT_STREAM_URL,
+  GROUPS_STREAM_URL,
+  INFRASTRUCTURE_STREAM_URL,
   LOGS_STREAM_URL,
   PROCESS_EVENTS_URL,
+  PROCESSES_STREAM_URL,
   activateChatSession,
   addNodesToGroup,
   cancelPendingSubmission,
@@ -55,8 +58,11 @@ import type {
   ChatSnapshot,
   FocusNode,
   GroupItem,
+  GroupsResponse,
+  InfrastructureComputer,
   ProcessDiagnosticsResponse,
   ProcessItem,
+  ProcessesResponse,
   ResourceAttachment,
   SendChatRequest,
   SessionParameter,
@@ -213,6 +219,16 @@ function resolveSelectedGroupDisplayLabel(selection: string, currentContextGroup
     return currentContextGroupLabel ? "Current Context" : null;
   }
   return normalizedSelection;
+}
+
+function resolveProcessNodeType(nodeTypeFilter: string): string | undefined {
+  if (nodeTypeFilter === "tasks" || nodeTypeFilter === "failed") {
+    return "ProcessNode";
+  }
+  if (nodeTypeFilter === "structures") {
+    return "StructureData";
+  }
+  return undefined;
 }
 
 function dedupeFocusNodes(nodes: FocusNode[]): FocusNode[] {
@@ -679,20 +695,17 @@ export default function App() {
   const processesQuery = useQuery({
     queryKey: ["processes", selectedGroup, selectedGroupLabel, processLimit, nodeTypeFilter],
     queryFn: () => {
-      let nodeType: string | undefined;
-      if (nodeTypeFilter === "tasks" || nodeTypeFilter === "failed") nodeType = "ProcessNode";
-      if (nodeTypeFilter === "structures") nodeType = "StructureData";
-      return getProcesses(processLimit, selectedGroupLabel ?? undefined, nodeType);
+      return getProcesses(processLimit, selectedGroupLabel ?? undefined, resolveProcessNodeType(nodeTypeFilter));
     },
     enabled: bootstrapQuery.isSuccess,
-    refetchInterval: 3_000,
+    refetchInterval: 60_000,
   });
 
   const groupsQuery = useQuery({
     queryKey: ["groups"],
     queryFn: getGroups,
     enabled: bootstrapQuery.isSuccess,
-    refetchInterval: 20_000,
+    refetchInterval: 60_000,
   });
 
   const logsQuery = useQuery({
@@ -863,24 +876,134 @@ export default function App() {
       return;
     }
 
+    const searchParams = new URLSearchParams();
+    searchParams.set("limit", String(processLimit));
+    if (selectedGroupLabel) {
+      searchParams.set("group_label", selectedGroupLabel);
+    }
+    const resolvedNodeType = resolveProcessNodeType(nodeTypeFilter);
+    if (resolvedNodeType) {
+      searchParams.set("node_type", resolvedNodeType);
+    }
+
+    const streamUrl = searchParams.size > 0
+      ? `${PROCESSES_STREAM_URL}?${searchParams.toString()}`
+      : PROCESSES_STREAM_URL;
+    const queryKey = ["processes", selectedGroup, selectedGroupLabel, processLimit, nodeTypeFilter] as const;
+    const source = new EventSource(streamUrl);
+
+    const syncProcesses = (rawData: string) => {
+      try {
+        const parsed = JSON.parse(rawData) as { items?: ProcessItem[] };
+        if (!Array.isArray(parsed.items)) {
+          return;
+        }
+        queryClient.setQueryData<ProcessesResponse>(queryKey, { items: parsed.items });
+      } catch (error) {
+        console.error("Failed to parse processes stream payload", error);
+      }
+    };
+
+    source.addEventListener("processes", (event) => {
+      syncProcesses((event as MessageEvent<string>).data);
+    });
+    source.onmessage = (event) => {
+      syncProcesses(event.data);
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [bootstrapQuery.isSuccess, nodeTypeFilter, processLimit, queryClient, selectedGroup, selectedGroupLabel]);
+
+  useEffect(() => {
+    if (!bootstrapQuery.isSuccess) {
+      return;
+    }
+
+    const source = new EventSource(GROUPS_STREAM_URL);
+
+    const syncGroups = (rawData: string) => {
+      try {
+        const parsed = JSON.parse(rawData) as { items?: GroupItem[] };
+        if (!Array.isArray(parsed.items)) {
+          return;
+        }
+        queryClient.setQueryData<GroupsResponse>(["groups"], { items: parsed.items });
+      } catch (error) {
+        console.error("Failed to parse groups stream payload", error);
+      }
+    };
+
+    source.addEventListener("groups", (event) => {
+      syncGroups((event as MessageEvent<string>).data);
+    });
+    source.onmessage = (event) => {
+      syncGroups(event.data);
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [bootstrapQuery.isSuccess, queryClient]);
+
+  useEffect(() => {
+    if (!bootstrapQuery.isSuccess) {
+      return;
+    }
+
     const source = new EventSource(PROCESS_EVENTS_URL);
 
     source.addEventListener("process_state_change", () => {
-      queryClient.invalidateQueries({ queryKey: ["processes"] });
       queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
       queryClient.invalidateQueries({ queryKey: ["chat-session-batch-progress"] });
+      queryClient.invalidateQueries({ queryKey: ["groups"] });
     });
     source.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.event === "process_state_change" || data.pk) {
-          queryClient.invalidateQueries({ queryKey: ["processes"] });
           queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
           queryClient.invalidateQueries({ queryKey: ["chat-session-batch-progress"] });
+          queryClient.invalidateQueries({ queryKey: ["groups"] });
         }
       } catch {
         // ignore unparseable keepalive messages
       }
+    };
+
+    return () => {
+      source.close();
+    };
+  }, [bootstrapQuery.isSuccess, queryClient]);
+
+  useEffect(() => {
+    if (!bootstrapQuery.isSuccess) {
+      return;
+    }
+
+    const source = new EventSource(INFRASTRUCTURE_STREAM_URL);
+
+    const syncInfrastructure = (rawData: string) => {
+      try {
+        const parsed = JSON.parse(rawData) as { items?: InfrastructureComputer[] };
+        if (!Array.isArray(parsed.items)) {
+          return;
+        }
+        queryClient.setQueryData<InfrastructureComputer[]>(["aiida-infrastructure"], parsed.items);
+        void queryClient.invalidateQueries({ queryKey: ["aiida-bridge-status"] });
+        void queryClient.invalidateQueries({ queryKey: ["aiida-bridge-resources"] });
+        void queryClient.invalidateQueries({ queryKey: ["aiida-bridge-profiles"] });
+      } catch (error) {
+        console.error("Failed to parse infrastructure stream payload", error);
+      }
+    };
+
+    source.addEventListener("infrastructure", (event) => {
+      syncInfrastructure((event as MessageEvent<string>).data);
+    });
+    source.onmessage = (event) => {
+      syncInfrastructure(event.data);
     };
 
     return () => {

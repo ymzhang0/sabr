@@ -657,7 +657,8 @@ export function Sidebar({
   const infraQuery = useQuery({
     queryKey: ["aiida-infrastructure"],
     queryFn: getInfrastructure,
-    refetchInterval: 30000,
+    refetchOnWindowFocus: true,
+    staleTime: 1_000,
   });
 
   const infrastructure = infraQuery.data || [];

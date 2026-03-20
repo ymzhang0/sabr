@@ -759,7 +759,7 @@ def test_build_chat_message_payload_extracts_submission_draft_from_submission_ta
                 "{\n"
                 '  "process_label": "PwBaseWorkChain",\n'
                 '  "inputs": {"structure_pk": 77},\n'
-                '  "meta": {"pk_map": [{"pk": 77}]}\n'
+                '  "meta": {"pk_map": [{"pk": 77}], "workchain": "quantumespresso.pw.base"}\n'
                 "}"
             )
         }
@@ -777,6 +777,41 @@ def test_build_chat_message_payload_extracts_submission_draft_from_submission_ta
     assert payload["type"] == "SUBMISSION_DRAFT"
     assert payload["submission_draft"]["process_label"] == "PwBaseWorkChain"
     assert payload["submission_draft"]["meta"]["pk_map"][0]["pk"] == 77
+    assert payload["submission_draft"]["meta"]["draft"] == {
+        "entry_point": "quantumespresso.pw.base",
+        "inputs": {"structure_pk": 77},
+    }
+
+
+def test_normalize_submission_draft_payload_derives_batch_submit_draft_from_jobs() -> None:
+    normalized = chat_service._normalize_submission_draft_payload(
+        {
+            "process_label": "quantumespresso.pw.base",
+            "inputs": {"kpoints_distance": 0.3},
+            "jobs": [
+                {
+                    "workchain": "quantumespresso.pw.base",
+                    "structure_pk": 6,
+                    "code": "pw@localhost",
+                    "protocol": "fast",
+                },
+                {
+                    "workchain": "quantumespresso.pw.base",
+                    "structure_pk": 7,
+                    "code": "pw@localhost",
+                    "protocol": "fast",
+                },
+            ],
+            "meta": {"workchain": "quantumespresso.pw.base"},
+        },
+        draft=None,
+        validation=None,
+        validation_summary=None,
+    )
+
+    assert isinstance(normalized["meta"]["draft"], list)
+    assert normalized["meta"]["draft"][0]["structure_pk"] == 6
+    assert normalized["meta"]["draft"][1]["structure_pk"] == 7
 
 
 def test_build_user_message_payload_keeps_context_nodes() -> None:

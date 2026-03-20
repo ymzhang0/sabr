@@ -9,13 +9,13 @@ import {
   switchBridgeProfile,
 } from "@/lib/api";
 import { CommandPaletteSelect } from "@/components/ui/command-palette-select";
-import { useEnvironmentStore } from "@/store/EnvironmentStore";
+import { useEnvironmentActions, useEnvironmentStore } from "@/store/EnvironmentStore";
 import { cn } from "@/lib/utils";
 import type { BridgeCodeResource, BridgeComputerResource, ResourceAttachment } from "@/types/aiida";
 import { NewProfileDrawer } from "./new-profile-drawer";
 
 const STATUS_POLL_INTERVAL_MS = 10_000;
-const DETAILS_POLL_INTERVAL_MS = 30_000;
+const DETAILS_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_BRIDGE_URL = "http://127.0.0.1:8001";
 
 type HoveredDetail = "computers" | "codes" | "plugins" | null;
@@ -138,6 +138,7 @@ interface BridgeStatusProps {
 export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSwitchProfileEnd }: BridgeStatusProps) {
   const queryClient = useQueryClient();
   const environmentState = useEnvironmentStore((state) => state);
+  const { refreshInspection } = useEnvironmentActions();
   const [hoveredDetail, setHoveredDetail] = useState<HoveredDetail>(null);
   const [isNewProfileDrawerOpen, setIsNewProfileDrawerOpen] = useState(false);
 
@@ -178,7 +179,8 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
         // Invalidate process and groups to get the new snapshot
         queryClient.invalidateQueries({ queryKey: ["processes"] }),
         queryClient.invalidateQueries({ queryKey: ["groups"] }),
-        queryClient.invalidateQueries({ queryKey: ["aiida-infrastructure"] })
+        queryClient.invalidateQueries({ queryKey: ["aiida-infrastructure"] }),
+        refreshInspection(),
       ]);
     },
     onSettled: () => {
@@ -192,7 +194,9 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
   const environmentReady = environmentState.inspectionStatus === "ready" && environmentInspection !== null;
   const environmentProfileName = normalizeProfileName(environmentInspection?.profile);
   const bridgeProfileName = normalizeProfileName(statusQuery.data?.profile) || normalizeProfileName(profilesQuery.data?.current_profile);
-  const profileName = environmentProfileName || bridgeProfileName || "unknown";
+  const profileName = environmentState.useWorkerDefault
+    ? (bridgeProfileName || environmentProfileName || "unknown")
+    : (environmentProfileName || bridgeProfileName || "unknown");
   const pluginNames = environmentReady
     ? environmentState.availablePlugins
     : (statusQuery.data?.plugins ?? []);

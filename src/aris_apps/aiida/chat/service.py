@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
@@ -2770,6 +2771,60 @@ def _submission_draft_is_batch(submission_draft: dict[str, Any] | None) -> bool:
     return False
 
 
+def _extract_actionable_submission_draft(
+    raw_submission_draft: dict[str, Any],
+    *,
+    inputs: dict[str, Any],
+    meta: dict[str, Any],
+    process_label: str,
+    draft: dict[str, Any] | list[dict[str, Any]] | None,
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    if isinstance(draft, dict):
+        return copy.deepcopy(draft)
+    if isinstance(draft, list):
+        normalized_batch = [copy.deepcopy(item) for item in draft if isinstance(item, dict)]
+        if normalized_batch:
+            return normalized_batch
+
+    raw_meta_draft = meta.get("draft")
+    if isinstance(raw_meta_draft, dict):
+        return copy.deepcopy(raw_meta_draft)
+    if isinstance(raw_meta_draft, list):
+        normalized_meta_batch = [copy.deepcopy(item) for item in raw_meta_draft if isinstance(item, dict)]
+        if normalized_meta_batch:
+            return normalized_meta_batch
+
+    for key in ("jobs", "tasks", "submissions", "drafts"):
+        candidate = raw_submission_draft.get(key)
+        if not isinstance(candidate, list):
+            continue
+        normalized_candidate = [copy.deepcopy(item) for item in candidate if isinstance(item, dict)]
+        if normalized_candidate:
+            return normalized_candidate
+
+    entry_point_candidates = (
+        meta.get("entry_point"),
+        meta.get("workchain"),
+        raw_submission_draft.get("entry_point"),
+        raw_submission_draft.get("workchain"),
+        process_label,
+    )
+    for candidate in entry_point_candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if "." not in text and ":" not in text:
+            continue
+        if not isinstance(inputs, dict) or not inputs:
+            return None
+        return {
+            "entry_point": text,
+            "inputs": copy.deepcopy(inputs),
+        }
+
+    return None
+
+
 def _strip_submission_draft_tail(answer_text: str | None) -> str:
     text = str(answer_text or "")
     if not text.strip():
@@ -2783,7 +2838,7 @@ def _strip_submission_draft_tail(answer_text: str | None) -> str:
 def _normalize_submission_draft_payload(
     raw_submission_draft: dict[str, Any],
     *,
-    draft: dict[str, Any] | None,
+    draft: dict[str, Any] | list[dict[str, Any]] | None,
     validation: dict[str, Any] | None,
     validation_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -2856,16 +2911,25 @@ def _normalize_submission_draft_payload(
     else:
         meta["pk_map"] = _collect_pk_map(inputs)
 
-    if isinstance(draft, dict):
-        meta["draft"] = draft
-        meta.setdefault("target_computer", _extract_target_computer(draft))
-        meta.setdefault("parallel_settings", _extract_parallel_settings(draft))
+    actionable_draft = _extract_actionable_submission_draft(
+        raw_submission_draft,
+        inputs=inputs,
+        meta=meta,
+        process_label=process_label,
+        draft=draft,
+    )
+    if actionable_draft is not None:
+        meta["draft"] = actionable_draft
+    draft_record = actionable_draft if isinstance(actionable_draft, dict) else None
+    if isinstance(draft_record, dict):
+        meta.setdefault("target_computer", _extract_target_computer(draft_record))
+        meta.setdefault("parallel_settings", _extract_parallel_settings(draft_record))
     parallel_settings = meta.get("parallel_settings")
     if not isinstance(parallel_settings, dict):
-        parallel_settings = _extract_parallel_settings(draft) if isinstance(draft, dict) else {}
+        parallel_settings = _extract_parallel_settings(draft_record) if isinstance(draft_record, dict) else {}
     meta["parallel_settings"] = parallel_settings
     if "target_computer" not in meta:
-        meta["target_computer"] = _extract_target_computer(draft) if isinstance(draft, dict) else None
+        meta["target_computer"] = _extract_target_computer(draft_record) if isinstance(draft_record, dict) else None
     meta.setdefault("workchain", process_label)
     for key, value in parallel_settings.items():
         lowered = str(key).strip().lower()
