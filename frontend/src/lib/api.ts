@@ -37,6 +37,7 @@ import type {
   ProcessDetailResponse,
   ProcessDiagnosticsResponse,
   ProcessLogsResponse,
+  ProcessWorkgraphResponse,
   ProcessesResponse,
   SendChatRequest,
   SoftDeleteNodeResponse,
@@ -593,6 +594,11 @@ export async function getProcessDetail(identifier: number | string): Promise<Pro
 
 export async function getProcessLogs(identifier: number | string): Promise<ProcessLogsResponse> {
   const { data } = await aiidaApi.get<ProcessLogsResponse>(`/process/${identifier}/logs`);
+  return data;
+}
+
+export async function getProcessWorkgraph(identifier: number | string): Promise<ProcessWorkgraphResponse> {
+  const { data } = await aiidaApi.get<ProcessWorkgraphResponse>(`/process/${identifier}/workgraph`);
   return data;
 }
 

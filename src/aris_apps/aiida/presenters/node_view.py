@@ -661,8 +661,8 @@ async def enrich_process_detail_payload(payload: dict[str, Any]) -> dict[str, An
         root_input_links, root_output_links, root_direct_in, root_direct_out = links_by_pk[root_pk]
         detail_inputs = _dedupe_links(detail_inputs + root_input_links)
         detail_outputs = _dedupe_links(detail_outputs + root_output_links)
-        detail_direct_inputs = _dedupe_links(detail_direct_inputs + root_direct_in)
-        detail_direct_outputs = _dedupe_links(detail_direct_outputs + root_direct_out)
+        detail_direct_inputs = _dedupe_links(detail_direct_inputs + (root_direct_in or []))
+        detail_direct_outputs = _dedupe_links(detail_direct_outputs + (root_direct_out or []))
     else:
         detail_inputs = _dedupe_links(detail_inputs)
         detail_outputs = _dedupe_links(detail_outputs)

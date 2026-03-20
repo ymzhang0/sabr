@@ -505,6 +505,47 @@ export type ProcessLogsResponse = {
   text: string;
 };
 
+export type ProcessWorkgraphNode = {
+  id: string;
+  label: string;
+  identifier: string;
+  task_type: string;
+  state: string;
+  position?: number[] | null;
+  children: string[];
+  inputs: string[];
+  outputs: string[];
+  incoming: string[];
+  outgoing: string[];
+  process_pk: number | null;
+  process_uuid: string | null;
+  process_label: string | null;
+  process_node_type: string | null;
+  process_state: string | null;
+  process_exit_status: number | null;
+};
+
+export type ProcessWorkgraphEdge = {
+  id: string;
+  source: string;
+  target: string;
+  source_socket: string | null;
+  target_socket: string | null;
+  label: string | null;
+};
+
+export type ProcessWorkgraphResponse = {
+  pk: number;
+  label: string;
+  state: string;
+  name: string;
+  roots: string[];
+  topological_order: string[];
+  levels: string[][];
+  nodes: ProcessWorkgraphNode[];
+  edges: ProcessWorkgraphEdge[];
+};
+
 export type ProcessDetailResponse = {
   summary?: {
     pk?: number;

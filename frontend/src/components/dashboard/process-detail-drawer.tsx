@@ -28,6 +28,7 @@ import {
   getProcessDetail,
   getProcessDiagnostics,
   getProcessLogs,
+  getProcessWorkgraph,
   getRemoteFileContent,
   getRemoteFiles,
   getRepositoryFileContent,
@@ -47,6 +48,8 @@ import type {
   ProcessLogsResponse,
   ProcessNodeLink,
   ProcessTreeNode,
+  ProcessWorkgraphNode,
+  ProcessWorkgraphResponse,
 } from "@/types/aiida";
 
 type ProcessDetailDrawerProps = {
@@ -103,6 +106,25 @@ type NodeLinksBlockProps = {
   showTitle?: boolean;
 };
 
+type WorkgraphNodeCardProps = {
+  node: ProcessWorkgraphNode;
+  outgoingLabels: string[];
+  onOpenNodeDetail: (link: ProcessNodeLink, direction: InspectorLinkDirection) => void;
+  onAddContextNode: (node: FocusNode) => void;
+};
+
+type WorkgraphViewMode = "graph" | "stage";
+
+type WorkgraphGraphLayoutNode = {
+  node: ProcessWorkgraphNode;
+  levelIndex: number;
+  rowIndex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 const LOG_SNIPPET_LINE_LIMIT = 80;
 const RUNNING_STATES = new Set(["running", "created", "waiting"]);
 const FINISHED_STATES = new Set(["finished", "success", "completed", "ok"]);
@@ -110,6 +132,12 @@ const FAILED_STATES = new Set(["failed", "excepted", "killed", "error"]);
 const WORKCHAIN_NODE_HINTS = ["workchain", "workflow"];
 
 type InspectorMode = "overview" | "diagnostics";
+
+const WORKGRAPH_GRAPH_NODE_WIDTH = 272;
+const WORKGRAPH_GRAPH_NODE_MIN_HEIGHT = 148;
+const WORKGRAPH_GRAPH_COLUMN_GAP = 132;
+const WORKGRAPH_GRAPH_ROW_GAP = 30;
+const WORKGRAPH_GRAPH_PADDING = 28;
 
 type StatusTone = {
   dotClassName: string;
@@ -1061,6 +1089,14 @@ function isWorkChainType(nodeType: string | null | undefined): boolean {
   return WORKCHAIN_NODE_HINTS.some((hint) => normalized.includes(hint));
 }
 
+function isWorkGraphType(nodeType: string | null | undefined): boolean {
+  const normalized = String(nodeType || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes("workgraph");
+}
+
 function isProcessLikeNodeType(nodeType: string | null | undefined): boolean {
   const normalized = String(nodeType || "").trim().toLowerCase();
   if (!normalized) {
@@ -1397,6 +1433,428 @@ function ProcessTreeNodeView({ label, node, depth = 0, onOpenNodeDetail, onAddCo
   );
 }
 
+function buildWorkgraphGraphLayout(workgraph: ProcessWorkgraphResponse): {
+  width: number;
+  height: number;
+  layoutNodes: WorkgraphGraphLayoutNode[];
+  layoutById: Map<string, WorkgraphGraphLayoutNode>;
+} {
+  const nodeMap = new Map(workgraph.nodes.map((node) => [node.id, node]));
+  const columns = workgraph.levels.length > 0 ? workgraph.levels : [workgraph.nodes.map((node) => node.id)];
+  const width =
+    WORKGRAPH_GRAPH_PADDING * 2 +
+    columns.length * WORKGRAPH_GRAPH_NODE_WIDTH +
+    Math.max(0, columns.length - 1) * WORKGRAPH_GRAPH_COLUMN_GAP;
+  const layoutNodes: WorkgraphGraphLayoutNode[] = [];
+  const layoutById = new Map<string, WorkgraphGraphLayoutNode>();
+  const estimatedHeights = new Map<string, number>();
+
+  const estimateNodeHeight = (node: ProcessWorkgraphNode): number => {
+    const identifierLineCount = Math.max(1, Math.min(3, Math.ceil((node.identifier || node.id).length / 36)));
+    const visibleChipCount = Math.min(2, node.inputs.length) + Math.min(2, node.outputs.length);
+    const chipRowCount = visibleChipCount > 0 ? Math.ceil(visibleChipCount / 2) : 0;
+    const hasProcessControls = typeof node.process_pk === "number" && node.process_pk > 0;
+    return (
+      WORKGRAPH_GRAPH_NODE_MIN_HEIGHT +
+      (identifierLineCount - 1) * 18 +
+      chipRowCount * 20 +
+      (hasProcessControls ? 0 : 6)
+    );
+  };
+
+  columns.forEach((level) => {
+    level.forEach((nodeId) => {
+      const node = nodeMap.get(nodeId);
+      if (!node) {
+        return;
+      }
+      estimatedHeights.set(nodeId, estimateNodeHeight(node));
+    });
+  });
+
+  const columnHeights = columns.map((level) =>
+    level.reduce((total, nodeId, index) => {
+      const nodeHeight = estimatedHeights.get(nodeId) ?? WORKGRAPH_GRAPH_NODE_MIN_HEIGHT;
+      return total + nodeHeight + (index > 0 ? WORKGRAPH_GRAPH_ROW_GAP : 0);
+    }, 0),
+  );
+  const innerHeight = Math.max(...columnHeights, WORKGRAPH_GRAPH_NODE_MIN_HEIGHT);
+  const height = WORKGRAPH_GRAPH_PADDING * 2 + innerHeight;
+
+  columns.forEach((level, levelIndex) => {
+    const columnHeight = columnHeights[levelIndex] ?? 0;
+    const startY = WORKGRAPH_GRAPH_PADDING + Math.max(0, (innerHeight - columnHeight) / 2);
+    const x = WORKGRAPH_GRAPH_PADDING + levelIndex * (WORKGRAPH_GRAPH_NODE_WIDTH + WORKGRAPH_GRAPH_COLUMN_GAP);
+    let currentY = startY;
+
+    level.forEach((nodeId, rowIndex) => {
+      const node = nodeMap.get(nodeId);
+      if (!node) {
+        return;
+      }
+      const nodeHeight = estimatedHeights.get(nodeId) ?? WORKGRAPH_GRAPH_NODE_MIN_HEIGHT;
+      const layoutNode: WorkgraphGraphLayoutNode = {
+        node,
+        levelIndex,
+        rowIndex,
+        x,
+        y: currentY,
+        width: WORKGRAPH_GRAPH_NODE_WIDTH,
+        height: nodeHeight,
+      };
+      layoutNodes.push(layoutNode);
+      layoutById.set(nodeId, layoutNode);
+      currentY += nodeHeight + WORKGRAPH_GRAPH_ROW_GAP;
+    });
+  });
+
+  return { width, height, layoutNodes, layoutById };
+}
+
+function buildWorkgraphEdgePath(
+  source: WorkgraphGraphLayoutNode,
+  target: WorkgraphGraphLayoutNode,
+): string {
+  const startX = source.x + source.width;
+  const startY = source.y + source.height / 2;
+  const endX = target.x;
+  const endY = target.y + target.height / 2;
+  const controlOffset = Math.max(48, (endX - startX) * 0.45);
+  return `M ${startX} ${startY} C ${startX + controlOffset} ${startY}, ${endX - controlOffset} ${endY}, ${endX} ${endY}`;
+}
+
+function WorkgraphNodeCard({ node, outgoingLabels, onOpenNodeDetail, onAddContextNode }: WorkgraphNodeCardProps) {
+  const taskTone = getStatusTone(node.process_state ?? node.state);
+  const canOpenProcess = typeof node.process_pk === "number" && node.process_pk > 0;
+  const cardLabel = node.process_label || node.label || node.identifier || node.id;
+
+  const handleOpen = () => {
+    if (!canOpenProcess) {
+      return;
+    }
+    onOpenNodeDetail(
+      {
+        link_label: node.label,
+        node_type: node.process_node_type || node.task_type,
+        pk: node.process_pk ?? 0,
+        label: cardLabel,
+      },
+      "output",
+    );
+  };
+
+  return (
+    <div className="rounded-xl border border-zinc-200/80 bg-white/90 p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950/80">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{node.label}</p>
+          <p className="mt-1 text-[11px] uppercase tracking-[0.08em] text-zinc-500 dark:text-zinc-400">{node.task_type}</p>
+        </div>
+        <span className={cn("inline-flex items-center gap-1 text-[11px] font-medium", taskTone.textClassName)}>
+          <span className={cn("h-1.5 w-1.5 rounded-full", taskTone.dotClassName)} />
+          {toDisplayStatus(node.process_state ?? node.state)}
+        </span>
+      </div>
+
+      <div className="mt-3 space-y-2 text-xs text-zinc-600 dark:text-zinc-300">
+        <p className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{node.identifier}</p>
+        {canOpenProcess ? (
+          <button
+            type="button"
+            className="inline-flex items-center rounded-md border border-zinc-200/80 px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900"
+            onClick={handleOpen}
+          >
+            Open Process #{node.process_pk}
+          </button>
+        ) : (
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">Task process has not materialized into an AiiDA node yet.</p>
+        )}
+        <div className="flex flex-wrap gap-1.5">
+          {node.inputs.slice(0, 4).map((inputName) => (
+            <span key={`${node.id}-input-${inputName}`} className="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-500/10 dark:text-sky-200">
+              in: {inputName}
+            </span>
+          ))}
+          {node.outputs.slice(0, 4).map((outputName) => (
+            <span key={`${node.id}-output-${outputName}`} className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200">
+              out: {outputName}
+            </span>
+          ))}
+        </div>
+        {outgoingLabels.length > 0 ? (
+          <p className="text-[11px] text-zinc-500 dark:text-zinc-400">
+            Next: {outgoingLabels.join(", ")}
+          </p>
+        ) : null}
+      </div>
+
+      {canOpenProcess ? (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">
+            PK {node.process_pk}
+          </span>
+          <button
+            type="button"
+            className="text-[11px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100"
+            onClick={() =>
+              onAddContextNode({
+                pk: node.process_pk ?? 0,
+                label: cardLabel,
+                formula: null,
+                node_type: node.process_node_type || node.task_type,
+              })
+            }
+          >
+            Add Context
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function renderWorkgraphConnections(workgraph: ProcessWorkgraphResponse) {
+  const nodeMap = new Map(workgraph.nodes.map((node) => [node.id, node]));
+
+  return (
+    <div className="rounded-xl border border-zinc-200/80 bg-zinc-50/70 p-4 dark:border-zinc-800 dark:bg-zinc-900/50">
+      <div className="mb-3 flex items-center gap-2">
+        <Activity className="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+        <h4 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Connections</h4>
+      </div>
+      {workgraph.edges.length === 0 ? (
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">No task-to-task links were reported for this workgraph.</p>
+      ) : (
+        <div className="space-y-2">
+          {workgraph.edges.map((edge) => (
+            <div
+              key={edge.id}
+              className="flex flex-wrap items-center gap-2 text-xs text-zinc-600 dark:text-zinc-300"
+            >
+              <span className="rounded-full bg-white px-2 py-0.5 font-medium dark:bg-zinc-950">{nodeMap.get(edge.source)?.label || edge.source}</span>
+              <ChevronRight className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500" />
+              <span className="rounded-full bg-white px-2 py-0.5 font-medium dark:bg-zinc-950">{nodeMap.get(edge.target)?.label || edge.target}</span>
+              {edge.label ? (
+                <span className="font-mono text-[11px] text-zinc-500 dark:text-zinc-400">{edge.label}</span>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderWorkgraphStage(
+  workgraph: ProcessWorkgraphResponse,
+  onOpenNodeDetail: (link: ProcessNodeLink, direction: InspectorLinkDirection) => void,
+  onAddContextNode: (node: FocusNode) => void,
+) {
+  const nodeMap = new Map(workgraph.nodes.map((node) => [node.id, node]));
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+          {workgraph.nodes.length} tasks
+        </span>
+        <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+          {workgraph.edges.length} links
+        </span>
+        {workgraph.roots.length > 0 ? (
+          <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+            Roots: {workgraph.roots.join(", ")}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="overflow-x-auto pb-2">
+        <div className="grid auto-cols-[minmax(16rem,18rem)] grid-flow-col gap-4">
+          {workgraph.levels.map((level, levelIndex) => (
+            <div key={`workgraph-level-${levelIndex}`} className="space-y-3">
+              <div className="flex items-center gap-2 px-1">
+                <GitBranch className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500" />
+                <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-zinc-500 dark:text-zinc-400">
+                  Stage {levelIndex + 1}
+                </p>
+              </div>
+              {level.map((nodeId) => {
+                const node = nodeMap.get(nodeId);
+                if (!node) {
+                  return null;
+                }
+                const outgoingLabels = node.outgoing
+                  .map((targetId) => nodeMap.get(targetId)?.label || targetId)
+                  .filter(Boolean);
+                return (
+                  <WorkgraphNodeCard
+                    key={node.id}
+                    node={node}
+                    outgoingLabels={outgoingLabels}
+                    onOpenNodeDetail={onOpenNodeDetail}
+                    onAddContextNode={onAddContextNode}
+                  />
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {renderWorkgraphConnections(workgraph)}
+    </div>
+  );
+}
+
+function renderWorkgraphGraph(
+  workgraph: ProcessWorkgraphResponse,
+  onOpenNodeDetail: (link: ProcessNodeLink, direction: InspectorLinkDirection) => void,
+  onAddContextNode: (node: FocusNode) => void,
+) {
+  const { width, height, layoutNodes, layoutById } = buildWorkgraphGraphLayout(workgraph);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+          {workgraph.nodes.length} tasks
+        </span>
+        <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+          {workgraph.edges.length} links
+        </span>
+        {workgraph.roots.length > 0 ? (
+          <span className="inline-flex items-center rounded-full border border-zinc-200/80 bg-zinc-50 px-2.5 py-1 text-[11px] font-medium text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-300">
+            Roots: {workgraph.roots.join(", ")}
+          </span>
+        ) : null}
+      </div>
+
+      <div className="overflow-x-auto rounded-2xl border border-zinc-200/80 bg-[radial-gradient(circle_at_top_left,_rgba(148,163,184,0.08),_transparent_40%),linear-gradient(to_bottom_right,_rgba(255,255,255,0.98),_rgba(248,250,252,0.9))] p-3 dark:border-zinc-800 dark:bg-[radial-gradient(circle_at_top_left,_rgba(100,116,139,0.14),_transparent_35%),linear-gradient(to_bottom_right,_rgba(9,9,11,0.98),_rgba(24,24,27,0.92))]">
+        <div className="relative" style={{ width, height }}>
+          <svg
+            className="absolute inset-0 h-full w-full"
+            width={width}
+            height={height}
+            viewBox={`0 0 ${width} ${height}`}
+            fill="none"
+            aria-hidden="true"
+          >
+            <defs>
+              <marker id="workgraph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" className="fill-zinc-400 dark:fill-zinc-500" />
+              </marker>
+            </defs>
+            {workgraph.edges.map((edge) => {
+              const source = layoutById.get(edge.source);
+              const target = layoutById.get(edge.target);
+              if (!source || !target) {
+                return null;
+              }
+              return (
+                <g key={edge.id}>
+                  <path
+                    d={buildWorkgraphEdgePath(source, target)}
+                    className="stroke-zinc-300 dark:stroke-zinc-700"
+                    strokeWidth="2"
+                    markerEnd="url(#workgraph-arrow)"
+                  />
+                </g>
+              );
+            })}
+          </svg>
+
+          {layoutNodes.map(({ node, x, y, width: nodeWidth, height: nodeHeight, levelIndex }) => {
+            const tone = getStatusTone(node.process_state ?? node.state);
+            const canOpenProcess = typeof node.process_pk === "number" && node.process_pk > 0;
+            const cardLabel = node.process_label || node.label || node.identifier || node.id;
+
+            return (
+              <div
+                key={node.id}
+                className="absolute flex flex-col rounded-2xl border border-zinc-200/90 bg-white/95 p-4 shadow-[0_14px_30px_-18px_rgba(15,23,42,0.35)] backdrop-blur-sm dark:border-zinc-800 dark:bg-zinc-950/92"
+                style={{ left: x, top: y, width: nodeWidth, height: nodeHeight }}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{node.label}</p>
+                    <p className="mt-1 text-[10px] uppercase tracking-[0.08em] text-zinc-500 dark:text-zinc-400">
+                      Stage {levelIndex + 1} · {node.task_type}
+                    </p>
+                  </div>
+                  <span className={cn("inline-flex items-center gap-1 text-[10px] font-medium", tone.textClassName)}>
+                    <span className={cn("h-1.5 w-1.5 rounded-full", tone.dotClassName)} />
+                    {toDisplayStatus(node.process_state ?? node.state)}
+                  </span>
+                </div>
+
+                <div className="mt-3 flex min-h-0 flex-1 flex-col justify-between">
+                  <div className="space-y-2.5">
+                    <p className="break-all font-mono text-[10px] leading-4 text-zinc-500 dark:text-zinc-400">{node.identifier}</p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {node.inputs.slice(0, 2).map((inputName) => (
+                        <span key={`${node.id}-graph-input-${inputName}`} className="rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-500/10 dark:text-sky-200">
+                          {inputName}
+                        </span>
+                      ))}
+                      {node.outputs.slice(0, 2).map((outputName) => (
+                        <span key={`${node.id}-graph-output-${outputName}`} className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-200">
+                          {outputName}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="mt-3 flex items-center justify-between gap-2">
+                    {canOpenProcess ? (
+                      <button
+                        type="button"
+                        className="inline-flex items-center rounded-md border border-zinc-200/80 px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                        onClick={() =>
+                          onOpenNodeDetail(
+                            {
+                              link_label: node.label,
+                              node_type: node.process_node_type || node.task_type,
+                              pk: node.process_pk ?? 0,
+                              label: cardLabel,
+                            },
+                            "output",
+                          )
+                        }
+                      >
+                        Open #{node.process_pk}
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-zinc-500 dark:text-zinc-400">Planned task</span>
+                    )}
+                    {canOpenProcess ? (
+                      <button
+                        type="button"
+                        className="text-[11px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-300 dark:hover:text-zinc-100"
+                        onClick={() =>
+                          onAddContextNode({
+                            pk: node.process_pk ?? 0,
+                            label: cardLabel,
+                            formula: null,
+                            node_type: node.process_node_type || node.task_type,
+                          })
+                        }
+                      >
+                        Add
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {renderWorkgraphConnections(workgraph)}
+    </div>
+  );
+}
+
 function renderLogs(logs: ProcessLogsResponse | undefined) {
   const lines = logs?.lines ?? [];
   if (!logs) {
@@ -1470,10 +1928,15 @@ function InspectorPanel({
   preferredMode = "overview",
 }: InspectorPanelProps) {
   const [panelMode, setPanelMode] = useState<InspectorMode>(preferredMode);
+  const [workgraphViewMode, setWorkgraphViewMode] = useState<WorkgraphViewMode>("graph");
 
   useEffect(() => {
     setPanelMode(preferredMode);
   }, [preferredMode, target.pk]);
+
+  useEffect(() => {
+    setWorkgraphViewMode("graph");
+  }, [target.pk]);
 
   const detailQuery = useQuery({
     queryKey: ["process-detail", target.pk],
@@ -1485,6 +1948,7 @@ function InspectorPanel({
   const summary = detailQuery.data?.summary;
   const nodeType = summary?.node_type ?? summary?.type ?? target.nodeType ?? "Node";
   const isProcessTarget = isProcessLikeNodeType(nodeType);
+  const isWorkgraphTarget = isWorkGraphType(nodeType);
 
   const logsQuery = useQuery({
     queryKey: ["process-logs", target.pk],
@@ -1509,9 +1973,15 @@ function InspectorPanel({
   const directInputs = detailQuery.data?.direct_inputs ?? detailQuery.data?.inputs ?? {};
   const directOutputs = detailQuery.data?.direct_outputs ?? detailQuery.data?.outputs ?? {};
   const hasStandaloneLinks = Object.keys(directInputs).length > 0 || Object.keys(directOutputs).length > 0;
+  const workgraphQuery = useQuery({
+    queryKey: ["process-workgraph", target.pk],
+    queryFn: () => getProcessWorkgraph(target.pk),
+    enabled: Boolean(target.pk) && isWorkgraphTarget,
+    staleTime: 4_000,
+  });
   const showProcessTree =
-    isProcessTarget ||
-    isWorkChainType(nodeType) ||
+    (isProcessTarget && !isWorkgraphTarget) ||
+    (!isWorkgraphTarget && isWorkChainType(nodeType)) ||
     Boolean(detailQuery.data?.workchain?.provenance_tree);
   const diagnosticsQuery = useQuery({
     queryKey: ["process-diagnostics", target.pk],
@@ -1554,6 +2024,61 @@ function InspectorPanel({
             </div>
           ) : null}
           <NodePreviewContent node={previewNode} />
+        </section>
+      )}
+
+      {isWorkgraphTarget && (
+        <section className="space-y-3">
+          <div className="mb-1 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Workgraph</h3>
+              <div className="inline-flex items-center rounded-full border border-zinc-200/80 bg-white/90 p-1 dark:border-zinc-800 dark:bg-zinc-950/80">
+                <button
+                  type="button"
+                  className={cn(
+                    "rounded-full px-3 py-1 text-[11px] font-medium transition-colors",
+                    workgraphViewMode === "graph"
+                      ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                      : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100",
+                  )}
+                  onClick={() => setWorkgraphViewMode("graph")}
+                >
+                  Graph
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    "rounded-full px-3 py-1 text-[11px] font-medium transition-colors",
+                    workgraphViewMode === "stage"
+                      ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900"
+                      : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100",
+                  )}
+                  onClick={() => setWorkgraphViewMode("stage")}
+                >
+                  Stages
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] uppercase tracking-[0.08em] text-zinc-400 dark:text-zinc-500">
+                {workgraphViewMode === "graph" ? "Arrow Layout" : "Stage Layout"}
+              </span>
+              {workgraphQuery.isFetching ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400 dark:text-zinc-500" />
+              ) : null}
+            </div>
+          </div>
+          {workgraphQuery.isError ? (
+            <p className="text-sm font-sans tracking-tight text-rose-500">Failed to load workgraph structure.</p>
+          ) : workgraphQuery.isPending ? (
+            <p className="animate-pulse text-sm font-sans text-zinc-500 dark:text-zinc-400">Loading workgraph structure...</p>
+          ) : workgraphQuery.data ? (
+            workgraphViewMode === "graph"
+              ? renderWorkgraphGraph(workgraphQuery.data, onOpenNodeDetail, onAddContextNode)
+              : renderWorkgraphStage(workgraphQuery.data, onOpenNodeDetail, onAddContextNode)
+          ) : (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">No workgraph structure is available for this node.</p>
+          )}
         </section>
       )}
 

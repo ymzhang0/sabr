@@ -1783,6 +1783,18 @@ async def worker_process_logs(identifier: str):
         raise HTTPException(status_code=max(400, int(exc.status_code or 502)), detail=detail) from exc
 
 
+@router.get("/process/{identifier}/workgraph", tags=[WORKER_PROXY_TAG])
+async def worker_process_workgraph(identifier: str):
+    try:
+        payload = await request_json("GET", f"/process/{identifier}/workgraph")
+        return payload if isinstance(payload, dict) else {"data": payload}
+    except BridgeOfflineError as exc:
+        raise HTTPException(status_code=503, detail={"error": str(exc)}) from exc
+    except BridgeAPIError as exc:
+        detail = exc.payload if isinstance(exc.payload, dict) else {"error": exc.message, "details": exc.payload}
+        raise HTTPException(status_code=max(400, int(exc.status_code or 502)), detail=detail) from exc
+
+
 @router.post("/data/import/{data_type}", tags=[WORKER_PROXY_TAG])
 async def proxy_import_data(
     data_type: str,
