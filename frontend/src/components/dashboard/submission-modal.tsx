@@ -1,4 +1,4 @@
-import { AlertTriangle, Atom, Box, CheckCircle2, ChevronDown, ChevronRight, Cpu, Folder, FolderTree, GitBranch, Loader2, Server, Settings2, X } from "lucide-react";
+import { AlertTriangle, Box, CheckCircle2, ChevronDown, ChevronRight, Cpu, Folder, FolderTree, GitBranch, Loader2, Server, Settings2, X } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useState, useRef } from "react";
 
 import { PreviewCard, type PreviewCardBadge, type PreviewCardMetaItem, PreviewCardSection } from "@/components/dashboard/PreviewCard";
@@ -113,6 +113,12 @@ type SubmissionPrimaryFields = {
   code: SubmissionPrimaryInputField | null;
   structure: SubmissionPrimaryInputField | null;
   pseudos: SubmissionPrimaryInputField | null;
+};
+
+type SubmissionPrimaryPreviewItem = {
+  id: string;
+  label: string;
+  field: SubmissionPrimaryInputField | null;
 };
 
 export type SubmissionSubmitDraft = Record<string, unknown> | Array<Record<string, unknown>>;
@@ -349,6 +355,46 @@ function formatSettingKey(key: string): string {
   return key
     .replace(/_/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function iconForPreviewSummary(label: string, path?: string | null): typeof Cpu {
+  const source = `${path ?? ""} ${label}`.trim().toLowerCase();
+  if (source.includes("code")) {
+    return Cpu;
+  }
+  if (
+    source.includes("structure") ||
+    source.includes("pseudo") ||
+    source.includes("atom") ||
+    source.includes("formula")
+  ) {
+    return Box;
+  }
+  if (source.includes("kpoint") || source.includes("mesh") || source.includes("brillouin")) {
+    return GitBranch;
+  }
+  if (
+    source.includes("metadata") ||
+    source.includes("resource") ||
+    source.includes("computer") ||
+    source.includes("queue") ||
+    source.includes("account") ||
+    source.includes("scheduler")
+  ) {
+    return Server;
+  }
+  if (source.includes("workdir") || source.includes("folder") || source.includes("path")) {
+    return FolderTree;
+  }
+  if (
+    source.includes("protocol") ||
+    source.includes("parameter") ||
+    source.includes("setting") ||
+    source.includes("detail")
+  ) {
+    return Settings2;
+  }
+  return Box;
 }
 
 type NormalizedCodeOption = {
@@ -657,6 +703,34 @@ function extractPrimaryFields(submissionDraft: SubmissionDraftPayload): Submissi
   };
 }
 
+function normalizePrimaryPreviewItems(submissionDraft: SubmissionDraftPayload): SubmissionPrimaryPreviewItem[] {
+  const source = asRecord(submissionDraft.primary_inputs);
+  if (source) {
+    const items = Object.entries(source).reduce<SubmissionPrimaryPreviewItem[]>((accumulator, [key, value]) => {
+      const normalized = normalizePrimaryField(formatSettingKey(key), value);
+      if (!normalized || isMissingValue(normalized.value)) {
+        return accumulator;
+      }
+      accumulator.push({
+        id: key.trim() || `primary-${accumulator.length}`,
+        label: normalized.label?.trim() || formatSettingKey(key),
+        field: normalized,
+      });
+      return accumulator;
+    }, []);
+    if (items.length > 0) {
+      return items;
+    }
+  }
+
+  const fallback = extractPrimaryFields(submissionDraft);
+  return [
+    { id: "code", label: "Code", field: fallback.code },
+    { id: "structure", label: "Structure", field: fallback.structure },
+    { id: "pseudos", label: "Pseudopotentials", field: fallback.pseudos },
+  ].filter((item) => item.field && !isMissingValue(item.field.value));
+}
+
 function renderPkLinkedText(
   text: string,
   seed: string,
@@ -698,13 +772,21 @@ function renderPkLinkedText(
   return nodes;
 }
 
-function renderValueNode(value: unknown, seed: string, onOpenDetail: (pk: number) => void): ReactNode {
+function renderValueNode(
+  value: unknown,
+  seed: string,
+  onOpenDetail: (pk: number) => void,
+  options?: { truncate?: boolean },
+): ReactNode {
   const text = stringifyCompact(value);
   if (!text) {
-    return <span className="inline-flex rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500 dark:bg-slate-800 dark:text-slate-300">Default</span>;
+    return <span className="text-sm font-medium text-slate-400 dark:text-slate-500">Default</span>;
   }
   return (
-    <span className="break-all" title={text}>
+    <span
+      className={cn("block min-w-0", options?.truncate ? "truncate" : "break-words")}
+      title={text}
+    >
       {renderPkLinkedText(text, seed, onOpenDetail)}
     </span>
   );
@@ -2554,84 +2636,6 @@ function formatBatchPathLabel(path: string): string {
   return formatSettingKey(leaf);
 }
 
-function summarizeBatchResources(
-  commonInputs: Record<string, unknown>,
-  parallelSettings: Record<string, unknown> | null,
-): string {
-  const flattenedCommon = flattenComparableInputPorts(commonInputs);
-  const parallel = parallelSettings ?? {};
-  const hasExplicitResourceSetting =
-    Object.keys(flattenedCommon).some((path) => path.startsWith("metadata.options.resources.") || path === "metadata.options.queue_name") ||
-    [
-      parallel.num_machines,
-      parallel.tot_num_mpiprocs,
-      parallel.num_cores_per_machine,
-      parallel.num_mpiprocs_per_machine,
-      parallel.queue_name,
-    ].some((value) => !isMissingValue(value));
-  if (!hasExplicitResourceSetting) {
-    return "System selected";
-  }
-  const numMachines =
-    toPositiveInteger(flattenedCommon["metadata.options.resources.num_machines"]) ??
-    toPositiveInteger(parallel.num_machines) ??
-    1;
-  const totalCores =
-    toPositiveInteger(flattenedCommon["metadata.options.resources.tot_num_mpiprocs"]) ??
-    toPositiveInteger(parallel.tot_num_mpiprocs) ??
-    (() => {
-      const perMachine =
-        toPositiveInteger(flattenedCommon["metadata.options.resources.num_cores_per_machine"]) ??
-        toPositiveInteger(parallel.num_cores_per_machine) ??
-        toPositiveInteger(flattenedCommon["metadata.options.resources.num_mpiprocs_per_machine"]) ??
-        toPositiveInteger(parallel.num_mpiprocs_per_machine);
-      return perMachine ? perMachine * Math.max(numMachines, 1) : null;
-    })();
-  const queueName =
-    stringifyCompact(flattenedCommon["metadata.options.queue_name"] ?? parallel.queue_name) || "";
-
-  const parts = [`${numMachines} ${numMachines === 1 ? "node" : "nodes"} / ${totalCores ?? "auto"} cores`];
-  if (queueName) {
-    parts.push(`queue ${queueName}`);
-  }
-  return parts.join(" • ");
-}
-
-function summarizeBatchCommonEntries(entries: SubmissionAllInputEntry[]): string {
-  if (entries.length === 0) {
-    return "No shared parameters detected.";
-  }
-  const prioritizedLeaves = [
-    "code",
-    "pseudo_family",
-    "pseudo_family_label",
-    "pseudos",
-    "kpoints_distance",
-    "kpoints_mesh",
-    "mesh",
-    "protocol",
-    "ecutwfc",
-    "ecutrho",
-  ];
-  const prioritized = [...entries].sort((left, right) => {
-    const leftLeaf = left.path.split(".").pop()?.trim().toLowerCase() ?? "";
-    const rightLeaf = right.path.split(".").pop()?.trim().toLowerCase() ?? "";
-    const leftRank = prioritizedLeaves.indexOf(leftLeaf);
-    const rightRank = prioritizedLeaves.indexOf(rightLeaf);
-    if (leftRank !== rightRank) {
-      if (leftRank === -1) return 1;
-      if (rightRank === -1) return -1;
-      return leftRank - rightRank;
-    }
-    return left.path.localeCompare(right.path);
-  });
-  const sample = prioritized
-    .slice(0, 3)
-    .map((entry) => `${formatBatchPathLabel(entry.path)} = ${stringifyCompact(entry.value) || "Default"}`)
-    .filter(Boolean);
-  return sample.length > 0 ? sample.join(" • ") : `${entries.length} shared parameters`;
-}
-
 function hasVisibleBatchVariationValue(value: unknown): boolean {
   if (isMissingValue(value)) {
     return false;
@@ -2755,10 +2759,6 @@ export function SubmissionModal({
     () => normalizePkMapEntries(submissionDraft?.meta.pk_map),
     [submissionDraft],
   );
-  const basePrimaryFields = useMemo<SubmissionPrimaryFields>(
-    () => (submissionDraft ? extractPrimaryFields(submissionDraft) : { code: null, structure: null, pseudos: null }),
-    [submissionDraft],
-  );
   const portSpec = useMemo(
     () => normalizePortSpec(submissionDraft?.meta.port_spec),
     [submissionDraft?.meta.port_spec],
@@ -2856,16 +2856,6 @@ export function SubmissionModal({
     }
     return stringifyCompact(entryValueByPath[primaryCodePath] ?? "");
   }, [draftState, entryValueByPath, primaryCodePath]);
-  const primaryFields = useMemo<SubmissionPrimaryFields>(() => {
-    if (!submissionDraft) {
-      return { code: null, structure: null, pseudos: null };
-    }
-    const resolvedCode = normalizePrimaryField("Code", primaryCodeValue);
-    return {
-      ...basePrimaryFields,
-      code: resolvedCode ?? basePrimaryFields.code,
-    };
-  }, [basePrimaryFields, primaryCodeValue, submissionDraft]);
   const effectiveCodeOptions = useMemo(() => {
     if (availableCodeOptions.length > 0) {
       return availableCodeOptions;
@@ -2901,38 +2891,6 @@ export function SubmissionModal({
   const groupedInputSections = useMemo(
     () => (submissionDraft ? buildInputGroupsForModal(submissionDraft, inspectorInputEntries) : []),
     [inspectorInputEntries, submissionDraft],
-  );
-  const structureSummaryPath = useMemo(
-    () => findFirstPathByLeafCandidates(inspectorInputEntries, ["structure", "structure_pk", "structure_id"]),
-    [inspectorInputEntries],
-  );
-  const pseudosSummaryPath = useMemo(
-    () =>
-      findFirstPathByLeafCandidates(inspectorInputEntries, [
-        "pseudos",
-        "pseudo",
-        "pseudopotentials",
-        "pseudo_family",
-        "pseudo_family_label",
-      ]),
-    [inspectorInputEntries],
-  );
-  const kpointsSummaryPath = useMemo(
-    () =>
-      findFirstPathByLeafCandidates(inspectorInputEntries, [
-        "kpoints",
-        "k_points",
-        "kpoint_mesh",
-        "kpoints_mesh",
-        "mesh",
-        "kpoints_distance",
-        "kpoint_distance",
-      ]),
-    [inspectorInputEntries],
-  );
-  const protocolSummaryPath = useMemo(
-    () => findFirstPathByLeafCandidates(inspectorInputEntries, ["protocol", "relax_type"]),
-    [inspectorInputEntries],
   );
   const batchJobs = useMemo(
     () => (submissionDraft ? extractBatchJobRows(submissionDraft) : []),
@@ -3184,19 +3142,11 @@ export function SubmissionModal({
   const targetWorkdirUiType = targetWorkdirPath
     ? inferUiTypeFromPathAndValue(targetWorkdirPath, targetWorkdirValue)
     : "text";
+  const primaryPreviewItems = useMemo(
+    () => (submissionDraft ? normalizePrimaryPreviewItems(submissionDraft) : []),
+    [submissionDraft],
+  );
   const selectedJobsForSummary = isBatchDraft && selectedBatchJobs.length > 0 ? selectedBatchJobs : batchJobs;
-  const batchCommonSummaryText = useMemo(
-    () => summarizeBatchCommonEntries(batchCommonEntries),
-    [batchCommonEntries],
-  );
-  const batchResourceSummary = useMemo(
-    () =>
-      summarizeBatchResources(
-        batchAggregation?.common ?? submissionDraft?.inputs ?? {},
-        asRecord(submissionDraft?.meta.parallel_settings),
-      ),
-    [batchAggregation?.common, submissionDraft?.inputs, submissionDraft?.meta.parallel_settings],
-  );
   const batchMatrixRows = useMemo(
     () =>
       batchJobs.map((job, index) => ({
@@ -3259,18 +3209,6 @@ export function SubmissionModal({
     );
     return direct ? `${direct} atoms` : "N/A";
   }, [isBatchDraft, selectedJobsForSummary, singleDraftPayload, submissionDraft?.meta.num_atoms]);
-  const keyParameterEntries = useMemo(() => {
-    const kpoints =
-      (kpointsSummaryPath ? draftState[kpointsSummaryPath]?.value ?? entryValueByPath[kpointsSummaryPath] : null) ??
-      findFirstNamedValue(submissionDraft?.meta.validation, new Set(["kpoints_distance", "kpoint_distance", "kpoints_mesh", "kpoints"]));
-    const protocol =
-      (protocolSummaryPath ? draftState[protocolSummaryPath]?.value ?? entryValueByPath[protocolSummaryPath] : null) ??
-      findFirstNamedValue(submissionDraft?.meta.validation, new Set(["protocol", "relax_type"]));
-    return [
-      { label: "K-points", value: kpoints ?? "Default", path: kpointsSummaryPath },
-      { label: "Protocol", value: protocol ?? "Default", path: protocolSummaryPath },
-    ];
-  }, [draftState, entryValueByPath, kpointsSummaryPath, protocolSummaryPath, submissionDraft?.meta.validation]);
   const isInlineMode = mode === "inline";
   const isExpanded = isInlineMode ? expanded : true;
   const canClose = state.status !== "submitting";
@@ -3347,7 +3285,7 @@ export function SubmissionModal({
       return (
         <button
           type="button"
-          className="break-all text-left text-sm font-medium text-slate-700 transition-colors hover:text-slate-900 dark:text-slate-100 dark:hover:text-white"
+          className="block min-w-0 truncate text-left text-sm font-medium text-slate-700 transition-colors hover:text-slate-900 dark:text-slate-100 dark:hover:text-white"
           onClick={() => onOpenDetail(fieldPk)}
           title={stringifyCompact(field.value)}
         >
@@ -3355,7 +3293,11 @@ export function SubmissionModal({
         </button>
       );
     }
-    return renderValueNode(field.value, `${turnId} -preview - ${key} `, onOpenDetail);
+    return (
+      <span className="block min-w-0 truncate">
+        {renderValueNode(field.value, `${turnId} -preview - ${key} `, onOpenDetail, { truncate: true })}
+      </span>
+    );
   };
 
   const renderPreviewFieldHelper = (field: SubmissionPrimaryInputField | null, pathHint?: string | null): ReactNode => {
@@ -3364,7 +3306,11 @@ export function SubmissionModal({
       return renderPreviewPkLink(fieldPk, onOpenDetail);
     }
     if (pathHint) {
-      return <span className="truncate">inputs.{pathHint}</span>;
+      return (
+        <span className="block truncate" title={`inputs.${pathHint}`}>
+          inputs.{pathHint}
+        </span>
+      );
     }
     return null;
   };
@@ -3729,7 +3675,145 @@ export function SubmissionModal({
     );
   };
 
+  const previewMetadataItems = useMemo<PreviewCardMetaItem[]>(() => {
+    if (!submissionDraft) {
+      return [];
+    }
 
+    const items: PreviewCardMetaItem[] = [];
+    const seenLabels = new Set<string>();
+    const seenPaths = new Set<string>();
+
+    const addSummaryItem = ({
+      id,
+      label,
+      value,
+      helper,
+      path,
+      icon,
+      groupId,
+      groupLabel,
+    }: {
+      id: string;
+      label: string;
+      value: ReactNode;
+      helper?: ReactNode;
+      path?: string | null;
+      icon?: typeof Cpu;
+      groupId?: string;
+      groupLabel?: string;
+    }) => {
+      const normalizedLabel = label.trim().toLowerCase();
+      const normalizedPath = path?.trim().toLowerCase() ?? "";
+      if (!label.trim() || seenLabels.has(normalizedLabel) || (normalizedPath && seenPaths.has(normalizedPath))) {
+        return;
+      }
+      seenLabels.add(normalizedLabel);
+      if (normalizedPath) {
+        seenPaths.add(normalizedPath);
+      }
+      items.push({
+        id,
+        label,
+        value,
+        helper,
+        icon: icon ?? iconForPreviewSummary(label, path),
+        groupId,
+        groupLabel,
+      });
+    };
+
+    primaryPreviewItems.forEach((item) => {
+      if (!item.field || isMissingValue(item.field.value)) {
+        return;
+      }
+      addSummaryItem({
+        id: `primary-${item.id}`,
+        label: item.label,
+        value: renderPreviewFieldValue(item.id, item.field, "Default"),
+        helper: renderPreviewFieldHelper(item.field),
+        icon: iconForPreviewSummary(item.label, item.id),
+        groupId: "core",
+        groupLabel: isBatchDraft ? "Shared Inputs" : "Core Inputs",
+      });
+    });
+
+    groupedInputSections.forEach((group) => {
+      const representativePort =
+        group.ports.find((port) => port.properties.some((property) => property.isRecommended)) ?? group.ports[0];
+      const representativeProperty =
+        representativePort?.properties.find((property) => property.isRecommended) ?? representativePort?.properties[0];
+      if (!representativePort || !representativeProperty) {
+        return;
+      }
+      const path = representativeProperty.path || representativePort.path;
+      if (!path) {
+        return;
+      }
+      const value = draftState[path]?.value ?? entryValueByPath[path];
+      if (isMissingValue(value)) {
+        return;
+      }
+      addSummaryItem({
+        id: `group-${group.id}`,
+        label: group.title,
+        value: renderValueNode(value, `${turnId}-preview-group-${group.id}`, onOpenDetail, {
+          truncate: true,
+        }),
+        helper: (
+          <span className="block truncate" title={`inputs.${path}`}>
+            inputs.{path}
+          </span>
+        ),
+        path,
+        groupId: "settings",
+        groupLabel: isBatchDraft ? "Shared Parameters" : "Suggested Parameters",
+      });
+    });
+
+    if (targetWorkdirPath && !seenPaths.has(targetWorkdirPath.toLowerCase())) {
+      addSummaryItem({
+        id: "workdir",
+        label: formatSettingKey(targetWorkdirPath.split(".").pop() ?? "workdir"),
+        value: renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true),
+        helper: (
+          <span className="block truncate" title={`inputs.${targetWorkdirPath}`}>
+            inputs.{targetWorkdirPath}
+          </span>
+        ),
+        path: targetWorkdirPath,
+        groupId: "runtime",
+        groupLabel: "Execution Context",
+      });
+    }
+
+    if (items.length === 0 && targetComputer) {
+      addSummaryItem({
+        id: "target-computer",
+        label: "Target",
+        value: renderValueNode(targetComputer, `${turnId}-preview-target`, onOpenDetail, {
+          truncate: true,
+        }),
+        icon: Server,
+        groupId: "runtime",
+        groupLabel: "Execution Context",
+      });
+    }
+
+    return items.slice(0, isBatchDraft ? 6 : 7);
+  }, [
+    draftState,
+    entryValueByPath,
+    groupedInputSections,
+    isBatchDraft,
+    onOpenDetail,
+    primaryPreviewItems,
+    submissionDraft,
+    targetComputer,
+    targetWorkdirPath,
+    targetWorkdirUiType,
+    turnId,
+  ]);
 
   const previewHeaderBadges: PreviewCardBadge[] = isBatchDraft
     ? [
@@ -3770,162 +3854,6 @@ export function SubmissionModal({
         id: "symmetry",
         label: "Symmetry",
         value: symmetrySummary,
-      },
-    ];
-
-  const previewMetadataItems: PreviewCardMetaItem[] = isBatchDraft
-    ? [
-      {
-        id: "structures",
-        label: "Batch Scope",
-        icon: Box,
-        value: <span>{batchJobCount} linked tasks</span>,
-        helper: `${selectedBatchJobs.length}/${batchJobCount} selected for submission`,
-      },
-      {
-        id: "code",
-        label: "Code",
-        icon: Cpu,
-        value: renderPreviewFieldValue("code", primaryFields.code, "System selected"),
-        helper: renderPreviewFieldHelper(primaryFields.code, primaryCodePath),
-      },
-      {
-        id: "protocol",
-        label: "Protocol",
-        icon: Settings2,
-        value: renderValueNode(
-          keyParameterEntries.find((entry) => entry.label === "Protocol")?.value ?? "Default",
-          `${turnId}-preview-protocol`,
-          onOpenDetail,
-        ),
-        helper:
-          keyParameterEntries.find((entry) => entry.label === "Protocol")?.path
-            ? (
-              <span className="truncate">
-                inputs.{keyParameterEntries.find((entry) => entry.label === "Protocol")?.path}
-              </span>
-            )
-            : null,
-      },
-      {
-        id: "kpoints",
-        label: "K-Points",
-        icon: GitBranch,
-        value: renderValueNode(
-          keyParameterEntries.find((entry) => entry.label === "K-points")?.value ?? "Default",
-          `${turnId}-preview-kpoints`,
-          onOpenDetail,
-        ),
-        helper:
-          keyParameterEntries.find((entry) => entry.label === "K-points")?.path
-            ? (
-              <span className="truncate">
-                inputs.{keyParameterEntries.find((entry) => entry.label === "K-points")?.path}
-              </span>
-            )
-            : null,
-      },
-      {
-        id: "shared",
-        label: "Shared Inputs",
-        icon: Server,
-        value: <span>{batchSharedPathCount} shared paths</span>,
-        helper: batchResourceSummary,
-      },
-      {
-        id: "varying",
-        label: "Variation Matrix",
-        icon: FolderTree,
-        value: <span>{batchVaryingPathCount} varying paths</span>,
-        helper:
-          batchVariationPaths.length > 0
-            ? batchVariationPaths.slice(0, 3).join(", ")
-            : "No varying paths detected",
-      },
-      {
-        id: "workdir",
-        label: "Workdir",
-        icon: Folder,
-        value: targetWorkdirPath
-          ? renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true)
-          : renderPreviewFallback("Not available"),
-        helper: targetWorkdirPath ? <span className="truncate">inputs.{targetWorkdirPath}</span> : null,
-      },
-    ]
-    : [
-      {
-        id: "code",
-        label: "Code",
-        icon: Cpu,
-        value: renderPreviewFieldValue("code", primaryFields.code, "System selected"),
-        helper: renderPreviewFieldHelper(primaryFields.code, primaryCodePath),
-      },
-      {
-        id: "structure",
-        label: "Structure",
-        icon: Box,
-        value: renderPreviewFieldValue("structure", primaryFields.structure, "Default"),
-        helper: renderPreviewFieldHelper(primaryFields.structure, structureSummaryPath),
-      },
-      {
-        id: "pseudos",
-        label: "Pseudopotentials",
-        icon: Atom,
-        value: renderPreviewFieldValue("pseudos", primaryFields.pseudos, "System selected"),
-        helper: renderPreviewFieldHelper(primaryFields.pseudos, pseudosSummaryPath),
-      },
-      {
-        id: "kpoints",
-        label: "K-Points",
-        icon: GitBranch,
-        value: renderValueNode(
-          keyParameterEntries.find((entry) => entry.label === "K-points")?.value ?? "Default",
-          `${turnId}-preview-kpoints`,
-          onOpenDetail,
-        ),
-        helper:
-          keyParameterEntries.find((entry) => entry.label === "K-points")?.path
-            ? (
-              <span className="truncate">
-                inputs.{keyParameterEntries.find((entry) => entry.label === "K-points")?.path}
-              </span>
-            )
-            : null,
-      },
-      {
-        id: "protocol",
-        label: "Protocol",
-        icon: Settings2,
-        value: renderValueNode(
-          keyParameterEntries.find((entry) => entry.label === "Protocol")?.value ?? "Default",
-          `${turnId}-preview-protocol`,
-          onOpenDetail,
-        ),
-        helper:
-          keyParameterEntries.find((entry) => entry.label === "Protocol")?.path
-            ? (
-              <span className="truncate">
-                inputs.{keyParameterEntries.find((entry) => entry.label === "Protocol")?.path}
-              </span>
-            )
-            : null,
-      },
-      {
-        id: "computer",
-        label: "Computer",
-        icon: Server,
-        value: targetComputer
-          ? renderValueNode(targetComputer, `${turnId}-preview-target-computer`, onOpenDetail)
-          : renderPreviewFallback("System selected"),
-      },
-      {
-        id: "workdir",
-        label: "Workdir",
-        icon: FolderTree,
-        value: targetWorkdirPath
-          ? renderEditableFieldControl(targetWorkdirPath, targetWorkdirUiType, true)
-          : renderPreviewFallback("Not available"),
-        helper: targetWorkdirPath ? <span className="truncate">inputs.{targetWorkdirPath}</span> : null,
       },
     ];
 
@@ -4056,32 +3984,32 @@ export function SubmissionModal({
           {validationSummary ? (
             <div
               className={cn(
-                "mb-3 rounded-lg border px-3 py-2 text-xs",
+                "mb-3 rounded-xl border border-slate-100 bg-white px-3 py-2 text-xs shadow-[0_2px_10px_rgba(15,23,42,0.03)] dark:border-slate-800/90 dark:bg-slate-950/70",
                 !hasValidationIssues
-                  ? "border-emerald-300/90 bg-emerald-50/90 text-emerald-800 dark:border-emerald-700/60 dark:bg-emerald-950/35 dark:text-emerald-200"
+                  ? "text-emerald-700 dark:text-emerald-300"
                   : hasValidationBlockingError
-                    ? "border-rose-300/90 bg-rose-50/90 text-rose-800 dark:border-rose-700/60 dark:bg-rose-950/35 dark:text-rose-200"
-                    : "border-amber-300/90 bg-amber-50/90 text-amber-800 dark:border-amber-700/60 dark:bg-amber-950/35 dark:text-amber-200",
+                    ? "text-rose-700 dark:text-rose-300"
+                    : "text-amber-700 dark:text-amber-300",
               )}
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
                   {hasValidationIssues ? (
                     <AlertTriangle className="h-4 w-4 shrink-0" />
                   ) : (
                     <CheckCircle2 className="h-4 w-4 shrink-0" />
                   )}
-                  <span className="font-semibold">
-                    {hasValidationIssues ? "Validation Error" : "Builder Validated"}
+                  <span className="font-semibold text-slate-700 dark:text-slate-100">
+                    {hasValidationIssues ? "Validation Review" : "Builder Validated"}
                   </span>
-                  <span className="text-[11px] opacity-90">
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
                     {validationErrors.length} errors, {validationWarnings.length} warnings
                   </span>
                 </div>
                 {hasValidationIssues ? (
                   <button
                     type="button"
-                    className="inline-flex items-center gap-1 rounded-md border border-current/25 px-2 py-0.5 text-[11px] transition-colors hover:bg-white/45 dark:hover:bg-slate-900/30"
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 transition-colors hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
                     onClick={() => setShowValidationDetails((current) => !current)}
                     aria-expanded={showValidationDetails}
                   >
@@ -4096,13 +4024,13 @@ export function SubmissionModal({
                 ) : null}
               </div>
               {hasValidationIssues && showValidationDetails ? (
-                <div className="mt-2 space-y-2 border-t border-current/20 pt-2 text-[11px]">
+                <div className="mt-2 space-y-2 border-t border-slate-100 pt-2 text-[11px] dark:border-slate-800">
                   {validationErrors.length > 0 ? (
                     <div>
-                      <p className="font-semibold uppercase tracking-[0.08em]">Blocking Ports</p>
+                      <p className="font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">Blocking Ports</p>
                       <ul className="mt-1 space-y-1">
                         {validationErrors.map((message, index) => (
-                          <li key={`${turnId} -validation - error - ${index} `} className="rounded-md bg-white/60 px-2 py-1 dark:bg-slate-900/45">
+                          <li key={`${turnId} -validation - error - ${index} `} className="border-b border-slate-100 py-1 text-slate-600 last:border-b-0 dark:border-slate-800 dark:text-slate-300">
                             {renderPkLinkedText(message, `${turnId} -validation - error - ${index} `, onOpenDetail)}
                           </li>
                         ))}
@@ -4111,10 +4039,10 @@ export function SubmissionModal({
                   ) : null}
                   {validationWarnings.length > 0 ? (
                     <div>
-                      <p className="font-semibold uppercase tracking-[0.08em]">Warnings</p>
+                      <p className="font-semibold uppercase tracking-[0.08em] text-slate-500 dark:text-slate-400">Warnings</p>
                       <ul className="mt-1 space-y-1">
                         {validationWarnings.map((message, index) => (
-                          <li key={`${turnId} -validation - warning - ${index} `} className="rounded-md bg-white/55 px-2 py-1 dark:bg-slate-900/40">
+                          <li key={`${turnId} -validation - warning - ${index} `} className="border-b border-slate-100 py-1 text-slate-600 last:border-b-0 dark:border-slate-800 dark:text-slate-300">
                             {renderPkLinkedText(message, `${turnId} -validation - warning - ${index} `, onOpenDetail)}
                           </li>
                         ))}
@@ -4147,10 +4075,10 @@ export function SubmissionModal({
           <>
             {isBatchDraft ? (
               <div className="mt-4 space-y-4">
-                <div className="rounded-xl border border-blue-200/80 bg-gradient-to-br from-blue-50 via-white to-slate-50 px-4 py-4 dark:border-blue-900/50 dark:from-blue-950/20 dark:via-slate-950/30 dark:to-slate-950/40">
+                <div className="rounded-xl border border-slate-100 bg-white px-4 py-4 dark:border-slate-800/90 dark:bg-slate-950/60">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                     <div>
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-blue-700/80 dark:text-blue-300/80">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">
                         Batch Summary
                       </p>
                       <h3 className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">
@@ -4160,27 +4088,27 @@ export function SubmissionModal({
                         Shared inputs: {batchSharedPathCount} paths. Varying dimensions: {batchVaryingPathCount}.
                       </p>
                     </div>
-                    <span className="inline-flex rounded-full bg-blue-600 px-3 py-1 text-xs font-semibold text-white shadow-sm dark:bg-blue-500">
+                    <span className="inline-flex border-l border-slate-100 pl-4 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:border-slate-800 dark:text-slate-400">
                       Batch: {batchJobCount} Tasks
                     </span>
                   </div>
-                  <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
-                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+                    <span>
                       {selectedBatchJobs.length}/{batchJobCount} selected
                     </span>
-                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                    <span>
                       {batchSharedPathCount} shared parameters
                     </span>
-                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                    <span>
                       {batchVaryingPathCount} varying fields
                     </span>
-                    <span className="inline-flex rounded-full bg-white/85 px-2 py-0.5 dark:bg-slate-900/70">
+                    <span>
                       Time Est.: {runtimeSummary}
                     </span>
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 dark:border-slate-800 dark:bg-slate-900/35">
+                <div className="rounded-xl border border-slate-100 bg-white dark:border-slate-800/90 dark:bg-slate-950/60">
                   <div className="flex flex-col gap-1 border-b border-slate-200/80 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">
@@ -4203,7 +4131,7 @@ export function SubmissionModal({
                         batchVariationPaths.length > 0 ? "min-w-[760px]" : "min-w-[520px]",
                       )}
                     >
-                      <thead className="sticky top-0 bg-slate-100/95 text-[11px] uppercase tracking-[0.12em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
+                      <thead className="sticky top-0 bg-slate-50/95 text-[11px] uppercase tracking-[0.12em] text-slate-500 dark:bg-slate-950/95 dark:text-slate-400">
                         <tr>
                           <th className="px-3 py-2">
                             <input
@@ -4350,8 +4278,8 @@ export function SubmissionModal({
                     : { id: "groups", value: `${groupedInputSections.length} spec groups` },
                 ]}
               >
-                <div className="grid gap-3 lg:grid-cols-[220px_minmax(0,1fr)]">
-                  <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
+                <div className="grid gap-5 lg:grid-cols-[220px_minmax(0,1fr)]">
+                  <aside className="minimal-scrollbar max-h-[420px] overflow-y-auto pr-1 lg:border-r lg:border-slate-100 lg:pr-4 dark:lg:border-slate-800">
                     <p className="px-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
                       Atomic Inputs
                     </p>
@@ -4392,10 +4320,10 @@ export function SubmissionModal({
                                 key={`${turnId} -namespace - ${namespaceItem.path} `}
                                 type="button"
                                 className={cn(
-                                  "flex w-full items-center gap-1.5 rounded-md border px-2 py-1 text-left text-xs transition-colors",
+                                  "flex w-full items-center gap-1.5 border-l px-2 py-1 text-left text-xs transition-colors",
                                   isSelected
-                                    ? "border-blue-300/90 bg-blue-50 text-blue-700 dark:border-blue-700/70 dark:bg-blue-950/35 dark:text-blue-200"
-                                    : "border-transparent text-slate-700 hover:border-slate-200 hover:bg-slate-50 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-900/60",
+                                    ? "border-blue-400 text-blue-700 dark:border-blue-500 dark:text-blue-200"
+                                    : "border-transparent text-slate-700 hover:border-slate-200 hover:text-slate-900 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:text-slate-100",
                                 )}
                                 onClick={() => setSelectedNamespace(namespaceItem.path)}
                                 style={{ paddingLeft: `${0.5 + namespaceItem.depth * 0.65}rem` }}
@@ -4414,15 +4342,15 @@ export function SubmissionModal({
                     </div>
                   </aside>
 
-                  <div className="rounded-xl border border-slate-100 bg-white p-2.5 dark:border-slate-800 dark:bg-slate-950/40">
+                  <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-600 dark:text-slate-300">
                       <button
                         type="button"
                         className={cn(
-                          "rounded-md px-1.5 py-0.5 font-semibold",
+                          "rounded-sm px-1.5 py-0.5 font-semibold transition-colors",
                           selectedNamespace === ""
-                            ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-                            : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
+                            ? "text-blue-700 dark:text-blue-200"
+                            : "hover:text-slate-900 dark:hover:text-slate-100",
                         )}
                         onClick={() => setSelectedNamespace("")}
                       >
@@ -4434,10 +4362,10 @@ export function SubmissionModal({
                           <button
                             type="button"
                             className={cn(
-                              "rounded-md px-1.5 py-0.5",
+                              "rounded-sm px-1.5 py-0.5 transition-colors",
                               breadcrumb.path === selectedNamespace
-                                ? "bg-blue-100 font-semibold text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-                                : "hover:bg-slate-100 dark:hover:bg-slate-800/80",
+                                ? "font-semibold text-blue-700 dark:text-blue-200"
+                                : "hover:text-slate-900 dark:hover:text-slate-100",
                             )}
                             onClick={() => setSelectedNamespace(breadcrumb.path)}
                           >
@@ -4448,14 +4376,14 @@ export function SubmissionModal({
                     </div>
 
                     {selectedNamespaceChildren.length > 0 ? (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
+                      <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 border-t border-slate-100 pt-2 dark:border-slate-800">
                         {selectedNamespaceChildren.map((childPath) => {
                           const childLabel = childPath.split(".").pop() ?? childPath;
                           return (
                             <button
                               key={`${turnId} -namespace - folder - ${childPath} `}
                               type="button"
-                              className="inline-flex items-center gap-1 rounded-full border border-slate-300/80 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700 transition-colors hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900/55 dark:text-slate-200 dark:hover:bg-slate-800"
+                              className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-600 transition-colors hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
                               onClick={() => setSelectedNamespace(childPath)}
                             >
                               <Folder className="h-3.5 w-3.5" />
@@ -4467,9 +4395,9 @@ export function SubmissionModal({
                     ) : null}
 
                     {selectedNamespaceLeafEntries.length > 0 ? (
-                      <div className="minimal-scrollbar mt-2 max-h-[330px] overflow-auto">
+                      <div className="minimal-scrollbar mt-3 max-h-[330px] overflow-auto border-t border-slate-100 pt-2 dark:border-slate-800">
                         <table className="w-full min-w-[500px] text-left text-xs">
-                          <thead className="sticky top-0 bg-slate-100/95 text-[10px] uppercase tracking-[0.1em] text-slate-500 dark:bg-slate-900/95 dark:text-slate-400">
+                          <thead className="sticky top-0 bg-white/95 text-[10px] uppercase tracking-[0.1em] text-slate-400 dark:bg-slate-950/95 dark:text-slate-500">
                             <tr>
                               <th className="w-[44%] px-2 py-1.5 font-semibold">Parameter</th>
                               <th className="px-2 py-1.5 font-semibold">Value</th>
@@ -4495,24 +4423,24 @@ export function SubmissionModal({
                                     <p className="truncate text-[10px] text-slate-500 dark:text-slate-400" title={entry.path}>
                                       {entry.path}
                                     </p>
-                                    <div className="mt-1 flex flex-wrap items-center gap-1">
+                                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
                                       {entry.isRecommended ? (
-                                        <span className="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+                                        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-600 dark:text-emerald-300">
                                           AI
                                         </span>
                                       ) : null}
                                       {isModified ? (
-                                        <span className="rounded-full bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+                                        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-blue-600 dark:text-blue-300">
                                           Modified
                                         </span>
                                       ) : null}
                                       {isCodeField ? (
-                                        <span className="rounded-full bg-violet-100 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:bg-violet-900/40 dark:text-violet-300">
+                                        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-violet-600 dark:text-violet-300">
                                           Code
                                         </span>
                                       ) : null}
                                       {isInheritedCode ? (
-                                        <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                                        <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400 dark:text-slate-500">
                                           Inherited
                                         </span>
                                       ) : null}
@@ -4541,14 +4469,14 @@ export function SubmissionModal({
             </div>
 
             {!isBatchDraft && pkEntries.length > 0 ? (
-              <div className="mt-3 rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-2 dark:border-slate-800 dark:bg-slate-900/30">
+              <div className="mt-3 border-t border-slate-100 pt-3 dark:border-slate-800">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">Input PKs</p>
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
                   {pkEntries.map((entry, index) => (
                     <button
                       key={`${turnId} -pk - ${entry.pk} -${index} `}
                       type="button"
-                      className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 font-mono text-[11px] font-semibold text-sky-700 transition-colors hover:bg-sky-100 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200 dark:hover:bg-sky-900/50"
+                      className="font-mono text-[11px] font-semibold text-blue-500 transition-colors hover:underline hover:text-blue-600 dark:text-blue-300 dark:hover:text-blue-200"
                       onClick={() => onOpenDetail(entry.pk)}
                       title={entry.path ?? `PK ${entry.pk} `}
                     >

@@ -16,6 +16,8 @@ export type PreviewCardMetaItem = {
   value: ReactNode;
   icon: LucideIcon;
   helper?: ReactNode;
+  groupId?: string;
+  groupLabel?: string;
 };
 
 type PreviewCardProps = {
@@ -40,13 +42,13 @@ type PreviewCardSectionProps = {
 function badgeToneClasses(tone: PreviewCardBadge["tone"]): string {
   switch (tone) {
     case "info":
-      return "border-blue-200/80 bg-blue-50/70 text-blue-700 dark:border-blue-900/50 dark:bg-blue-950/30 dark:text-blue-200";
+      return "text-blue-600 dark:text-blue-300";
     case "success":
-      return "border-emerald-200/80 bg-emerald-50/70 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200";
+      return "text-emerald-600 dark:text-emerald-300";
     case "warning":
-      return "border-amber-200/80 bg-amber-50/70 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200";
+      return "text-amber-600 dark:text-amber-300";
     default:
-      return "border-slate-200/80 bg-slate-50/75 text-slate-600 dark:border-slate-800 dark:bg-slate-900/55 dark:text-slate-300";
+      return "text-slate-600 dark:text-slate-300";
   }
 }
 
@@ -60,17 +62,37 @@ export function PreviewCard({
   children,
   className,
 }: PreviewCardProps) {
+  const metadataGroups = metadata.reduce<
+    Array<{ id: string; label?: string; items: PreviewCardMetaItem[] }>
+  >((accumulator, item) => {
+    const groupId = item.groupId ?? "default";
+    const existing = accumulator.find((group) => group.id === groupId);
+    if (existing) {
+      existing.items.push(item);
+      if (!existing.label && item.groupLabel) {
+        existing.label = item.groupLabel;
+      }
+      return accumulator;
+    }
+    accumulator.push({
+      id: groupId,
+      label: item.groupLabel,
+      items: [item],
+    });
+    return accumulator;
+  }, []);
+
   return (
     <div
       className={cn(
-        "rounded-2xl border border-slate-200/90 bg-white shadow-[0_10px_30px_rgba(15,23,42,0.06)] dark:border-slate-800 dark:bg-slate-950/70",
+        "rounded-2xl border border-slate-100 bg-white shadow-[0_6px_18px_rgba(15,23,42,0.04)] dark:border-slate-800/90 dark:bg-slate-950/70",
         className,
       )}
     >
       <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 dark:border-slate-800/80 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
           {eyebrow ? (
-            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
               {eyebrow}
             </p>
           ) : null}
@@ -78,18 +100,24 @@ export function PreviewCard({
             {title}
           </h2>
           {badges.length > 0 ? (
-            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
               {badges.map((badge) => (
-                <span
+                <div
                   key={badge.id}
                   className={cn(
-                    "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px]",
+                    "min-w-[72px] border-l border-slate-100 pl-4 first:border-l-0 first:pl-0 dark:border-slate-800",
                     badgeToneClasses(badge.tone),
                   )}
                 >
-                  <span className="font-semibold uppercase tracking-[0.12em] opacity-70">{badge.label}</span>
-                  <span className="font-medium">{badge.value}</span>
-                </span>
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">
+                      {badge.label}
+                    </span>
+                    <span className="text-sm font-medium text-slate-700 dark:text-slate-100">
+                      {badge.value}
+                    </span>
+                  </div>
+                </div>
               ))}
             </div>
           ) : null}
@@ -97,35 +125,49 @@ export function PreviewCard({
         {actions ? <div className="flex shrink-0 items-start gap-2 self-start">{actions}</div> : null}
       </div>
 
-      {metadata.length > 0 ? (
+      {metadataGroups.length > 0 ? (
         <div className="px-4 py-3">
-          <div
-            className={cn(
-              "grid rounded-2xl border border-slate-100 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-950/40",
-              columns === 2 ? "gap-x-4 gap-y-3 md:grid-cols-2" : "gap-x-4 gap-y-3 md:grid-cols-2 xl:grid-cols-3",
-            )}
-          >
-            {metadata.map((item) => {
-              const Icon = item.icon;
-              return (
-                <div key={item.id} className="flex min-w-0 items-start gap-3 py-1">
-                  <div className="mt-0.5 rounded-lg border border-slate-100 bg-slate-50 p-2 text-slate-500 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
-                    <Icon className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">
-                      {item.label}
-                    </p>
-                    <div className="mt-1 min-w-0 text-sm font-medium text-slate-700 dark:text-slate-100">
-                      {item.value}
-                    </div>
-                    {item.helper ? (
-                      <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{item.helper}</div>
-                    ) : null}
-                  </div>
+          <div className="rounded-xl border border-slate-100 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+            {metadataGroups.map((group, groupIndex) => (
+              <div
+                key={group.id}
+                className={cn(groupIndex > 0 && "mt-3 border-t border-slate-100 pt-3 dark:border-slate-800")}
+              >
+                {group.label ? (
+                  <p className="pb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                    {group.label}
+                  </p>
+                ) : null}
+                <div
+                  className={cn(
+                    "grid gap-x-5 gap-y-3",
+                    columns === 2 ? "md:grid-cols-2" : "md:grid-cols-2 xl:grid-cols-3",
+                  )}
+                >
+                  {group.items.map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <div key={item.id} className="flex min-w-0 gap-2.5 py-1">
+                        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400 dark:text-slate-500" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                            {item.label}
+                          </p>
+                          <div className="mt-1 min-w-0 text-sm font-medium text-slate-700 dark:text-slate-100">
+                            {item.value}
+                          </div>
+                          {item.helper ? (
+                            <div className="mt-1 min-w-0 text-[11px] text-slate-500 dark:text-slate-400">
+                              {item.helper}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
         </div>
       ) : null}
@@ -152,12 +194,9 @@ export function PreviewCardSection({
           {hint ? <div className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">{hint}</div> : null}
         </div>
         {stats.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
             {stats.map((stat) => (
-              <span
-                key={stat.id}
-                className="inline-flex items-center rounded-full border border-slate-200/80 bg-white px-2 py-0.5 text-[11px] text-slate-500 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300"
-              >
+              <span key={stat.id} className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
                 {stat.value}
               </span>
             ))}
