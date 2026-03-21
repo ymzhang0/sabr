@@ -154,6 +154,7 @@ export type ChatProject = {
   updated_at: string;
   session_count: number;
   active: boolean;
+  environment_mode_default?: "worker-default" | "project-auto" | string;
 };
 
 export type ChatProjectMutationResponse = {
@@ -205,6 +206,25 @@ export type ChatProjectFileWriteResponse = {
   size: number;
   updated_at: string;
   created: boolean;
+};
+
+export type ChatProjectFileContentResponse = {
+  project_id: string;
+  project_name: string;
+  workspace_path: string;
+  path: string;
+  relative_path: string;
+  content: string;
+};
+
+export type ChatProjectFileExecuteResponse = {
+  project_id: string;
+  project_name: string;
+  workspace_path: string;
+  path: string;
+  relative_path: string;
+  status: "completed" | "failed" | string;
+  output: string;
 };
 
 export type LogsSnapshot = {

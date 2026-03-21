@@ -1,9 +1,11 @@
 from .service import (
     activate_chat_session,
+    build_chat_project_worker_headers,
     cancel_chat_turn,
     create_chat_project,
     create_chat_session,
     delete_chat_items,
+    describe_chat_project_file,
     get_active_chat_project_id,
     get_active_chat_session_id,
     get_chat_history,
@@ -26,10 +28,12 @@ from .service import (
 
 __all__ = [
     "activate_chat_session",
+    "build_chat_project_worker_headers",
     "cancel_chat_turn",
     "create_chat_project",
     "create_chat_session",
     "delete_chat_items",
+    "describe_chat_project_file",
     "get_active_chat_project_id",
     "get_active_chat_session_id",
     "get_chat_history",

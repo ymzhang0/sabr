@@ -37,10 +37,11 @@ import {
 } from "@/lib/api";
 import { ChatPanel } from "@/components/dashboard/chat-panel";
 import { HistorySidebar } from "@/components/dashboard/history-sidebar";
+import { MainWorkspace } from "@/components/dashboard/MainWorkspace";
 import { ProcessDetailDrawer } from "@/components/dashboard/process-detail-drawer";
 import { RuntimeTerminal } from "@/components/dashboard/runtime-terminal";
 import { Sidebar } from "@/components/dashboard/sidebar";
-import { WorkspaceExplorerSidebar } from "@/components/dashboard/workspace-explorer-sidebar";
+import { WorkspaceExplorerSidebar, type WorkspaceExplorerFileSelection } from "@/components/dashboard/workspace-explorer-sidebar";
 import { Button } from "@/components/ui/button";
 import { cn, decodeEscapedUnicode, decodeEscapedUnicodeDeep } from "@/lib/utils";
 import {
@@ -651,6 +652,8 @@ export default function App() {
   const [streamedLogs, setStreamedLogs] = useState<{ version: number; lines: string[] } | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeWorkspaceProjectId, setActiveWorkspaceProjectId] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<"CHAT" | "EDITOR">("CHAT");
+  const [viewerFile, setViewerFile] = useState<WorkspaceExplorerFileSelection | null>(null);
   const [cloneDraft, setCloneDraft] = useState<SubmissionDraftPayload | null>(null);
   const [cloneTurnId, setCloneTurnId] = useState<number | null>(null);
   const [cloneModalState, setCloneModalState] = useState<SubmissionModalState>({ status: "idle" });
@@ -691,10 +694,10 @@ export default function App() {
   const activeChatSession = chatSessions.find((session) => session.id === resolvedActiveChatSessionId) ?? null;
   const activeSessionProject =
     chatProjects.find((project) => project.id === (activeChatSession?.project_id ?? "")) ?? null;
-  const currentProjectPath = selectedWorkspaceProject?.root_path ?? activeSessionProject?.root_path ?? null;
+  const currentProjectPath = activeSessionProject?.root_path ?? selectedWorkspaceProject?.root_path ?? null;
   const currentContextGroupLabel = resolveCurrentContextGroupLabel(activeChatSession);
   const selectedGroupLabel = resolveSelectedGroupLabel(selectedGroup, currentContextGroupLabel);
-  useProjectEnvironmentSync(currentProjectPath);
+  useProjectEnvironmentSync(activeSessionProject ?? selectedWorkspaceProject ?? null);
 
   const processesQuery = useQuery({
     queryKey: ["processes", selectedGroup, selectedGroupLabel, processLimit, nodeTypeFilter],
@@ -1328,6 +1331,7 @@ export default function App() {
       project_id: projectId,
     });
     applyChatSnapshot(response.chat);
+    setActiveWorkspaceProjectId(response.session?.project_id ?? response.active_project_id ?? null);
     setComposerResetVersion((current) => current + 1);
     setSidebarView("explorer");
     await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
@@ -1341,6 +1345,7 @@ export default function App() {
       }
       const response = await activateChatSession(sessionId);
       applyChatSnapshot(response.chat);
+      setActiveWorkspaceProjectId(response.session?.project_id ?? response.active_project_id ?? null);
       setComposerResetVersion((current) => current + 1);
       await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
       await queryClient.invalidateQueries({ queryKey: ["chat"] });
@@ -1464,6 +1469,16 @@ export default function App() {
     [],
   );
 
+  const handleOpenWorkspaceFile = useCallback((file: WorkspaceExplorerFileSelection) => {
+    setActiveWorkspaceProjectId(file.projectId);
+    setViewerFile(file);
+    setActiveView("EDITOR");
+  }, []);
+
+  const closeViewer = useCallback(() => {
+    setActiveView("CHAT");
+  }, []);
+
   const handleOpenDetail = useCallback((pk: number) => {
     setActiveProcess({
       pk,
@@ -1527,6 +1542,16 @@ export default function App() {
     }
   }, [activeTurnId, chatMessages, isChatLoading]);
 
+  useEffect(() => {
+    if (!isChatLoading) {
+      return;
+    }
+    if (activeTurnId !== null || requestInFlightRef.current) {
+      return;
+    }
+    setIsChatLoading(false);
+  }, [activeTurnId, isChatLoading]);
+
   const loadingMessage = useMemo(() => {
     if (bootstrapQuery.isLoading) {
       return "Initializing dashboard...";
@@ -1540,7 +1565,11 @@ export default function App() {
   const handleSendMessage = useCallback(
     async (text: string, options?: { resourceAttachments?: ResourceAttachment[] }) => {
       const intent = text.trim();
-      if (!intent || isChatBusy || requestInFlightRef.current) {
+      const hasStaleBusyLock = isChatBusy && activeTurnId === null && !requestInFlightRef.current;
+      if (hasStaleBusyLock) {
+        setIsChatLoading(false);
+      }
+      if (!intent || (isChatBusy && !hasStaleBusyLock) || requestInFlightRef.current) {
         return;
       }
       const rawResourceAttachments = Array.isArray(options?.resourceAttachments) ? options.resourceAttachments : [];
@@ -1635,6 +1664,7 @@ export default function App() {
       }
     },
     [
+      activeTurnId,
       contextNodes,
       isChatBusy,
       pinnedNodes,
@@ -1850,7 +1880,7 @@ export default function App() {
           <div className="flex min-w-0 flex-1 flex-col bg-transparent px-2.5 py-0">
             {sidebarView === "explorer" ? (
               <Sidebar
-                activeProject={activeSessionProject ?? selectedWorkspaceProject ?? null}
+                activeProject={activeSessionProject ?? null}
                 processes={processes}
                 groups={groups}
                 selectedGroupLabel={selectedGroupLabel}
@@ -1911,56 +1941,62 @@ export default function App() {
             ) : (
               <WorkspaceExplorerSidebar
                 project={selectedWorkspaceProject}
+                onOpenFile={handleOpenWorkspaceFile}
               />
             )}
           </div>
         </section>
 
-        <section className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden">
-          {isReady ? (
-            <ChatPanel
-              activeProject={activeSessionProject ?? null}
-              messages={chatMessages}
-              models={models}
-              selectedModel={selectedModel}
-              composerResetVersion={composerResetVersion}
-              currentProjectName={activeChatSession?.project_label ?? null}
-              currentSessionName={activeChatSession?.title ?? null}
-              isLoading={isChatBusy}
-              activeTurnId={activeTurnId}
-              onNewConversation={() => {
-                void handleCreateChatSession();
-              }}
-              contextNodes={contextNodes}
-              pinnedNodes={pinnedNodes}
-              sessionEnvironment={sessionEnvironment}
-              sessionEnvironmentAuto={sessionEnvironmentAuto}
-              promptOverride={promptOverride}
-              sessionParameters={sessionParameters}
-              selectedGroup={resolveSelectedGroupDisplayLabel(selectedGroup, currentContextGroupLabel) ?? selectedGroupLabel ?? undefined}
-              onSendMessage={handleSendMessage}
-              onStopResponse={handleStopResponse}
-              onModelChange={setSelectedModel}
-              onAttachFile={(file) => uploadMutation.mutate(file)}
-              onAddContextNode={appendContextNode}
-              onPinNode={handlePinNode}
-              onUnpinNode={handleUnpinNode}
-              onRemoveContextNode={handleRemoveContextNode}
-              onOpenDetail={handleOpenDetail}
-              onRestoreContextNodes={handleRestoreContextNodes}
-              onSessionEnvironmentChange={setSessionEnvironment}
-              onSessionEnvironmentAutoChange={setSessionEnvironmentAuto}
-              onPromptOverrideChange={setPromptOverride}
-              onSessionParametersChange={setSessionParameters}
-            />
-          ) : (
-            <section className="flex flex-1 items-center justify-center rounded-2xl border border-white/40 bg-white/70 shadow-glass backdrop-blur dark:border-white/10 dark:bg-zinc-950/40">
-              <p className="text-sm text-zinc-600 dark:text-zinc-300">{loadingMessage}</p>
-            </section>
-          )}
-
-          <RuntimeTerminal lines={logs} />
-        </section>
+        <MainWorkspace
+          activeView={activeView}
+          viewerFile={viewerFile}
+          theme={theme}
+          onCloseViewer={closeViewer}
+          chatContent={
+            isReady ? (
+              <ChatPanel
+                activeProject={activeSessionProject ?? null}
+                messages={chatMessages}
+                models={models}
+                selectedModel={selectedModel}
+                composerResetVersion={composerResetVersion}
+                currentProjectName={activeChatSession?.project_label ?? null}
+                currentSessionName={activeChatSession?.title ?? null}
+                isLoading={isChatBusy}
+                activeTurnId={activeTurnId}
+                onNewConversation={() => {
+                  void handleCreateChatSession();
+                }}
+                contextNodes={contextNodes}
+                pinnedNodes={pinnedNodes}
+                sessionEnvironment={sessionEnvironment}
+                sessionEnvironmentAuto={sessionEnvironmentAuto}
+                promptOverride={promptOverride}
+                sessionParameters={sessionParameters}
+                selectedGroup={resolveSelectedGroupDisplayLabel(selectedGroup, currentContextGroupLabel) ?? selectedGroupLabel ?? undefined}
+                onSendMessage={handleSendMessage}
+                onStopResponse={handleStopResponse}
+                onModelChange={setSelectedModel}
+                onAttachFile={(file) => uploadMutation.mutate(file)}
+                onAddContextNode={appendContextNode}
+                onPinNode={handlePinNode}
+                onUnpinNode={handleUnpinNode}
+                onRemoveContextNode={handleRemoveContextNode}
+                onOpenDetail={handleOpenDetail}
+                onRestoreContextNodes={handleRestoreContextNodes}
+                onSessionEnvironmentChange={setSessionEnvironment}
+                onSessionEnvironmentAutoChange={setSessionEnvironmentAuto}
+                onPromptOverrideChange={setPromptOverride}
+                onSessionParametersChange={setSessionParameters}
+              />
+            ) : (
+              <section className="flex flex-1 items-center justify-center rounded-2xl border border-white/40 bg-white/70 shadow-glass backdrop-blur dark:border-white/10 dark:bg-zinc-950/40">
+                <p className="text-sm text-zinc-600 dark:text-zinc-300">{loadingMessage}</p>
+              </section>
+            )
+          }
+          terminalContent={<RuntimeTerminal lines={logs} />}
+        />
       </div>
       <ProcessDetailDrawer
         process={activeProcess}

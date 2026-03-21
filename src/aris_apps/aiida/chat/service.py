@@ -757,6 +757,21 @@ def _build_default_chat_project(project_id: str | None = None) -> dict[str, Any]
     }
 
 
+def _project_uses_managed_root(project: dict[str, Any]) -> bool:
+    project_id = str(project.get("id") or "").strip()
+    if not project_id:
+        return False
+    root = _project_root_path(project)
+    managed_root = _managed_project_root(project_id)
+    with suppress(OSError, RuntimeError, ValueError):
+        return root.resolve() == managed_root.resolve()
+    return str(root) == str(managed_root)
+
+
+def _project_default_environment_mode(project: dict[str, Any]) -> str:
+    return "worker-default" if _project_uses_managed_root(project) else "project-auto"
+
+
 def _summarize_focus_node_for_title(node: dict[str, Any] | None) -> str:
     if not isinstance(node, dict):
         return ""
@@ -1478,6 +1493,7 @@ def _serialize_chat_project_summary(project: dict[str, Any], store: dict[str, An
         "updated_at": max(str(project.get("updated_at") or _now_iso()), latest_session_update),
         "session_count": len(project_sessions),
         "active": str(store.get("active_project_id") or "") == project_id,
+        "environment_mode_default": _project_default_environment_mode(project),
     }
 
 
@@ -1591,6 +1607,48 @@ def get_chat_session_project_root_path(state: Any, session_id: str | None = None
         return None
     project = _get_store_project(store, str(session.get("project_id") or ""))
     return str(_ensure_project_workspace_dir(project))
+
+
+def describe_chat_project_file(
+    state: Any,
+    project_id: str,
+    *,
+    relative_path: str,
+) -> dict[str, Any] | None:
+    _session, store = _find_chat_session(state, None)
+    project = _find_store_project(store, project_id)
+    if project is None:
+        return None
+
+    workspace_root = _ensure_project_workspace_dir(project)
+    target = _resolve_workspace_target_path(workspace_root, relative_path=relative_path)
+    if target == workspace_root:
+        raise ValueError("Project file path must point to a file")
+    if not target.exists():
+        raise ValueError("Requested project file does not exist")
+    if target.is_dir():
+        raise ValueError("Requested project file path points to a directory")
+
+    return {
+        "project_id": str(project.get("id") or ""),
+        "project_name": str(project.get("name") or _DEFAULT_PROJECT_NAME),
+        "workspace_path": str(workspace_root),
+        "path": str(target),
+        "relative_path": str(target.relative_to(workspace_root)),
+    }
+
+
+def build_chat_project_worker_headers(state: Any, project_id: str) -> dict[str, str] | None:
+    _session, store = _find_chat_session(state, None)
+    project = _find_store_project(store, project_id)
+    if project is None:
+        return None
+
+    workspace_path = str(_ensure_project_workspace_dir(project))
+    return build_bridge_context_headers(
+        workspace_path=workspace_path,
+        project_id=project.get("id"),
+    )
 
 
 def _build_worker_workspace_headers(state: Any, session_id: str | None = None) -> dict[str, str] | None:
@@ -3208,6 +3266,49 @@ def _extract_recovery_payload(
     return recovery_plan, next_step, status
 
 
+def _render_canonical_submission_blocker_message(
+    *,
+    task_mode: str | None,
+    recovery_plan: dict[str, Any] | None,
+    next_step: str | None,
+) -> str | None:
+    if not isinstance(recovery_plan, dict) or not recovery_plan:
+        return None
+
+    normalized_mode = _normalize_task_mode(task_mode)
+    if normalized_mode not in {"single", "batch"}:
+        return None
+
+    mode_label = "batch submission preview" if normalized_mode == "batch" else "submission preview"
+    lines = [f"ARIS could not prepare the {mode_label} yet."]
+
+    summary = str(recovery_plan.get("summary") or "").strip()
+    if summary:
+        lines.append("")
+        lines.append(f"Blocked reason: {summary}")
+
+    issues = recovery_plan.get("issues")
+    if isinstance(issues, list) and issues:
+        visible_issue_lines: list[str] = []
+        for issue in issues[:3]:
+            if not isinstance(issue, dict):
+                continue
+            message = str(issue.get("message") or "").strip()
+            if not message:
+                continue
+            visible_issue_lines.append(f"- {message}")
+        if visible_issue_lines:
+            lines.append("")
+            lines.append("Reported issues:")
+            lines.extend(visible_issue_lines)
+
+    if isinstance(next_step, str) and next_step.strip():
+        lines.append("")
+        lines.append(f"Next step: {next_step.strip()}")
+
+    return "\n".join(lines).strip()
+
+
 def _extract_submission_draft_from_text(answer_text: str | None) -> dict[str, Any] | None:
     text = str(answer_text or "")
     if not text.strip():
@@ -4175,6 +4276,14 @@ async def _execute_chat_turn(
                 answer_text=answer_text,
                 task_mode=output_task_mode,
             )
+            if isinstance(message_payload, dict) and not isinstance(message_payload.get("submission_draft"), dict):
+                canonical_blocker_text = _render_canonical_submission_blocker_message(
+                    task_mode=output_task_mode,
+                    recovery_plan=message_payload.get("recovery_plan") if isinstance(message_payload.get("recovery_plan"), dict) else None,
+                    next_step=message_payload.get("next_step") if isinstance(message_payload.get("next_step"), str) else None,
+                )
+                if canonical_blocker_text:
+                    answer_text = canonical_blocker_text
             if (
                 output_task_mode == "batch"
                 and not (

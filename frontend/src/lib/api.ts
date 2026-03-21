@@ -11,6 +11,8 @@ import type {
   ChatProjectMutationResponse,
   ChatProjectWorkspaceResponse,
   ChatDeleteResponse,
+  ChatProjectFileContentResponse,
+  ChatProjectFileExecuteResponse,
   ChatProjectFileWriteRequest,
   ChatProjectFileWriteResponse,
   ChatSessionBatchProgress,
@@ -532,6 +534,26 @@ export async function saveChatProjectFile(
   payload: ChatProjectFileWriteRequest,
 ): Promise<ChatProjectFileWriteResponse> {
   const { data } = await frontendApi.post<ChatProjectFileWriteResponse>(`/chat/projects/${projectId}/files`, payload);
+  return data;
+}
+
+export async function fetchFileContent(
+  projectId: string,
+  relativePath: string,
+): Promise<ChatProjectFileContentResponse> {
+  const { data } = await frontendApi.get<ChatProjectFileContentResponse>(`/chat/projects/${projectId}/files/content`, {
+    params: { relative_path: relativePath },
+  });
+  return data;
+}
+
+export async function executeChatProjectFile(
+  projectId: string,
+  relativePath: string,
+): Promise<ChatProjectFileExecuteResponse> {
+  const { data } = await frontendApi.post<ChatProjectFileExecuteResponse>(`/chat/projects/${projectId}/execute`, {
+    relative_path: relativePath,
+  });
   return data;
 }
 

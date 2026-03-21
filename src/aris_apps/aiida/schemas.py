@@ -58,6 +58,29 @@ class FrontendChatProjectFileWriteResponse(BaseModel):
     created: bool = False
 
 
+class FrontendChatProjectFileReadResponse(BaseModel):
+    project_id: str
+    project_name: str
+    workspace_path: str
+    path: str
+    relative_path: str
+    content: str = Field(default="")
+
+
+class FrontendChatProjectFileExecuteRequest(BaseModel):
+  relative_path: str = Field(..., min_length=1, max_length=512)
+
+
+class FrontendChatProjectFileExecuteResponse(BaseModel):
+    project_id: str
+    project_name: str
+    workspace_path: str
+    path: str
+    relative_path: str
+    status: str = "completed"
+    output: str = Field(default="")
+
+
 class FrontendChatDeleteRequest(BaseModel):
     project_ids: list[str] = Field(default_factory=list)
     session_ids: list[str] = Field(default_factory=list)

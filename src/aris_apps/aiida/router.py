@@ -25,10 +25,12 @@ from src.aris_core.logging import get_log_buffer_snapshot, log_event
 
 from .chat import (
     activate_chat_session,
+    build_chat_project_worker_headers,
     cancel_chat_turn,
     create_chat_project,
     create_chat_session,
     delete_chat_items,
+    describe_chat_project_file,
     get_active_chat_project_id,
     get_active_chat_session_id,
     get_chat_history,
@@ -53,7 +55,9 @@ from .client import (
     BridgeOfflineError,
     build_bridge_context_headers,
     bridge_service,
+    reset_bridge_request_headers,
     request_json,
+    set_bridge_request_headers,
 )
 from .presenters.node_view import (
     attach_tree_links as _attach_tree_links,
@@ -90,6 +94,9 @@ from .schemas import (
     FrontendChatRequest,
     FrontendStopChatRequest,
     FrontendChatDeleteRequest,
+    FrontendChatProjectFileExecuteRequest,
+    FrontendChatProjectFileExecuteResponse,
+    FrontendChatProjectFileReadResponse,
     FrontendChatProjectFileWriteRequest,
     FrontendChatProjectFileWriteResponse,
     FrontendChatProjectCreateRequest,
@@ -725,6 +732,19 @@ async def _run_worker_json_script(script: str, *, timeout: float = 90.0) -> dict
                 "script": script,
                 "python_interpreter_path": python_interpreter_path,
             },
+            timeout=timeout,
+        ),
+        timeout=max(timeout + 0.5, 1.0),
+    )
+    return _parse_worker_json_output(payload)
+
+
+async def _run_contextual_worker_json_script(script: str, *, timeout: float = 90.0) -> dict[str, Any] | None:
+    payload = await asyncio.wait_for(
+        request_json(
+            "POST",
+            "/management/run-python",
+            json={"script": script},
             timeout=timeout,
         ),
         timeout=max(timeout + 0.5, 1.0),
@@ -2631,6 +2651,104 @@ async def frontend_write_chat_project_file(
     if response is None:
         raise HTTPException(status_code=404, detail="Chat project not found")
     return FrontendChatProjectFileWriteResponse.model_validate(response)
+
+
+@router.get(
+    "/frontend/chat/projects/{project_id}/files/content",
+    response_model=FrontendChatProjectFileReadResponse,
+    tags=[FRONTEND_TAG],
+)
+async def frontend_read_chat_project_file(
+    request: Request,
+    project_id: str,
+    relative_path: str = Query(...),
+) -> FrontendChatProjectFileReadResponse:
+    state = request.app.state
+    try:
+        file_details = describe_chat_project_file(state, project_id, relative_path=relative_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    if file_details is None:
+        raise HTTPException(status_code=404, detail="Chat project not found")
+
+    try:
+        content = Path(str(file_details["path"])).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        content = Path(str(file_details["path"])).read_bytes().decode("utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail={"error": f"Failed to read project file: {exc}"}) from exc
+
+    return FrontendChatProjectFileReadResponse.model_validate({
+        **file_details,
+        "content": content,
+    })
+
+
+@router.post(
+    "/frontend/chat/projects/{project_id}/execute",
+    response_model=FrontendChatProjectFileExecuteResponse,
+    tags=[FRONTEND_TAG],
+)
+async def frontend_execute_chat_project_file(
+    request: Request,
+    project_id: str,
+    payload: FrontendChatProjectFileExecuteRequest,
+) -> FrontendChatProjectFileExecuteResponse:
+    state = request.app.state
+    try:
+        file_details = describe_chat_project_file(state, project_id, relative_path=payload.relative_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+    if file_details is None:
+        raise HTTPException(status_code=404, detail="Chat project not found")
+
+    try:
+        source_text = Path(str(file_details["path"])).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        source_text = Path(str(file_details["path"])).read_bytes().decode("utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail={"error": f"Failed to read project file: {exc}"}) from exc
+
+    request_headers = build_chat_project_worker_headers(state, project_id)
+    request_headers_token = set_bridge_request_headers(request_headers) if request_headers else None
+    execution_script = (
+        "import contextlib\n"
+        "import io\n"
+        "import json\n"
+        "import traceback\n"
+        f"source = {json.dumps(source_text)}\n"
+        f"filename = {json.dumps(str(file_details['path']))}\n"
+        "buffer = io.StringIO()\n"
+        "status = 'completed'\n"
+        "try:\n"
+        "    code = compile(source, filename, 'exec')\n"
+        "    namespace = {'__file__': filename, '__name__': '__main__'}\n"
+        "    with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):\n"
+        "        exec(code, namespace)\n"
+        "except Exception:\n"
+        "    status = 'failed'\n"
+        "    traceback.print_exc(file=buffer)\n"
+        "print(json.dumps({'status': status, 'output': buffer.getvalue()}, ensure_ascii=False))\n"
+    )
+
+    try:
+        raw_result = await _run_contextual_worker_json_script(execution_script, timeout=180.0)
+    except Exception as exc:  # noqa: BLE001
+        _raise_worker_http_error(exc)
+    finally:
+        if request_headers_token is not None:
+            reset_bridge_request_headers(request_headers_token)
+
+    if not isinstance(raw_result, dict):
+        raise HTTPException(status_code=502, detail={"error": "Worker returned an invalid execute payload"})
+
+    return FrontendChatProjectFileExecuteResponse.model_validate({
+        **file_details,
+        "status": str(raw_result.get("status") or "completed"),
+        "output": str(raw_result.get("output") or ""),
+    })
 
 
 @router.get("/frontend/chat/stream", tags=[FRONTEND_TAG])
