@@ -1333,20 +1333,20 @@ export function Sidebar({
               <input
                 type="text"
                 placeholder="Search PK, label..."
-                className="h-9 w-full rounded-lg border border-zinc-200/65 bg-zinc-50/70 pl-9 pr-3 text-sm text-zinc-700 transition-all focus:border-zinc-400 focus:outline-none dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:focus:border-zinc-600"
+                className="h-9 w-full border-0 border-b border-zinc-200 bg-transparent pl-9 pr-3 text-sm text-zinc-700 transition-all focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-transparent dark:text-zinc-200 dark:focus:border-zinc-500"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
             </div>
-            <div className="flex items-center gap-1 rounded-lg border border-zinc-200/65 bg-zinc-50/70 p-1 dark:border-zinc-800 dark:bg-zinc-900/45">
+            <div className="flex items-center gap-3 border-b border-zinc-100 px-1 pb-1 dark:border-zinc-800">
               {(["all", "structures", "tasks", "failed"] as const).map((type) => (
                 <button
                   key={type}
                   onClick={() => onNodeTypeFilterChange(type)}
                   className={cn(
-                    "rounded-md px-2 py-1 text-[11px] font-medium capitalize",
+                    "border-b border-transparent px-0 py-1 text-[11px] font-medium capitalize transition-colors",
                     nodeTypeFilter === type
-                      ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100"
+                      ? "border-blue-500 text-zinc-900 dark:text-zinc-100"
                       : "text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200"
                   )}
                 >

@@ -85,7 +85,7 @@ export function PreviewCard({
   return (
     <div
       className={cn(
-        "rounded-2xl border border-slate-100 bg-white shadow-[0_6px_18px_rgba(15,23,42,0.04)] dark:border-slate-800/90 dark:bg-slate-950/70",
+        "border-0 bg-white shadow-none dark:bg-slate-950",
         className,
       )}
     >
@@ -127,7 +127,7 @@ export function PreviewCard({
 
       {metadataGroups.length > 0 ? (
         <div className="px-4 py-3">
-          <div className="rounded-xl border border-slate-100 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-950/30">
+          <div className="px-0 py-0">
             {metadataGroups.map((group, groupIndex) => (
               <div
                 key={group.id}

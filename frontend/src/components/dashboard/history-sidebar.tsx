@@ -334,16 +334,16 @@ export function HistorySidebar({
             <input
               type="text"
               placeholder="Search projects, sessions, tags..."
-              className="h-9 w-full rounded-lg border border-zinc-200/65 bg-zinc-50/70 pl-9 pr-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-900/45 dark:text-zinc-200 dark:focus:border-zinc-600"
+              className="h-9 w-full border-0 border-b border-zinc-200 bg-transparent pl-9 pr-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-600"
               value={searchQuery}
               onChange={(event) => setSearchQuery(event.target.value)}
             />
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 border-b border-zinc-100 pb-1 dark:border-zinc-800">
             <Button
               variant={selectionMode ? "default" : "outline"}
-              className="h-9 rounded-lg px-3"
+              className="h-9 rounded-none px-3"
               onClick={() => {
                 if (selectionMode || totalSelectedCount > 0) {
                   clearSelection();
@@ -361,13 +361,13 @@ export function HistorySidebar({
               ariaLabel="Filter by tag"
               searchable={availableTags.length > 6}
               className="flex-1"
-              triggerClassName="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-sm"
+              triggerClassName="flex w-full items-center justify-between rounded-none px-2.5 py-2 text-sm"
               onChange={setTagFilter}
             />
             <Button
               variant={isProjectFormOpen ? "outline" : "default"}
               size="icon"
-              className="h-9 w-9 shrink-0 rounded-lg"
+              className="h-9 w-9 shrink-0 rounded-none"
               onClick={() => setIsProjectFormOpen((value) => !value)}
               title="Create a new project"
               aria-label="Create a new project"
@@ -377,26 +377,26 @@ export function HistorySidebar({
           </div>
 
           {isProjectFormOpen ? (
-            <div className="space-y-2 rounded-2xl border border-zinc-200/75 bg-zinc-50/70 p-3 dark:border-zinc-800/80 dark:bg-zinc-900/40">
+            <div className="space-y-3 border-t border-zinc-100 px-0 py-3 dark:border-zinc-800">
               <input
                 type="text"
                 placeholder="Project name"
-                className="h-9 w-full rounded-lg border border-zinc-200/65 bg-white px-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-200 dark:focus:border-zinc-600"
+                className="h-9 w-full border-0 border-b border-zinc-200 bg-transparent px-0 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-600"
                 value={projectNameDraft}
                 onChange={(event) => setProjectNameDraft(event.target.value)}
               />
               <input
                 type="text"
                 placeholder="Disk path (optional, server-side absolute or relative path)"
-                className="h-9 w-full rounded-lg border border-zinc-200/65 bg-white px-3 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:bg-zinc-950/60 dark:text-zinc-200 dark:focus:border-zinc-600"
+                className="h-9 w-full border-0 border-b border-zinc-200 bg-transparent px-0 text-sm text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-800 dark:text-zinc-200 dark:focus:border-zinc-600"
                 value={projectPathDraft}
                 onChange={(event) => setProjectPathDraft(event.target.value)}
               />
               <div className="flex items-center justify-end gap-2">
-                <Button variant="ghost" className="h-8 rounded-lg px-3" onClick={() => setIsProjectFormOpen(false)}>
+                <Button variant="ghost" className="h-8 rounded-none px-3" onClick={() => setIsProjectFormOpen(false)}>
                   Cancel
                 </Button>
-                <Button className="h-8 rounded-lg px-3" onClick={handleCreateProject} disabled={isBusy || !projectNameDraft.trim()}>
+                <Button className="h-8 rounded-none px-3" onClick={handleCreateProject} disabled={isBusy || !projectNameDraft.trim()}>
                   Create
                 </Button>
               </div>
@@ -405,7 +405,7 @@ export function HistorySidebar({
         </div>
 
         {selectionMode || totalSelectedCount > 0 ? (
-          <section className="rounded-2xl border border-zinc-200/75 bg-white/80 p-3 dark:border-zinc-800/80 dark:bg-zinc-950/45">
+          <section className="border-t border-zinc-100 px-0 py-3 dark:border-zinc-800">
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500 dark:text-zinc-400">
@@ -418,14 +418,14 @@ export function HistorySidebar({
               <div className="flex items-center gap-2">
                 <Button
                   variant="ghost"
-                  className="h-8 rounded-lg px-3"
+                  className="h-8 rounded-none px-3"
                   onClick={clearSelection}
                 >
                   <X className="h-4 w-4" />
                   Clear
                 </Button>
                 <Button
-                  className="h-8 rounded-lg px-3"
+                  className="h-8 rounded-none px-3"
                   onClick={() => submitDeleteSelection([...selectedProjectIds], [...selectedSessionIds])}
                   disabled={isBusy || totalSelectedCount === 0}
                 >
@@ -439,7 +439,7 @@ export function HistorySidebar({
 
         <div className="minimal-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
           {projectGroups.length === 0 ? (
-            <p className="rounded-xl border border-dashed border-zinc-300/60 bg-zinc-50/40 p-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-900/30 dark:text-zinc-400">
+            <p className="border-t border-zinc-100 px-0 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
               No project sessions match the current filters.
             </p>
           ) : (
@@ -451,14 +451,14 @@ export function HistorySidebar({
                 <section
                   key={project.id}
                   className={cn(
-                    "overflow-hidden rounded-2xl border border-zinc-200/75 bg-white/70 dark:border-zinc-800/80 dark:bg-zinc-900/45",
-                    isProjectSelected && "border-blue-300/90 bg-blue-50/60 dark:border-blue-700/80 dark:bg-blue-950/20",
+                    "overflow-hidden border-t border-zinc-200/75 bg-white dark:border-zinc-800/80 dark:bg-zinc-950/35",
+                    isProjectSelected && "border-blue-300/90 bg-blue-50/30 dark:border-blue-700/80 dark:bg-blue-950/12",
                   )}
                 >
                   <div
                     role="button"
                     tabIndex={0}
-                    className="flex w-full items-start justify-between gap-3 px-3 py-3 text-left"
+                    className="flex w-full items-start justify-between gap-3 px-1 py-3 text-left"
                     onContextMenu={(event) => {
                       event.preventDefault();
                       openProjectContextMenu(project.id, event.clientX, event.clientY);
@@ -504,7 +504,7 @@ export function HistorySidebar({
                             event.stopPropagation();
                             toggleProjectExpansion(project.id, project.active);
                           }}
-                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-none text-zinc-500 transition-colors hover:text-zinc-800 dark:hover:text-zinc-100"
                           aria-label={isExpanded ? `Collapse project ${project.name}` : `Expand project ${project.name}`}
                         >
                           {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
@@ -529,7 +529,7 @@ export function HistorySidebar({
                           const rect = event.currentTarget.getBoundingClientRect();
                           openProjectContextMenu(project.id, rect.right - 196, rect.bottom + 6);
                         }}
-                        className="rounded-md p-1 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                        className="rounded-none p-1 text-zinc-400 transition-colors hover:text-zinc-700 dark:hover:text-zinc-200"
                         aria-label={`Open menu for project ${project.name}`}
                       >
                         <MoreVertical className="h-3.5 w-3.5" />
@@ -538,9 +538,9 @@ export function HistorySidebar({
                   </div>
 
                   {isExpanded ? (
-                    <div className="space-y-2 border-t border-zinc-200/70 px-3 py-3 dark:border-zinc-800/70">
+                    <div className="space-y-0 border-t border-zinc-200/70 px-0 py-1 dark:border-zinc-800/70">
                       {groupSessions.length === 0 ? (
-                        <p className="rounded-xl border border-dashed border-zinc-300/60 bg-zinc-50/40 p-3 text-sm text-zinc-500 dark:border-white/10 dark:bg-zinc-900/30 dark:text-zinc-400">
+                        <p className="px-1 py-3 text-sm text-zinc-500 dark:text-zinc-400">
                           No sessions in this project yet.
                         </p>
                       ) : (
@@ -586,11 +586,11 @@ export function HistorySidebar({
                                 }
                               }}
                               className={cn(
-                                "w-full rounded-2xl border px-3 py-3 text-left transition-all",
-                                "cursor-pointer focus:outline-none focus:ring-2 focus:ring-zinc-300 dark:focus:ring-zinc-700",
-                                "border-zinc-200/75 bg-zinc-50/70 hover:border-zinc-300/85 hover:bg-white/90 dark:border-zinc-800/80 dark:bg-zinc-950/35 dark:hover:border-zinc-700/85 dark:hover:bg-zinc-900/65",
-                                isActive && "border-zinc-300 bg-zinc-100 shadow-[0_10px_28px_-22px_rgba(15,23,42,0.7)] dark:border-zinc-700 dark:bg-zinc-800/65",
-                                isSessionSelected && "border-blue-300/90 bg-blue-50/70 dark:border-blue-700/80 dark:bg-blue-950/25",
+                                "w-full border-b px-4 py-3 text-left transition-colors",
+                                "cursor-pointer focus:outline-none focus:bg-zinc-50 dark:focus:bg-zinc-900/45",
+                                "border-zinc-100 bg-white hover:bg-zinc-50/70 dark:border-zinc-900 dark:bg-transparent dark:hover:bg-zinc-900/40",
+                                isActive && "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/55",
+                                isSessionSelected && "border-blue-200 bg-blue-50/40 dark:border-blue-800/70 dark:bg-blue-950/18",
                               )}
                             >
                               <div className="flex items-start justify-between gap-3">
@@ -635,7 +635,7 @@ export function HistorySidebar({
                                             cancelRenameSession();
                                           }
                                         }}
-                                        className="h-8 w-full rounded-lg border border-zinc-300 bg-white px-2 text-sm font-semibold text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-500"
+                                        className="h-8 w-full border-0 border-b border-zinc-300 bg-transparent px-0 text-sm font-semibold text-zinc-900 outline-none focus:border-zinc-500 dark:border-zinc-700 dark:text-zinc-100 dark:focus:border-zinc-500"
                                         placeholder="Rename session"
                                       />
                                     ) : showPendingSkeleton ? (

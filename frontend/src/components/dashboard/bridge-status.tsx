@@ -286,7 +286,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
   };
 
   return (
-    <section className="relative z-40 min-h-0 overflow-visible rounded-2xl border border-zinc-200/80 bg-white/65 p-4 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/45">
+    <section className="relative z-40 min-h-0 overflow-visible border-b border-zinc-100 pb-4 dark:border-zinc-800/80">
       <div className="mb-3 flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="relative flex h-2.5 w-2.5 items-center justify-center">
@@ -315,7 +315,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
               {isOnline && (
                 <button
                   onClick={onInfrastructureClick}
-                  className="inline-flex items-center gap-1 rounded bg-zinc-100/80 px-1.5 py-0.5 text-[10px] font-medium text-zinc-600 transition-colors hover:bg-zinc-200 dark:bg-zinc-800/80 dark:text-zinc-300 dark:hover:bg-zinc-700"
+                  className="inline-flex items-center gap-1 text-[10px] font-medium text-zinc-500 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
                   title="View Infrastructure"
                 >
                   <span className={cn("h-1.5 w-1.5 rounded-full", computerCount > 0 ? "bg-emerald-500" : "bg-rose-500")} />
@@ -335,7 +335,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
       </div>
 
       <div className="space-y-2 text-xs text-zinc-700 dark:text-zinc-200">
-        <div className="flex items-center gap-2 rounded-xl border border-zinc-200/80 bg-white/80 px-2.5 py-2 dark:border-zinc-700/80 dark:bg-zinc-800/65">
+        <div className="flex items-center gap-2 border-b border-zinc-100 px-0 py-2 dark:border-zinc-800/80">
           <CommandPaletteSelect
             value={activeProfileName}
             options={profileSelectOptions}
@@ -347,7 +347,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
             ariaLabel="Select AiiDA profile"
             searchable={profileSelectOptions.length > 6}
             className="min-w-0 flex-1"
-            triggerClassName="w-full justify-between rounded-lg px-1.5 py-1 text-[12px]"
+            triggerClassName="w-full justify-between rounded-none px-1.5 py-1 text-[12px]"
             onChange={(next) => {
               const cleanedNext = next.trim();
               if (!cleanedNext || cleanedNext === activeProfileName || switchProfileMutation.isPending || isProjectScopedProfile) {
@@ -359,7 +359,7 @@ export function BridgeStatus({ onInfrastructureClick, onSwitchProfileStart, onSw
           />
           <button
             onClick={() => setIsNewProfileDrawerOpen(true)}
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-transparent text-zinc-500 transition-colors enabled:hover:bg-zinc-100 enabled:hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:enabled:hover:bg-zinc-800 dark:enabled:hover:text-zinc-200"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-none border-0 text-zinc-500 transition-colors enabled:hover:bg-transparent enabled:hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:enabled:hover:bg-transparent dark:enabled:hover:text-zinc-200"
             title={isProjectScopedProfile ? "Profile management is available only in Worker Environment (Global)" : "Create New Profile"}
             disabled={isProjectScopedProfile}
           >

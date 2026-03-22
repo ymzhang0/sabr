@@ -3966,10 +3966,10 @@ export function SubmissionModal({
           }}
         />
       ) : null}
-      <section
+        <section
         className={cn(
           isInlineMode
-            ? "w-full rounded-2xl border border-slate-200/90 bg-white/95 p-4 dark:border-slate-800 dark:bg-slate-950/70"
+            ? "w-full bg-white p-4 dark:bg-slate-950"
             : "relative z-10 h-[80vh] w-full max-w-6xl overflow-y-auto overscroll-contain rounded-2xl border border-slate-200/90 bg-white/95 p-5 shadow-[0_24px_80px_rgba(15,23,42,0.35)] dark:border-slate-800 dark:bg-slate-950/95",
         )}
         style={MODAL_FONT_STYLE}
@@ -3984,7 +3984,7 @@ export function SubmissionModal({
           {validationSummary ? (
             <div
               className={cn(
-                "mb-3 rounded-xl border border-slate-100 bg-white px-3 py-2 text-xs shadow-[0_2px_10px_rgba(15,23,42,0.03)] dark:border-slate-800/90 dark:bg-slate-950/70",
+                "mb-3 border-t border-slate-100 px-0 py-2 text-xs dark:border-slate-800/90",
                 !hasValidationIssues
                   ? "text-emerald-700 dark:text-emerald-300"
                   : hasValidationBlockingError
@@ -4075,7 +4075,7 @@ export function SubmissionModal({
           <>
             {isBatchDraft ? (
               <div className="mt-4 space-y-4">
-                <div className="rounded-xl border border-slate-100 bg-white px-4 py-4 dark:border-slate-800/90 dark:bg-slate-950/60">
+                <div className="border-t border-slate-100 px-0 py-4 dark:border-slate-800/90">
                   <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                     <div>
                       <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400 dark:text-slate-500">
@@ -4108,7 +4108,7 @@ export function SubmissionModal({
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-100 bg-white dark:border-slate-800/90 dark:bg-slate-950/60">
+                <div className="border-t border-slate-100 dark:border-slate-800/90">
                   <div className="flex flex-col gap-1 border-b border-slate-200/80 px-4 py-3 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.13em] text-slate-500 dark:text-slate-400">

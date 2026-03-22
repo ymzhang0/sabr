@@ -160,18 +160,18 @@ export function WorkspaceExplorerSidebar({ project, onOpenFile }: WorkspaceExplo
     <aside className="flex h-full min-h-0 w-full flex-col">
       <Panel className="flex min-h-0 flex-1 flex-col gap-3 border-zinc-100/90 p-3 dark:border-zinc-800/80">
         {!project ? (
-          <div className="flex h-full min-h-0 items-center justify-center rounded-2xl border border-dashed border-zinc-300/70 bg-zinc-50/50 px-4 text-center text-sm text-zinc-500 dark:border-zinc-700/80 dark:bg-zinc-900/30 dark:text-zinc-400">
+          <div className="flex h-full min-h-0 items-center justify-center border-t border-zinc-100 px-1 py-6 text-center text-sm text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
             Open a project from the Projects view, then its workspace tree will stay here.
           </div>
         ) : (
           <>
             {rootError && !rootWorkspace ? (
-              <div className="space-y-3 rounded-2xl border border-dashed border-red-200/80 bg-red-50/70 p-4 text-sm text-red-700 dark:border-red-900/80 dark:bg-red-950/15 dark:text-red-300">
+              <div className="space-y-3 border-t border-red-200 px-0 py-3 text-sm text-red-700 dark:border-red-900/80 dark:text-red-300">
                 <p>{rootError}</p>
                 <div>
                   <Button
                     variant="ghost"
-                    className="h-8 rounded-lg px-3"
+                    className="h-8 rounded-none px-3"
                     onClick={() => {
                       refreshWorkspace();
                     }}

@@ -52,11 +52,11 @@ function QueueMetric({ label, value, tone = "default", compact = false }: QueueM
   return (
     <div
       className={cn(
-        "min-w-0 rounded-xl border",
+        "min-w-0 border-l border-zinc-100 pl-3 first:border-l-0 first:pl-0 dark:border-zinc-800",
         compact ? "px-2.5 py-2" : "px-3 py-2",
-        tone === "running" && "border-blue-200/80 bg-blue-50/80 dark:border-blue-900/70 dark:bg-blue-950/30",
-        tone === "warning" && "border-amber-200/80 bg-amber-50/80 dark:border-amber-900/70 dark:bg-amber-950/30",
-        tone === "default" && "border-zinc-200/80 bg-zinc-50/80 dark:border-zinc-800 dark:bg-zinc-900/60",
+        tone === "running" && "text-blue-600 dark:text-blue-300",
+        tone === "warning" && "text-amber-600 dark:text-amber-300",
+        tone === "default" && "text-zinc-600 dark:text-zinc-300",
       )}
     >
       <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500 dark:text-zinc-400">
@@ -135,14 +135,14 @@ export function ComputeHealthCard({ computerLabel, selectedProcess, compact = fa
   return (
     <div
       className={cn(
-        "min-w-0 overflow-hidden rounded-lg border border-zinc-200/80 bg-zinc-50/75 dark:border-zinc-800 dark:bg-zinc-900/50",
+        "min-w-0 overflow-hidden border-t border-zinc-100 pt-3 dark:border-zinc-800",
         compact ? "p-2.5" : "p-4",
       )}
     >
       <button
         type="button"
         onClick={() => setIsExpanded((open) => !open)}
-        className="flex w-full min-w-0 items-start justify-between gap-3 rounded-md text-left transition-colors hover:bg-white/40 dark:hover:bg-zinc-950/20"
+        className="flex w-full min-w-0 items-start justify-between gap-3 text-left transition-colors"
         aria-expanded={isExpanded}
       >
         <div className="min-w-0 flex items-start gap-2">
@@ -180,17 +180,17 @@ export function ComputeHealthCard({ computerLabel, selectedProcess, compact = fa
         <div className="mt-3 space-y-3">
 
           {hasWarning ? (
-            <div className="rounded-lg border border-amber-200/80 bg-amber-50/90 px-3 py-2 text-xs text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/35 dark:text-amber-200 break-words">
+            <div className="border-t border-amber-200 px-0 py-2 text-xs text-amber-800 dark:border-amber-900/70 dark:text-amber-200 break-words">
               {payload?.warning_message}
             </div>
           ) : null}
 
           {healthQuery.isPending ? (
-            <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+            <div className="py-3 text-sm text-zinc-500 dark:text-zinc-400">
               Sampling scheduler state...
             </div>
           ) : healthQuery.isError ? (
-            <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+            <div className="py-3 text-sm text-zinc-500 dark:text-zinc-400">
               Compute health is temporarily unavailable. The panel will retry automatically.
             </div>
           ) : payload ? (
@@ -208,23 +208,23 @@ export function ComputeHealthCard({ computerLabel, selectedProcess, compact = fa
 
               <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-zinc-500 dark:text-zinc-400">
                 {payload.computer_label ? (
-                  <span className="max-w-full truncate rounded-full border border-zinc-200/80 bg-zinc-50 px-2 py-1 dark:border-zinc-800 dark:bg-zinc-900/60">
+                  <span className="max-w-full truncate text-blue-500 dark:text-blue-300">
                     {payload.computer_label}
                   </span>
                 ) : null}
                 {payload.scheduler_type ? (
-                  <span className="rounded-full border border-zinc-200/80 bg-zinc-50 px-2 py-1 dark:border-zinc-800 dark:bg-zinc-900/60">
+                  <span>
                     {payload.scheduler_type}
                   </span>
                 ) : null}
                 {typeof queue?.total === "number" ? (
-                  <span className="rounded-full border border-zinc-200/80 bg-zinc-50 px-2 py-1 dark:border-zinc-800 dark:bg-zinc-900/60">
+                  <span>
                     {queue.total} active jobs
                   </span>
                 ) : null}
               </div>
 
-              <div className="min-w-0 rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-3 dark:border-zinc-800 dark:bg-zinc-900/60">
+              <div className="min-w-0 border-t border-zinc-100 px-0 py-3 dark:border-zinc-800">
                 <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
                   <Clock3 className="h-3.5 w-3.5" />
                   Estimated Completion
@@ -245,7 +245,7 @@ export function ComputeHealthCard({ computerLabel, selectedProcess, compact = fa
               </div>
             </div>
           ) : (
-            <div className="rounded-lg border border-zinc-200/80 bg-zinc-50/80 px-3 py-3 text-sm text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900/60 dark:text-zinc-400">
+            <div className="py-3 text-sm text-zinc-500 dark:text-zinc-400">
               No compute health data is available yet.
             </div>
           )}

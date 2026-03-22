@@ -1181,10 +1181,10 @@ function RecoveryPlanCard({ recovery }: { recovery: RecoveryPlanState }) {
   return (
     <section
       className={cn(
-        "mb-3 rounded-xl border px-3 py-2.5 text-xs",
+        "mb-3 border-t px-0 py-2.5 text-xs",
         isBlocked
-          ? "border-amber-200/90 bg-amber-50/85 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100"
-          : "border-sky-200/90 bg-sky-50/85 text-sky-950 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-100",
+          ? "border-amber-200/90 text-amber-950 dark:border-amber-900/60 dark:text-amber-100"
+          : "border-sky-200/90 text-sky-950 dark:border-sky-900/60 dark:text-sky-100",
       )}
     >
       <div className="flex items-center justify-between gap-2">
@@ -1193,10 +1193,10 @@ function RecoveryPlanCard({ recovery }: { recovery: RecoveryPlanState }) {
         </p>
         <span
           className={cn(
-            "rounded-full px-2 py-0.5 font-mono text-[10px]",
+            "font-mono text-[10px]",
             isBlocked
-              ? "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
-              : "bg-sky-100 text-sky-800 dark:bg-sky-900/40 dark:text-sky-200",
+              ? "text-amber-800 dark:text-amber-200"
+              : "text-sky-800 dark:text-sky-200",
           )}
         >
           {statusLabel}
@@ -1210,7 +1210,7 @@ function RecoveryPlanCard({ recovery }: { recovery: RecoveryPlanState }) {
           {missingPorts.map((port) => (
             <span
               key={`recovery-port-${port}`}
-              className="rounded-full border border-current/15 bg-white/65 px-2 py-0.5 font-mono text-[10px] dark:bg-zinc-950/25"
+              className="font-mono text-[10px] underline decoration-dotted underline-offset-2"
             >
               {port}
             </span>
@@ -1221,7 +1221,7 @@ function RecoveryPlanCard({ recovery }: { recovery: RecoveryPlanState }) {
       {issues.length > 0 ? (
         <div className="mt-2 space-y-1.5">
           {issues.slice(0, 4).map((issue, index) => (
-            <div key={`recovery-issue-${index}`} className="rounded-lg bg-white/55 px-2.5 py-2 dark:bg-zinc-950/20">
+            <div key={`recovery-issue-${index}`} className="border-b border-current/10 px-0 py-2 last:border-b-0">
               <p className="text-sm leading-5">{issue.message}</p>
               {(issue.port || issue.resourceDomain) ? (
                 <p className="mt-1 font-mono text-[10px] opacity-80">
@@ -1238,7 +1238,7 @@ function RecoveryPlanCard({ recovery }: { recovery: RecoveryPlanState }) {
       {recommendedActions.length > 0 ? (
         <div className="mt-2 space-y-1.5">
           {recommendedActions.map((item) => (
-            <div key={`recovery-action-${item.action}`} className="rounded-lg bg-white/55 px-2.5 py-2 dark:bg-zinc-950/20">
+            <div key={`recovery-action-${item.action}`} className="border-b border-current/10 px-0 py-2 last:border-b-0">
               <p className="font-mono text-[11px] font-semibold">{item.action}</p>
               {item.reason ? <p className="mt-1 leading-5">{item.reason}</p> : null}
               {item.toolHints.length > 0 ? (
@@ -1355,14 +1355,14 @@ function renderAssistantMessageContent(
           const shouldCollapse = lineCount > 8 || block.content.length > 280;
           const label = block.language === "python" ? "Python script" : `${block.language || "Code"} block`;
           const codeBody = (
-            <pre className="overflow-x-auto rounded-xl bg-zinc-950 px-3 py-3 text-xs leading-5 text-zinc-100">
+            <pre className="overflow-x-auto border-l border-zinc-200 pl-3 py-1 text-xs leading-5 text-zinc-700 dark:border-zinc-800 dark:text-zinc-200">
               <code>{block.content}</code>
             </pre>
           );
           return shouldCollapse ? (
             <details
               key={`assistant-block-${index}`}
-              className="rounded-xl border border-zinc-200/80 bg-white/80 px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950/70"
+              className="border-t border-zinc-100 px-0 py-2 dark:border-zinc-800"
             >
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500 dark:text-zinc-400">
                 <span>{label}</span>
@@ -2941,7 +2941,7 @@ export function ChatPanel({
                       {showAssistant ? (
                         <div
                           className={cn(
-                            "group relative rounded-2xl border bg-zinc-50/80 px-4 py-3 text-sm leading-6 text-zinc-800 transition-colors duration-200 dark:bg-zinc-900/60 dark:text-zinc-100",
+                            "group relative border-l border-zinc-100 pl-4 py-1 text-sm leading-6 text-zinc-800 transition-colors duration-200 dark:border-zinc-800 dark:text-zinc-100",
                             turn.assistantStatus === "error"
                               ? "border-rose-200/80 dark:border-rose-800/60"
                               : "border-zinc-200/80 dark:border-zinc-800",
@@ -2959,10 +2959,10 @@ export function ChatPanel({
                           {autoSavedScript ? (
                             <div
                               className={cn(
-                                "mt-3 flex items-center gap-2 rounded-lg border px-2.5 py-2 text-xs",
+                                "mt-3 flex items-center gap-2 border-t px-0 py-2 text-xs",
                                 autoSavedScript.status === "error"
-                                  ? "border-rose-200/80 bg-rose-50/70 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/20 dark:text-rose-300"
-                                  : "border-emerald-200/80 bg-emerald-50/70 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-300",
+                                  ? "border-rose-200/80 text-rose-700 dark:border-rose-900/60 dark:text-rose-300"
+                                  : "border-emerald-200/80 text-emerald-700 dark:border-emerald-900/60 dark:text-emerald-300",
                               )}
                             >
                               <Code2 className="h-3.5 w-3.5 shrink-0" />
@@ -3005,7 +3005,7 @@ export function ChatPanel({
                               onOpenDetail={onOpenDetail}
                             />
                           ) : null}
-                          <div className="pointer-events-none absolute -top-2 right-2 flex items-center gap-1 rounded-md border border-zinc-200/80 bg-white/95 px-1.5 py-1 opacity-0 shadow-sm transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 dark:border-zinc-700 dark:bg-zinc-950/95">
+                          <div className="pointer-events-none absolute -top-2 right-2 flex items-center gap-1 bg-white/95 px-1.5 py-1 opacity-0 transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 dark:bg-zinc-950/95">
                             <button
                               type="button"
                               className="inline-flex h-6 w-6 items-center justify-center rounded text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
@@ -3029,7 +3029,7 @@ export function ChatPanel({
                   </div>
                 ) : null}
                 {submittedPreview ? (
-                  <div className="ml-10 max-w-[86%] rounded-xl border border-emerald-200/80 bg-emerald-50/85 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-200">
+                  <div className="ml-10 max-w-[86%] border-t border-emerald-200/80 px-0 py-2 text-sm text-emerald-800 dark:border-emerald-900/50 dark:text-emerald-200">
                     <p className="font-medium">
                       {"🚀"} Job Submitted: {submittedPreview.processLabel}{" "}
                       {submittedPreview.processPks.length > 0 ? `(${submittedPreview.processPks.length} jobs)` : "(PK pending)"}

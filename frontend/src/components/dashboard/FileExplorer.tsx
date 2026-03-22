@@ -368,7 +368,7 @@ export function FileExplorer({
 
     if (data.length === 0) {
       return (
-        <div className="flex h-full min-h-[240px] items-center justify-center rounded-md border border-dashed border-slate-300/80 bg-slate-100/70 px-4 text-sm text-slate-500 dark:border-slate-700/80 dark:bg-black/10 dark:text-slate-400">
+        <div className="flex h-full min-h-[240px] items-center justify-center px-4 text-sm text-slate-500 dark:text-slate-400">
           {emptyState}
         </div>
       );
@@ -376,7 +376,7 @@ export function FileExplorer({
 
     if (deferredSearchValue.trim() && !hasVisibleMatches) {
       return (
-        <div className="flex h-full min-h-[240px] items-center justify-center rounded-md border border-dashed border-slate-300/80 bg-slate-100/70 px-4 text-sm text-slate-500 dark:border-slate-700/80 dark:bg-black/10 dark:text-slate-400">
+        <div className="flex h-full min-h-[240px] items-center justify-center px-4 text-sm text-slate-500 dark:text-slate-400">
           No files match "{deferredSearchValue}".
         </div>
       );
@@ -420,12 +420,12 @@ export function FileExplorer({
   return (
     <section
       className={cn(
-        "flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200/80 bg-slate-50/90 shadow-sm",
-        "dark:border-[#313131] dark:bg-[#1e1e1e]",
+        "flex h-full min-h-0 flex-col overflow-hidden bg-white",
+        "dark:bg-[#1b1b1b]",
         className,
       )}
     >
-      <header className="border-b border-slate-200/80 px-3 py-2 dark:border-[#313131]">
+      <header className="border-b border-slate-100 px-3 py-2 dark:border-[#313131]">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-[#8c8c8c]">
@@ -439,7 +439,7 @@ export function FileExplorer({
               type="button"
               variant="ghost"
               size="icon"
-              className="h-7 w-7 rounded-md text-slate-500 hover:bg-slate-200/70 dark:text-[#8c8c8c] dark:hover:bg-white/6"
+              className="h-7 w-7 rounded-none text-slate-500 hover:bg-transparent hover:text-slate-900 dark:text-[#8c8c8c] dark:hover:bg-transparent dark:hover:text-white"
               onClick={onRefresh}
               aria-label="Refresh file explorer"
             >
@@ -459,9 +459,9 @@ export function FileExplorer({
             value={searchValue}
             placeholder="Search files"
             className={cn(
-              "h-8 w-full rounded-md border border-slate-300/90 bg-white pl-8 pr-3 text-[13px] text-slate-800 outline-none transition",
-              "placeholder:text-slate-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30",
-              "dark:border-[#3c3c3c] dark:bg-[#252526] dark:text-[#cccccc] dark:placeholder:text-[#8c8c8c]",
+              "h-8 w-full border-0 border-b border-slate-200 bg-transparent pl-8 pr-3 text-[13px] text-slate-800 outline-none transition",
+              "placeholder:text-slate-400 focus:border-blue-500",
+              "dark:border-[#313131] dark:bg-transparent dark:text-[#cccccc] dark:placeholder:text-[#8c8c8c]",
             )}
             onChange={(event) => {
               const nextValue = event.target.value;

@@ -151,8 +151,8 @@ export function CodeViewer({ file, theme, onClose }: CodeViewerProps) {
     ) : null;
 
   return (
-    <section className="absolute inset-0 flex min-h-0 flex-col overflow-hidden bg-slate-50/95 dark:bg-[#1e1e1e]">
-      <header className="shrink-0 border-b border-slate-200/80 bg-white/90 px-4 py-3 backdrop-blur dark:border-[#313131] dark:bg-[#252526]/95">
+    <section className="absolute inset-0 flex min-h-0 flex-col overflow-hidden bg-white dark:bg-[#1e1e1e]">
+      <header className="shrink-0 border-b border-slate-200/80 bg-white px-4 py-3 dark:border-[#313131] dark:bg-[#252526]">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-1 text-[11px] text-slate-500 dark:text-[#8c8c8c]">

@@ -112,6 +112,11 @@ function parseNullableFloat(value: string): number | null {
     return Number.isFinite(parsed) ? parsed : null;
 }
 
+const flatFieldClassName =
+    "w-full border-0 border-b border-zinc-200 bg-transparent px-0 py-2 text-sm text-zinc-700 outline-none transition focus:border-blue-500 dark:border-zinc-800 dark:bg-transparent dark:text-zinc-200";
+
+const flatMonoFieldClassName = `${flatFieldClassName} font-mono`;
+
 function BooleanSelectField({
     label,
     value,
@@ -127,7 +132,7 @@ function BooleanSelectField({
             <select
                 value={nullableBooleanValue(value)}
                 onChange={(event) => onChange(parseNullableBoolean(event.target.value))}
-                className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all text-zinc-600 dark:text-zinc-400"
+                className={flatFieldClassName}
             >
                 <option value="">Use Default</option>
                 <option value="true">Yes</option>
@@ -515,10 +520,10 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200">
-            <div className="bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-[28px] shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="bg-white dark:bg-zinc-950 shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
                 <header className="px-6 py-5 border-b border-zinc-100 dark:border-zinc-900 flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <div className="p-2 bg-slate-100 dark:bg-zinc-900 rounded-2xl">
+                        <div className="p-2 text-zinc-600 dark:text-zinc-400">
                             <Plus className="h-5 w-5 text-zinc-600 dark:text-zinc-400" />
                         </div>
                         <div>
@@ -531,13 +536,13 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                     </Button>
                 </header>
 
-                <div className="flex-1 overflow-y-auto p-6 space-y-6">
-                    <div className="flex gap-2 p-1 bg-zinc-100 dark:bg-zinc-900 rounded-xl">
+                <div className="flex-1 overflow-y-auto p-6 space-y-6 [&_input]:border-0 [&_input]:border-b [&_input]:border-zinc-200 [&_input]:bg-transparent [&_input]:px-0 [&_input]:text-zinc-700 [&_input]:shadow-none [&_input]:outline-none [&_input]:focus:border-blue-500 dark:[&_input]:border-zinc-800 dark:[&_input]:bg-transparent dark:[&_input]:text-zinc-200 [&_select]:border-0 [&_select]:border-b [&_select]:border-zinc-200 [&_select]:bg-transparent [&_select]:px-0 [&_select]:text-zinc-700 [&_select]:outline-none [&_select]:focus:border-blue-500 dark:[&_select]:border-zinc-800 dark:[&_select]:bg-transparent dark:[&_select]:text-zinc-200 [&_textarea]:border-0 [&_textarea]:border-b [&_textarea]:border-zinc-200 [&_textarea]:bg-transparent [&_textarea]:px-0 [&_textarea]:text-zinc-700 [&_textarea]:outline-none [&_textarea]:focus:border-blue-500 dark:[&_textarea]:border-zinc-800 dark:[&_textarea]:bg-transparent dark:[&_textarea]:text-zinc-200">
+                    <div className="flex gap-6 border-b border-zinc-100 pb-2 dark:border-zinc-800">
                         <button
                             onClick={() => setActiveTab("paste")}
                             className={cn(
-                                "flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-lg transition-all",
-                                activeTab === "paste" ? "bg-white dark:bg-zinc-800 shadow-sm" : "text-zinc-500"
+                                "flex items-center justify-center gap-2 border-b py-2 text-sm font-medium transition-all",
+                                activeTab === "paste" ? "border-blue-500 text-zinc-900 dark:text-zinc-100" : "border-transparent text-zinc-500"
                             )}
                         >
                             <Terminal className="h-4 w-4" />
@@ -546,8 +551,8 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                         <button
                             onClick={() => setActiveTab("form")}
                             className={cn(
-                                "flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-lg transition-all",
-                                activeTab === "form" ? "bg-white dark:bg-zinc-800 shadow-sm" : "text-zinc-500"
+                                "flex items-center justify-center gap-2 border-b py-2 text-sm font-medium transition-all",
+                                activeTab === "form" ? "border-blue-500 text-zinc-900 dark:text-zinc-100" : "border-transparent text-zinc-500"
                             )}
                         >
                             <Settings2 className="h-4 w-4" />
@@ -562,7 +567,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                     value={pasteText}
                                     onChange={(e) => setPasteText(e.target.value)}
                                     placeholder="Paste an SSH command, YAML snippet, or describe your computer..."
-                                    className="w-full h-48 bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-xl p-4 text-sm font-mono focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all resize-none"
+                                    className="w-full h-48 border-0 border-b border-zinc-200 bg-transparent px-0 py-3 text-sm font-mono focus:border-blue-500 outline-none transition-all resize-none dark:border-zinc-800 dark:bg-transparent"
                                 />
                                 <div className="absolute top-4 right-4 text-zinc-400 group-hover:text-blue-500 transition-colors">
                                     <Upload className="h-5 w-5" />
@@ -592,7 +597,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                 />
                             </div>
 
-                            <div className="bg-blue-50/50 dark:bg-blue-900/20 border border-blue-100/50 dark:border-blue-900/30 rounded-xl p-4 flex gap-3">
+                            <div className="border-t border-blue-100 pt-4 dark:border-blue-900/30 flex gap-3">
                                 <Wand2 className="h-5 w-5 text-blue-500 shrink-0" />
                                 <div className="space-y-1 text-sm text-blue-700 dark:text-blue-300">
                                     <p>
@@ -608,7 +613,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
 
                             <Button
                                 onClick={handleParse}
-                                className="w-full h-12 bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-800 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-xl font-semibold gap-2"
+                                className="w-full h-12 bg-zinc-900 dark:bg-zinc-100 hover:bg-zinc-800 dark:hover:bg-zinc-200 text-white dark:text-zinc-900 rounded-none font-semibold gap-2"
                                 disabled={isParsing || (!pasteText.trim() && !selectedSshHost)}
                             >
                                 {isParsing ? <Loader2 className="h-5 w-5 animate-spin" /> : <Wand2 className="h-5 w-5" />}
@@ -619,7 +624,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                         <div className="space-y-6 animate-in slide-in-from-right-2 duration-300">
                                 <div className="space-y-6">
                                     {parseResult.preset_matched && (
-                                        <div className="rounded-2xl bg-emerald-50/90 p-4 dark:bg-emerald-950/30 animate-in fade-in zoom-in-95">
+                                        <div className="border-t border-emerald-200 pt-4 dark:border-emerald-900/30 animate-in fade-in zoom-in-95">
                                           <div className="flex gap-3">
                                             <Sparkles className="h-5 w-5 text-emerald-600 dark:text-emerald-400 shrink-0" />
                                             <div>
@@ -632,7 +637,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                         </div>
                                     )}
                                     {parseResult.computer && (
-                                        <div className="rounded-2xl bg-slate-50/90 p-5 dark:bg-zinc-900/40 space-y-5">
+                                        <div className="space-y-5 border-t border-zinc-100 pt-5 dark:border-zinc-800">
                                             <div className="flex items-center gap-2 text-zinc-500">
                                                 <Cpu className="h-4 w-4" />
                                                 <span className="text-xs font-bold uppercase tracking-wider">Computer Setup</span>
@@ -649,7 +654,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                             <input
                                                                 value={parseResult.computer.label || ""}
                                                                 onChange={(e) => updateComputer({ label: e.target.value })}
-                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                                className={flatFieldClassName}
                                                             />
                                                         </div>
                                                         <div className="space-y-1.5">
@@ -682,7 +687,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                             <select
                                                                 value={selectedTransport}
                                                                 onChange={(e) => handleTransportChange(e.target.value)}
-                                                                className="w-full bg-white dark:bg-zinc-800 border-none rounded-xl px-3.5 py-2.5 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none transition-all"
+                                                                className={flatMonoFieldClassName}
                                                             >
                                                                 {availableTransports.map((transport) => (
                                                                     <option key={transport} value={transport}>{transport}</option>
@@ -726,7 +731,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                                 />
                                                             </div>
                                                         ) : (
-                                                            <div className="col-span-2 rounded-xl bg-white/80 px-3.5 py-3 text-xs text-zinc-500 dark:bg-zinc-950/80 dark:text-zinc-400">
+                                                            <div className="col-span-2 border-t border-zinc-100 py-3 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
                                                                 Local transport does not require remote SSH authentication fields.
                                                             </div>
                                                         )}
@@ -735,7 +740,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                             </div>
 
                                             {isAsyncTransport && (
-                                                <div className="rounded-xl bg-amber-50/90 px-3.5 py-3 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                                                <div className="border-t border-amber-200 py-3 text-xs text-amber-800 dark:border-amber-900/40 dark:text-amber-300">
                                                     <span className="font-semibold">core.ssh_async</span> follows the AiiDA async SSH configure model: <code className="font-mono">Host</code> must match an entry in <code className="font-mono">~/.ssh/config</code>, and sync-only fields like <code className="font-mono">username</code>, <code className="font-mono">port</code>, or <code className="font-mono">proxy_jump</code> do not apply.
                                                 </div>
                                             )}
@@ -892,7 +897,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                             )}
                                                         </>
                                                     ) : (
-                                                        <div className="col-span-1 rounded-lg border border-dashed border-zinc-200 dark:border-zinc-800 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                                                        <div className="col-span-1 border-t border-dashed border-zinc-200 px-0 py-2 text-xs text-zinc-500 dark:border-zinc-800 dark:text-zinc-400">
                                                             No additional transport-specific authentication fields are required for <code className="font-mono">core.local</code>.
                                                         </div>
                                                     )}
@@ -900,10 +905,10 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                         type="button"
                                                         onClick={() => updateComputer({ use_double_quotes: !parseResult.computer?.use_double_quotes })}
                                                         className={cn(
-                                                            "flex items-center justify-between rounded-lg border px-3 py-2 text-sm transition-colors",
+                                                            "flex items-center justify-between border-b px-0 py-2 text-sm transition-colors",
                                                             parseResult.computer.use_double_quotes
-                                                                ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-800 dark:bg-blue-950/40 dark:text-blue-300"
-                                                                : "border-zinc-200 bg-white text-zinc-600 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300",
+                                                                ? "border-blue-500 text-blue-700 dark:border-blue-500 dark:text-blue-300"
+                                                                : "border-zinc-200 text-zinc-600 dark:border-zinc-800 dark:text-zinc-300",
                                                         )}
                                                     >
                                                         <span className="text-[11px] font-semibold uppercase tracking-wider">Use Double Quotes</span>
@@ -913,10 +918,10 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                         type="button"
                                                         onClick={() => updateComputer({ use_login_shell: parseResult.computer?.use_login_shell === false })}
                                                         className={cn(
-                                                            "flex items-center justify-between rounded-lg border px-3 py-2 text-sm transition-colors",
+                                                            "flex items-center justify-between border-b px-0 py-2 text-sm transition-colors",
                                                             parseResult.computer.use_login_shell !== false
-                                                                ? "border-zinc-200 bg-white text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200"
-                                                                : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-300",
+                                                                ? "border-zinc-200 text-zinc-700 dark:border-zinc-800 dark:text-zinc-200"
+                                                                : "border-amber-200 text-amber-700 dark:border-amber-800 dark:text-amber-300",
                                                         )}
                                                     >
                                                         <span className="text-[11px] font-semibold uppercase tracking-wider">Use Login Shell</span>
@@ -924,11 +929,11 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     </button>
                                                     <div className="space-y-1 col-span-2">
                                                         <label className="text-[10px] uppercase font-bold text-zinc-400">Prepend Text</label>
-                                                        <textarea value={parseResult.computer.prepend_text || ""} onChange={(e) => updateComputer({ prepend_text: e.target.value })} className="w-full h-24 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono whitespace-pre text-zinc-600 dark:text-zinc-400" />
+                                                        <textarea value={parseResult.computer.prepend_text || ""} onChange={(e) => updateComputer({ prepend_text: e.target.value })} className={`${flatMonoFieldClassName} h-24 whitespace-pre`} />
                                                     </div>
                                                     <div className="space-y-1 col-span-2">
                                                         <label className="text-[10px] uppercase font-bold text-zinc-400">Append Text</label>
-                                                        <textarea value={parseResult.computer.append_text || ""} onChange={(e) => updateComputer({ append_text: e.target.value })} className="w-full h-24 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none transition-all font-mono whitespace-pre text-zinc-600 dark:text-zinc-400" />
+                                                        <textarea value={parseResult.computer.append_text || ""} onChange={(e) => updateComputer({ append_text: e.target.value })} className={`${flatMonoFieldClassName} h-24 whitespace-pre`} />
                                                     </div>
                                                 </div>
                                             )}
@@ -936,7 +941,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                     )}
 
                                     {parseResult.code && Object.keys(parseResult.code).length > 0 && (
-                                        <div className="rounded-2xl bg-slate-50/90 p-5 dark:bg-zinc-900/40 space-y-4">
+                                        <div className="space-y-4 border-t border-zinc-100 pt-5 dark:border-zinc-800">
                                             <div className="flex items-center gap-2 text-zinc-500">
                                                 <Code2 className="h-4 w-4" />
                                                 <span className="text-xs font-bold uppercase tracking-wider">Code Defaults</span>
@@ -947,7 +952,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <input
                                                         value={parseResult.code.default_calc_job_plugin || ""}
                                                         onChange={(e) => updateCode({ default_calc_job_plugin: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                        className={flatMonoFieldClassName}
                                                     />
                                                 </div>
                                                 <div className="space-y-1">
@@ -955,7 +960,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <input
                                                         value={parseResult.code.label || ""}
                                                         onChange={(e) => updateCode({ label: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-100 outline-none"
+                                                        className={flatFieldClassName}
                                                         placeholder="e.g., pw"
                                                     />
                                                 </div>
@@ -964,7 +969,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <input
                                                         value={parseResult.code.remote_abspath || ""}
                                                         onChange={(e) => updateCode({ remote_abspath: e.target.value })}
-                                                        className="w-full bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                        className={flatMonoFieldClassName}
                                                     />
                                                 </div>
                                                 <div className="col-span-2 space-y-1">
@@ -972,7 +977,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <textarea
                                                         value={parseResult.code.prepend_text || ""}
                                                         onChange={(e) => updateCode({ prepend_text: e.target.value })}
-                                                        className="w-full h-20 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                        className={`${flatMonoFieldClassName} h-20`}
                                                     />
                                                 </div>
                                                 <div className="col-span-2 space-y-1">
@@ -980,7 +985,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                                                     <textarea
                                                         value={parseResult.code.append_text || ""}
                                                         onChange={(e) => updateCode({ append_text: e.target.value })}
-                                                        className="w-full h-20 bg-white dark:bg-zinc-800 border-none rounded-lg px-3 py-2 text-sm font-mono focus:ring-2 focus:ring-blue-100 outline-none"
+                                                        className={`${flatMonoFieldClassName} h-20`}
                                                     />
                                                 </div>
                                             </div>
@@ -991,7 +996,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                     )}
 
                     {error && (
-                        <div className="p-3 bg-rose-50 dark:bg-rose-900/20 border border-rose-100 dark:border-rose-900/30 rounded-xl flex gap-x-2 text-rose-600 dark:text-rose-400 text-sm">
+                        <div className="border-t border-rose-200 pt-3 flex gap-x-2 text-rose-600 dark:border-rose-900/30 dark:text-rose-400 text-sm">
                             <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
                             {error}
                         </div>
@@ -1003,7 +1008,7 @@ export function QuickAddModal({ isOpen, onClose, onSuccess }: QuickAddModalProps
                     <Button
                         disabled={!parseResult || isSubmitting}
                         onClick={handleSubmit}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl px-6 gap-2"
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white rounded-none px-6 gap-2"
                     >
                         {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                         Test Connection & Save

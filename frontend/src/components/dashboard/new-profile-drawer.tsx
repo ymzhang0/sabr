@@ -107,15 +107,15 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
             {/* Drawer */}
             <aside
                 className="absolute top-0 left-[calc(100%+16px)] z-[100] flex flex-col w-[420px] 
-                bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 
-                rounded-2xl shadow-2xl overflow-hidden
+                bg-white dark:bg-zinc-950 border-0
+                shadow-2xl overflow-hidden
                 /* Dynamic height logic: adaptive height, but capped at screen height minus margins */
                 h-auto max-h-[calc(100vh-100px)] 
                 animate-in slide-in-from-left duration-300"
             >
                 <header className="flex-none px-6 py-4 border-b border-zinc-100 dark:border-zinc-900 flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                        <div className="p-2 bg-zinc-100 dark:bg-zinc-900 rounded-lg">
+                        <div className="p-2 text-zinc-600 dark:text-zinc-400">
                             <Database className="h-5 w-5 text-zinc-600 dark:text-zinc-400" />
                         </div>
                         <h2 className="text-lg font-semibold tracking-tight dark:text-zinc-100">Create New Profile</h2>
@@ -141,12 +141,12 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                                 setForm({ ...form, profile_name: val, filepath: `~/.aiida/storage/${val}` });
                             }}
                             disabled={isSubmitting}
-                            className="w-full bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-2.5 py-1.5 text-sm font-semibold focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all dark:text-zinc-200"
+                            className="w-full border-0 border-b border-zinc-200 bg-transparent px-0 py-1.5 text-sm font-semibold focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-transparent dark:text-zinc-200"
                         />
                     </div>
 
                     <div className="flex flex-col gap-3.5">
-                        <div className="p-3 bg-zinc-50 dark:bg-zinc-900/30 rounded-xl border border-zinc-200 dark:border-zinc-800 space-y-3">
+                        <div className="space-y-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
                             <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-1.5 text-zinc-500 dark:text-zinc-400">
                                     <User className="h-3.5 w-3.5" />
@@ -162,7 +162,7 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                                         value={form.first_name}
                                         onChange={(e) => setForm({ ...form, first_name: e.target.value })}
                                         disabled={isSubmitting}
-                                        className="w-full bg-white dark:bg-zinc-800 border border-zinc-200/50 dark:border-zinc-700/50 rounded-lg px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900 outline-none transition-all dark:text-zinc-200"
+                                        className="w-full border-0 border-b border-zinc-200/50 bg-transparent px-0 py-1.5 text-xs focus:border-blue-500 focus:outline-none dark:border-zinc-700/50 dark:bg-transparent dark:text-zinc-200"
                                     />
                                 </div>
                                 <div className="space-y-1">
@@ -171,7 +171,7 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                                         value={form.last_name}
                                         onChange={(e) => setForm({ ...form, last_name: e.target.value })}
                                         disabled={isSubmitting}
-                                        className="w-full bg-white dark:bg-zinc-800 border border-zinc-200/50 dark:border-zinc-700/50 rounded-lg px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900 outline-none transition-all dark:text-zinc-200"
+                                        className="w-full border-0 border-b border-zinc-200/50 bg-transparent px-0 py-1.5 text-xs focus:border-blue-500 focus:outline-none dark:border-zinc-700/50 dark:bg-transparent dark:text-zinc-200"
                                     />
                                 </div>
                                 <div className="space-y-1">
@@ -181,7 +181,7 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                                         value={form.email}
                                         onChange={(e) => setForm({ ...form, email: e.target.value })}
                                         disabled={isSubmitting}
-                                        className="w-full bg-white dark:bg-zinc-800 border border-zinc-200/50 dark:border-zinc-700/50 rounded-lg px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900 outline-none transition-all dark:text-zinc-200"
+                                        className="w-full border-0 border-b border-zinc-200/50 bg-transparent px-0 py-1.5 text-xs focus:border-blue-500 focus:outline-none dark:border-zinc-700/50 dark:bg-transparent dark:text-zinc-200"
                                     />
                                 </div>
                                 <div className="space-y-1">
@@ -190,7 +190,7 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                                         value={form.institution}
                                         onChange={(e) => setForm({ ...form, institution: e.target.value })}
                                         disabled={isSubmitting}
-                                        className="w-full bg-white dark:bg-zinc-800 border border-zinc-200/50 dark:border-zinc-700/50 rounded-lg px-2.5 py-1.5 text-xs focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900 outline-none transition-all dark:text-zinc-200"
+                                        className="w-full border-0 border-b border-zinc-200/50 bg-transparent px-0 py-1.5 text-xs focus:border-blue-500 focus:outline-none dark:border-zinc-700/50 dark:bg-transparent dark:text-zinc-200"
                                     />
                                 </div>
                             </div>
@@ -204,7 +204,7 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                                 disabled={isSubmitting}
                                 ariaLabel="Select backend database"
                                 className="w-full"
-                                triggerClassName="flex w-full items-center justify-between rounded-lg px-1.5 py-1.5 text-xs"
+                                triggerClassName="flex w-full items-center justify-between rounded-none px-0 py-1.5 text-xs"
                                 onChange={(backend) => setForm({ ...form, backend })}
                             />
                         </div>
@@ -216,7 +216,7 @@ export function NewProfileDrawer({ isOpen, onClose, onSuccess }: NewProfileDrawe
                                 onChange={(e) => setForm({ ...form, filepath: e.target.value })}
                                 disabled={isSubmitting}
                                 placeholder="~/.aiida/storage/..."
-                                className="w-full bg-zinc-50 dark:bg-zinc-900/50 border border-zinc-200 dark:border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs font-mono text-zinc-600 dark:text-zinc-400 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all block"
+                                className="w-full border-0 border-b border-zinc-200 bg-transparent px-0 py-1.5 text-xs font-mono text-zinc-600 focus:border-blue-500 focus:outline-none dark:border-zinc-800 dark:bg-transparent dark:text-zinc-400 block"
                             />
                         </div>
 

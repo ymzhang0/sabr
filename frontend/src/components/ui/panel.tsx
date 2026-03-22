@@ -6,7 +6,7 @@ export function Panel({ children, className }: PropsWithChildren<{ className?: s
   return (
     <section
       className={cn(
-        "rounded-2xl border border-white/50 bg-white/70 p-4 shadow-glass backdrop-blur-xl dark:border-white/10 dark:bg-zinc-950/45",
+        "border-0 bg-white p-4 shadow-none dark:bg-zinc-950/45",
         className,
       )}
     >

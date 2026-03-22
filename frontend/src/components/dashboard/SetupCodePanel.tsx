@@ -49,7 +49,7 @@ type CodeFormState = {
 };
 
 const baseInputClassName =
-  "w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 shadow-sm shadow-slate-200/40 outline-none transition focus:border-blue-400 focus:ring-4 focus:ring-blue-100 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100 dark:shadow-none dark:focus:border-blue-500 dark:focus:ring-blue-950/40";
+  "w-full border-0 border-b border-slate-200 bg-transparent px-0 py-2.5 text-sm text-slate-700 outline-none transition focus:border-blue-500 dark:border-zinc-800 dark:bg-transparent dark:text-zinc-100 dark:focus:border-blue-500";
 
 const baseTextareaClassName =
   `${baseInputClassName} min-h-[108px] resize-none font-mono text-[13px] leading-5`;
@@ -112,10 +112,10 @@ function ToolButton({
       onClick={onClick}
       disabled={disabled}
       className={cn(
-        "inline-flex h-9 items-center gap-2 rounded-full px-3 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50",
+        "inline-flex h-9 items-center gap-2 border-b px-0 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50",
         active
-          ? "bg-slate-900 text-white shadow-sm dark:bg-slate-100 dark:text-slate-900"
-          : "bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800",
+          ? "border-slate-900 text-slate-900 dark:border-slate-100 dark:text-slate-100"
+          : "border-transparent text-slate-500 hover:text-slate-900 dark:text-zinc-300 dark:hover:text-zinc-100",
       )}
     >
       <Icon className="h-3.5 w-3.5" />
@@ -175,7 +175,7 @@ function SectionBlock({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-2xl bg-slate-50/90 px-4 py-4 dark:bg-zinc-900/50">
+    <section className="border-t border-slate-100 px-0 py-4 dark:border-zinc-800">
       <div className="mb-4 space-y-1">
         <h3 className="text-sm font-semibold text-slate-900 dark:text-zinc-100">{title}</h3>
         <p className="text-xs leading-5 text-slate-500 dark:text-zinc-400">{description}</p>
@@ -201,10 +201,10 @@ function ToggleTile({
       type="button"
       onClick={onToggle}
       className={cn(
-        "flex items-start justify-between rounded-xl border px-3.5 py-3 text-left transition",
+        "flex items-start justify-between border-b px-0 py-3 text-left transition",
         value
-          ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-200"
-          : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:hover:border-zinc-700",
+          ? "border-blue-500 text-blue-700 dark:border-blue-500 dark:text-blue-200"
+          : "border-slate-200 text-slate-600 hover:border-slate-300 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-700",
       )}
     >
       <div className="space-y-1">
@@ -213,11 +213,11 @@ function ToggleTile({
       </div>
       <span
         className={cn(
-          "mt-0.5 inline-flex h-5 min-w-10 items-center rounded-full px-1 transition",
-          value ? "bg-blue-600 justify-end dark:bg-blue-500" : "bg-slate-200 justify-start dark:bg-zinc-700",
+          "mt-0.5 inline-flex h-5 min-w-10 items-center border-b px-1 transition",
+          value ? "justify-end border-blue-500" : "justify-start border-slate-200 dark:border-zinc-700",
         )}
       >
-        <span className="h-3.5 w-3.5 rounded-full bg-white shadow-sm" />
+        <span className="h-3.5 w-3.5 rounded-full bg-current opacity-80" />
       </span>
     </button>
   );
@@ -406,7 +406,7 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
   }
 
   return (
-    <section className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-2xl dark:border-zinc-800 dark:bg-zinc-950">
+    <section className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden bg-white shadow-2xl dark:bg-zinc-950">
       <header className="border-b border-slate-200 px-6 py-6 dark:border-zinc-800">
         <div className="flex items-center justify-between gap-3">
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-zinc-500">
@@ -432,14 +432,14 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
                 setShowTemplatePicker(false);
               }}
             />
-            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-full" onClick={onClose}>
+            <Button variant="ghost" size="icon" className="h-9 w-9 rounded-none" onClick={onClose}>
               <X className="h-4 w-4" />
             </Button>
           </div>
         </div>
 
         <div className="mt-5 flex items-center gap-3">
-          <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-100 text-slate-700 dark:bg-zinc-900 dark:text-zinc-200">
+          <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center text-slate-700 dark:text-zinc-200">
             <Plus className="h-5 w-5" />
           </div>
           <h2 className="text-[28px] font-semibold leading-8 tracking-tight text-slate-950 dark:text-zinc-50">Setup Code</h2>
@@ -452,7 +452,7 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
         </div>
 
         {showTemplatePicker || showYamlInput ? (
-          <div className="mt-5 grid gap-3 rounded-2xl bg-slate-50 p-4 dark:bg-zinc-900/70">
+          <div className="mt-5 grid gap-3 border-t border-slate-100 pt-4 dark:border-zinc-800">
             {showTemplatePicker ? (
               <div className="space-y-2">
                 <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-slate-500 dark:text-zinc-400">
@@ -466,7 +466,7 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
                   ariaLabel="Select code template"
                   searchable={templates.length > 5}
                   className="w-full"
-                  triggerClassName="flex w-full items-center justify-between rounded-xl px-3 py-2.5 text-sm"
+                  triggerClassName="flex w-full items-center justify-between rounded-none px-0 py-2.5 text-sm"
                   onChange={handleTemplateChange}
                 />
                 <p className="text-xs text-slate-500 dark:text-zinc-400">
@@ -485,13 +485,13 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
                   value={yamlInput}
                   onChange={(event) => setYamlInput(event.target.value)}
                   placeholder={"label: qe-750-ph\ndefault_calc_job_plugin: quantumespresso.ph\nfilepath_executable: /path/to/ph.x\nprepend_text: |\n  module load EasyBuild\n  module load Cray"}
-                  className={`${baseTextareaClassName} min-h-[136px] bg-slate-950 text-slate-100 placeholder:text-slate-500 dark:border-zinc-700`}
+                  className={`${baseTextareaClassName} min-h-[136px] bg-slate-950 px-3 py-3 text-slate-100 placeholder:text-slate-500 dark:border-zinc-700`}
                 />
                 <div className="flex items-center justify-end gap-2">
-                  <Button variant="ghost" size="sm" className="h-9 rounded-full px-4" onClick={() => setShowYamlInput(false)}>
+                  <Button variant="ghost" size="sm" className="h-9 rounded-none px-4" onClick={() => setShowYamlInput(false)}>
                     Close
                   </Button>
-                  <Button size="sm" className="h-9 rounded-full px-4" onClick={handleApplyYaml}>
+                  <Button size="sm" className="h-9 rounded-none px-4" onClick={handleApplyYaml}>
                     <Wand2 className="h-3.5 w-3.5" />
                     Apply Import
                   </Button>
@@ -539,7 +539,7 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
             <SectionBlock title="Technical" description="Bind this code to the computer, plugin, and executable location.">
               <div>
                 <FieldLabel label="Computer" />
-                <div className={`${baseInputClassName} flex items-center gap-2 bg-slate-100 text-slate-500 dark:bg-zinc-900 dark:text-zinc-400`}>
+                <div className={`${baseInputClassName} flex items-center gap-2 text-slate-500 dark:text-zinc-400`}>
                   <Terminal className="h-4 w-4" />
                   <span>{computerLabel}</span>
                 </div>
@@ -578,7 +578,7 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
               </div>
             </SectionBlock>
 
-            <section className="overflow-hidden rounded-2xl bg-slate-50/90 dark:bg-zinc-900/50">
+            <section className="overflow-hidden border-t border-slate-100 dark:border-zinc-800">
               <button
                 type="button"
                 onClick={() => setIsAdvancedOpen((current) => !current)}
@@ -602,7 +602,7 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
               </button>
 
               {isAdvancedOpen ? (
-                <div className="border-t border-slate-200 px-4 py-4 dark:border-zinc-800">
+                <div className="border-t border-slate-200 px-0 py-4 dark:border-zinc-800">
                   <div className="grid grid-cols-1 gap-x-4 gap-y-5 md:grid-cols-2">
                     <ToggleTile
                       label="Use MPI"
@@ -642,13 +642,13 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
             </section>
 
             {error ? (
-              <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
+              <div className="border-t border-rose-200 px-0 py-3 text-sm text-rose-700 dark:border-rose-900/50 dark:text-rose-300">
                 {error}
               </div>
             ) : null}
 
             {success ? (
-              <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/30 dark:text-emerald-300">
+              <div className="border-t border-emerald-200 px-0 py-3 text-sm text-emerald-700 dark:border-emerald-900/50 dark:text-emerald-300">
                 {success}
               </div>
             ) : null}
@@ -656,10 +656,10 @@ export function SetupCodePanel({ computerLabel, onClose, onSuccess }: SetupCodeP
         </div>
 
         <footer className="sticky bottom-0 flex items-center justify-end gap-3 border-t border-slate-200 bg-white/95 px-6 py-4 backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95">
-          <Button variant="ghost" onClick={onClose} disabled={isLoading} className="rounded-full px-4">
+          <Button variant="ghost" onClick={onClose} disabled={isLoading} className="rounded-none px-4">
             Cancel
           </Button>
-          <Button type="submit" disabled={isLoading} className="rounded-full bg-blue-600 px-5 text-white hover:bg-blue-700">
+          <Button type="submit" disabled={isLoading} className="rounded-none bg-blue-600 px-5 text-white hover:bg-blue-700">
             {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
             Save Code
           </Button>
